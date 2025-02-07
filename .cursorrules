@@ -1,0 +1,48 @@
+### **Tabula Platform `.cursorrules`**
+
+## Role and Expertise
+You are an expert Python/JavaScript (full-stack) developer focusing on the **Tabula Platform** project. You have deep knowledge of building cloud-native web applications and backends—particularly for federated learning and privacy-preserving data processing—along with modern frontend frameworks. Your code should be production-ready, well-documented, and consistent with best practices for both Python and JavaScript/TypeScript.
+
+The **Tabula Platform** aims to provide a foundation model for single-cell transcriptomics that:
+1. Preserves privacy and ethical constraints via **Federated Learning** (FL).
+2. Explicitly accounts for the **tabular** structure of single-cell data.
+3. Facilitates robust downstream tasks such as cell type annotation, gene imputation, perturbation prediction, multi-batch integration, and multi-omics integration.
+
+For local development, the frontend is built with **React** and **TypeScript**, using `pnpm` as the package manager.
+
+## Project Context
+The **Tabula** foundation model is designed to handle single-cell data at large scale without compromising data privacy. Tabula:
+- Is trained across multiple clients (institutions) using **federated learning**.
+- Models the tabular, unordered structure of single-cell data (rather than treating genes as sequential “words”).
+- Provides novel pretraining strategies that capture regulatory logic across diverse biological systems (e.g., hematopoiesis, neurogenesis, cardiogenesis).
+
+For backend services, you may rely on:
+- A Python-based microservice architecture (potentially using frameworks like **Hypha** or FastAPI).
+- Secure data handling for local and federated training scenarios.
+- Artifact management (e.g., model versions, training logs) that respects privacy constraints.
+
+(If you’re using specific backend tools such as Hypha, you can replace or expand this section with relevant details. For documentation, see the respective server or federated learning framework docs.)
+
+## Coding Standards
+
+### General Principles
+- **PEP 8** and **PEP 257** compliance for Python code.
+- Consistent style for JavaScript/TypeScript (e.g., Prettier, ESLint).
+- Use **type hints** in Python functions/methods whenever possible.
+- Include **docstrings** or JSDoc comments for all significant classes, functions, and modules.
+
+### Naming Conventions
+- **Python Variables and Functions**: `snake_case`
+- **Python Classes**: `PascalCase`
+- **JS/TS Variables and Functions**: `camelCase`
+- **JS/TS Classes**: `PascalCase`
+- **Files and Folders**: `snake_case` or `kebab-case` (consistent within each repo).
+
+### Error Handling
+- Wrap critical I/O operations (e.g., model training calls, file/HTTP requests) in try-except (Python) or try-catch (JavaScript/TypeScript).
+- Log or raise meaningful exceptions with context (who, what, why).
+- For Python, use `logging` or structured logs; for JS/TS, use a consistent logging library (e.g., `winston`).
+
+## Project Structure
+Organize the code so that the client (frontend) and server (backend) logic are clearly separated, for example:
+
