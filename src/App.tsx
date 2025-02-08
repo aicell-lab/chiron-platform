@@ -13,6 +13,7 @@ import Edit from './components/Edit';
 import './index.css'
 import './github-markdown.css'
 import { HyphaProvider } from './HyphaContext';
+import ModelTrainer from './components/ModelTrainer';
 
 // Create a wrapper component that uses Router hooks
 const AppContent: React.FC = () => {
@@ -47,22 +48,9 @@ const AppContent: React.FC = () => {
       />
       <main className="container mx-auto px-4">
         <Routes>
-          <Route
-            path="/"
-            element={
-              <>
-                <ResourceGrid />
-              </>
-            }
-          />
-          <Route 
-            path="/resources/:id" 
-            element={<ResourceDetails />} 
-          />
-          <Route 
-            path="/about" 
-            element={<About />} 
-          />
+          <Route path="/" element={<ResourceGrid />} />
+          <Route path="/resources/:id" element={<ResourceDetails />} />
+          <Route path="/about" element={<About />} />
           <Route path="/models" element={<ResourceGrid type="model" />} />
           <Route path="/applications" element={<ResourceGrid type="application" />} />
           <Route path="/notebooks" element={<ResourceGrid type="notebook" />} />
@@ -70,6 +58,7 @@ const AppContent: React.FC = () => {
           <Route path="/upload" element={<Upload />} />
           <Route path="/my-artifacts" element={<MyArtifacts />} />
           <Route path="/edit/:artifactId" element={<Edit />} />
+          <Route path="/model-trainer/:id" element={<ModelTrainer />} />
         </Routes>
       </main>
       <Footer />

@@ -132,7 +132,7 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
       const offset = (page - 1) * get().itemsPerPage;
       
       // Construct the base URL
-      let url = `https://hypha.aicell.io/tabula-platform/artifacts/data-collection/children?pagination=true&offset=${offset}&limit=${get().itemsPerPage}`;
+      let url = `https://hypha.aicell.io/tabula-platform/artifacts/collection/children?pagination=true&offset=${offset}&limit=${get().itemsPerPage}`;
       
       // Add type filter if resourceType is specified
       if (get().resourceType) {

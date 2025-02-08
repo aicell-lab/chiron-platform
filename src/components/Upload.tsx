@@ -283,12 +283,10 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
         artifactId = uploadedArtifact.id;
       } else {
         const artifact =await artifactManager.create({
-          parent_id: "tabula-platform/data-collection",
-          alias: "{zenodo_conceptrecid}",
+          parent_id: "tabula-platform/collection",
           type: manifest.type,
           manifest: manifest,
           config: {
-            publish_to: "sandbox_zenodo"
           },
           version: "stage",
           _rkwargs: true,
@@ -559,7 +557,7 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
           <div className="w-80 bg-gray-50 border-r border-gray-200 flex flex-col h-full">
             <div className="p-4 border-b border-gray-200 flex flex-col gap-2">
             <h2 className="text-lg font-semibold text-gray-900">
-                  Contributing to the Zoo
+                  Contributing to Tabula
                 </h2>
               <div className="flex items-center justify-between">
                
@@ -662,9 +660,9 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
                     {!uploadedArtifact ? (
                       <button
                         onClick={handleUpload}
-                        disabled={isUploading || !isLoggedIn || !isValidated}
+                        disabled={isUploading || !isLoggedIn}
                         className={`px-6 py-2 rounded-md font-medium transition-colors whitespace-nowrap flex items-center gap-2
-                          ${isUploading || !isLoggedIn || !isValidated
+                          ${isUploading || !isLoggedIn
                             ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
                             : 'bg-blue-600 text-white hover:bg-blue-700'}`}
                       >
@@ -684,9 +682,9 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
                         {files.some(f => f.edited) ? (
                           <button
                             onClick={handleSave}
-                            disabled={isUploading || !isLoggedIn || !isValidated}
+                            disabled={isUploading || !isLoggedIn}
                             className={`px-6 py-2 rounded-md font-medium transition-colors whitespace-nowrap flex items-center gap-2
-                              ${isUploading || !isLoggedIn || !isValidated
+                              ${isUploading || !isLoggedIn
                                 ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
                                 : 'bg-green-600 text-white hover:bg-green-700'}`}
                           >

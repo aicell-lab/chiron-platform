@@ -53,7 +53,7 @@ const MyArtifacts: React.FC = () => {
       };
       
       const response = await artifactManager.list({
-        parent_id: "tabula-platform/data-collection",
+        parent_id: "tabula-platform/collection",
         filters: filters,
         limit: 100,
         _rkwargs: true

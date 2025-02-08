@@ -27,6 +27,7 @@ export interface ResourceManifest {
   git_repo?: string;
   license?: string;
   type?: string[];
+  covers?: string[];
 }
 
 export interface Resource {

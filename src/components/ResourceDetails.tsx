@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, Link as RouterLink } from 'react-router-dom';
 import { useHyphaStore } from '../store/hyphaStore';
 import ReactMarkdown from 'react-markdown';
 import { Resource } from '../types/resource';
-import { Button, Box, Typography, Chip, Grid, Card, CardContent, Avatar, Link, Stack, Divider, IconButton } from '@mui/material';
+import { Button, Box, Typography, Chip, Grid, Card, CardContent, Avatar, Stack, Divider, IconButton } from '@mui/material';
 import PersonIcon from '@mui/icons-material/Person';
 import SchoolIcon from '@mui/icons-material/School';
 import LinkIcon from '@mui/icons-material/Link';
@@ -15,12 +15,16 @@ import ModelTester from './ModelTester';
 import { resolveHyphaUrl } from '../utils/urlHelpers';
 import NavigateNextIcon from '@mui/icons-material/NavigateNext';
 import NavigateBeforeIcon from '@mui/icons-material/NavigateBefore';
+import Link from '@mui/material/Link';
 
 const ResourceDetails = () => {
   const { id } = useParams();
   const { selectedResource, fetchResource, isLoading, error } = useHyphaStore();
   const [documentation, setDocumentation] = useState<string | null>(null);
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
+
+  // Store covers in a local variable
+  const covers = selectedResource?.manifest.covers || [];
 
   useEffect(() => {
     if (id) {
@@ -55,16 +59,16 @@ const ResourceDetails = () => {
 
   const nextImage = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (selectedResource?.manifest.covers) {
-      setCurrentImageIndex((prev) => (prev + 1) % selectedResource.manifest.covers.length);
+    if (covers.length > 0) {
+      setCurrentImageIndex((prev) => (prev + 1) % covers.length);
     }
   };
 
   const previousImage = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (selectedResource?.manifest.covers) {
+    if (covers.length > 0) {
       setCurrentImageIndex((prev) => 
-        (prev - 1 + selectedResource.manifest.covers.length) % selectedResource.manifest.covers.length
+        (prev - 1 + covers.length) % covers.length
       );
     }
   };
@@ -115,6 +119,24 @@ const ResourceDetails = () => {
                 version={manifest.version}
                 isDisabled={!selectedResource.manifest.type?.includes('model')}
               />
+          <Button
+            component={RouterLink}
+            to={`/model-trainer/${selectedResource.id.split('/').pop()}`}
+            variant="contained"
+            size="medium"
+            disabled={!selectedResource.manifest.type?.includes('model')}
+            sx={{
+              backgroundColor: '#10b981',
+              '&:hover': {
+                backgroundColor: '#059669',
+              },
+              '&.Mui-disabled': {
+                backgroundColor: '#d1d5db',
+              },
+            }}
+          >
+            Model Trainer
+          </Button>
           {manifest.version && (
             <Chip 
               icon={<UpdateIcon />} 
@@ -126,7 +148,7 @@ const ResourceDetails = () => {
       </Box>
 
       {/* Cover Image Section */}
-      {selectedResource.manifest.covers && selectedResource.manifest.covers.length > 0 && (
+      {covers.length > 0 && (
         <Box 
           sx={{ 
             position: 'relative',
@@ -139,7 +161,7 @@ const ResourceDetails = () => {
           }}
         >
           <img
-            src={resolveHyphaUrl(selectedResource.manifest.covers[currentImageIndex], selectedResource.id)}
+            src={resolveHyphaUrl(covers[currentImageIndex], selectedResource.id)}
             alt={`Cover ${currentImageIndex + 1}`}
             style={{
               width: '100%',
@@ -147,7 +169,7 @@ const ResourceDetails = () => {
               objectFit: 'contain'
             }}
           />
-          {selectedResource.manifest.covers.length > 1 && (
+          {covers.length > 1 && (
             <>
               <IconButton
                 onClick={previousImage}
@@ -192,7 +214,7 @@ const ResourceDetails = () => {
                   fontSize: '0.875rem'
                 }}
               >
-                {currentImageIndex + 1} / {selectedResource.manifest.covers.length}
+                {currentImageIndex + 1} / {covers.length}
               </Box>
             </>
           )}
@@ -311,7 +333,7 @@ const ResourceDetails = () => {
                         DOI: {citation.doi}
                       </Link>
                     )}
-                    {index < manifest.cite.length - 1 && <Divider sx={{ my: 2 }} />}
+                    {index < (manifest.cite?.length ?? 0) - 1 && <Divider sx={{ my: 2 }} />}
                   </Box>
                 ))}
               </CardContent>
