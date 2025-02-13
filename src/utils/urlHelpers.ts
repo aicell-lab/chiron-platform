@@ -16,5 +16,5 @@ export const resolveHyphaUrl = (path: string, resourceId: string): string => {
   const id = resourceId.split('/').pop();
   
   // Construct the full URL
-  return `https://hypha.aicell.io/tabula-platform/artifacts/${id}/files/${path}?use_proxy=true`;
+  return `https://hypha.aicell.io/chiron-platform/artifacts/${id}/files/${path}?use_proxy=true`;
 }; 

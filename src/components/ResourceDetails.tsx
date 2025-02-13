@@ -28,7 +28,7 @@ const ResourceDetails = () => {
 
   useEffect(() => {
     if (id) {
-      fetchResource(`tabula-platform/${id}`);
+      fetchResource(`chiron-platform/${id}`);
     }
   }, [id, fetchResource]);
 
@@ -53,7 +53,7 @@ const ResourceDetails = () => {
   const handleDownload = () => {
     const id = selectedResource?.id.split('/').pop();
     if (id) {
-      window.open(`https://hypha.aicell.io/tabula-platform/artifacts/${id}/create-zip-file`, '_blank');
+      window.open(`https://hypha.aicell.io/chiron-platform/artifacts/${id}/create-zip-file`, '_blank');
     }
   };
 

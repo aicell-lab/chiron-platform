@@ -283,7 +283,7 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
         artifactId = uploadedArtifact.id;
       } else {
         const artifact =await artifactManager.create({
-          parent_id: "tabula-platform/collection",
+          parent_id: "chiron-platform/collection",
           type: manifest.type,
           manifest: manifest,
           config: {
@@ -557,7 +557,7 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
           <div className="w-80 bg-gray-50 border-r border-gray-200 flex flex-col h-full">
             <div className="p-4 border-b border-gray-200 flex flex-col gap-2">
             <h2 className="text-lg font-semibold text-gray-900">
-                  Contributing to Tabula
+                  Contributing to Chiron
                 </h2>
               <div className="flex items-center justify-between">
                
@@ -782,7 +782,7 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
                       Guidelines for Research Contributions:
                     </h3>
                     <ol className="list-decimal list-inside space-y-3 text-gray-600 text-base">
-                      <li className="leading-relaxed">Prepare your model or dataset following the Tabula Platform specifications</li>
+                      <li className="leading-relaxed">Prepare your model or dataset following the Chiron Platform specifications</li>
                       <li className="leading-relaxed">Include a detailed <code className="bg-gray-200 px-1.5 py-0.5 rounded text-sm font-mono">rdf.yaml</code> file with metadata about your research</li>
                       <li className="leading-relaxed">Add documentation about your research methodology and data collection process</li>
                       <li className="leading-relaxed">Compress all files into a ZIP archive for upload</li>

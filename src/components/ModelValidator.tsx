@@ -33,7 +33,7 @@ const ModelValidator: React.FC<ModelValidatorProps> = ({
     setIsMenuOpen(false);
     
     try {
-      const runner = await server.getService('tabula-platform/tabula-model-runner', {mode: "last"});
+      const runner = await server.getService('chiron-platform/tabula-model-runner', {mode: "last"});
       const rdfDict = yaml.load(rdfContent);
       const result = await runner.validate(rdfDict);
       

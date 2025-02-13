@@ -3,12 +3,12 @@ import React from 'react';
 const About: React.FC = () => {
   return (
     <div className="max-w-4xl mx-auto py-12 px-4 sm:px-6 lg:px-8">
-      <h1 className="text-4xl font-bold mb-8 text-center text-gray-900">About Tabula Platform</h1>
+      <h1 className="text-4xl font-bold mb-8 text-center text-gray-900">About Chiron Platform</h1>
       
       <section className="mb-12 bg-white rounded-lg shadow-sm p-8">
         <h2 className="text-2xl font-semibold mb-4 text-gray-800">Our Mission</h2>
         <p className="text-gray-600 leading-relaxed">
-          Tabula Platform is a cutting-edge foundation model for single-cell transcriptomics that prioritizes privacy and ethical constraints through federated learning. Our platform is designed to handle large-scale single-cell data while preserving data privacy and facilitating robust downstream analysis tasks.
+          Chiron Platform is a cutting-edge foundation model for single-cell transcriptomics that prioritizes privacy and ethical constraints through federated learning. Our platform is designed to handle large-scale single-cell data while preserving data privacy and facilitating robust downstream analysis tasks.
         </p>
       </section>
 
@@ -54,7 +54,7 @@ const About: React.FC = () => {
       <section className="mb-12 bg-white rounded-lg shadow-sm p-8">
         <h2 className="text-2xl font-semibold mb-4 text-gray-800">Our Approach</h2>
         <p className="text-gray-600 leading-relaxed mb-6">
-          Tabula Platform revolutionizes single-cell data analysis by combining federated learning with innovative modeling approaches. Our platform explicitly accounts for the tabular structure of single-cell data while enabling secure, privacy-preserving collaboration across institutions.
+          Chiron Platform revolutionizes single-cell data analysis by combining federated learning with innovative modeling approaches. Our platform explicitly accounts for the tabular structure of single-cell data while enabling secure, privacy-preserving collaboration across institutions.
         </p>
         <p className="text-gray-600 leading-relaxed">
           Through our federated learning approach, we enable institutions to contribute to model training without sharing sensitive data, while still benefiting from the collective knowledge of the entire network.

@@ -1,4 +1,4 @@
-# Tabula Platform
+# Chiron Platform
 
 A foundation model platform for single-cell transcriptomics with privacy-preserving federated learning.
 
@@ -6,7 +6,7 @@ A foundation model platform for single-cell transcriptomics with privacy-preserv
 
 ## 🎯 Overview
 
-Tabula Platform is a cutting-edge solution for handling single-cell transcriptomics data at scale while preserving privacy through federated learning. The platform provides:
+Chiron Platform is a cutting-edge solution for handling single-cell transcriptomics data at scale while preserving privacy through federated learning. The platform provides:
 
 - 🔒 **Privacy-First Architecture**: Train models across multiple institutions without sharing raw data
 - 📊 **Tabular Data Modeling**: Specialized handling of unordered single-cell data structure
@@ -24,8 +24,8 @@ Tabula Platform is a cutting-edge solution for handling single-cell transcriptom
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/tabula-platform.git
-cd tabula-platform
+git clone https://github.com/your-org/chiron-platform.git
+cd chiron-platform
 
 # Install dependencies
 pnpm install
@@ -52,7 +52,7 @@ The application will be available at `http://localhost:3000`.
 ## 🏗️ Project Structure
 
 ```
-tabula-platform/
+chiron-platform/
 ├── src/                    # Source code
 │   ├── components/         # React components
 │   ├── store/             # State management
@@ -96,5 +96,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 <div align="center">
-Made with ❤️ by the Tabula Platform Team
+Made with ❤️ by the Chiron Platform Team
 </div>

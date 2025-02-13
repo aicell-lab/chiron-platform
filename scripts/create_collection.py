@@ -10,20 +10,20 @@ SERVER_URL = os.getenv("SERVER_URL", "https://hypha.aicell.io")
 async def create_collection():
     server = await connect_to_server({
         "server_url": SERVER_URL,
-        "workspace": "tabula-platform",
+        "workspace": "chiron-platform",
         "token": os.environ.get("WORKSPACE_TOKEN")
     })
     artifact_manager = await server.get_service("public/artifact-manager")
 
     collection = await artifact_manager.create(
-        alias="tabula-platform/collection",
+        alias="chiron-platform/collection",
         type="collection",
         manifest={
-            "name": "Tabula Platform Data Collection",
-            "description": "A collection of data for the Tabula Platform project",
+            "name": "Chiron Platform Data Collection",
+            "description": "A collection of data for the Chiron Platform project",
             "version": "0.1.0",
             "authors": [],
-            "tags": ["tabula-platform", "single-cell", "federated-learning"],
+            "tags": ["chiron-platform", "single-cell", "federated-learning"],
             "license": "MIT",
             "documentation": "",
             "covers": [],

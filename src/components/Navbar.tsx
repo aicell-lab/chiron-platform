@@ -44,7 +44,7 @@ const Navbar: React.FC = () => {
             <Link to="/" className="flex items-center">
               <div className="flex items-center text-2xl font-bold text-blue-600">
                 <BiCube className="mr-2" size={24} />
-                Tabula Platform
+                Chiron Platform
               </div>
             </Link>
           </div>

@@ -70,9 +70,9 @@ const ModelTester: React.FC<ModelTesterProps> = ({ artifactId, version, isDisabl
     setIsOpen(false);
     
     try {
-      const runner = await server.getService('tabula-platform/tabula-model-runner', {mode: "last"});
+      const runner = await server.getService('chiron-platform/tabula-model-runner', {mode: "last"});
       const modelId = artifactId.split('/').pop();
-      const zipUrl = `https://hypha.aicell.io/tabula-platform/artifacts/${modelId}/create-zip-file${version ? `?version=${version}` : ''}`;
+      const zipUrl = `https://hypha.aicell.io/chiron-platform/artifacts/${modelId}/create-zip-file${version ? `?version=${version}` : ''}`;
       const result = await runner.test_model(modelId, zipUrl);
       setTestResult(result);
       setIsOpen(true);

@@ -53,7 +53,7 @@ const MyArtifacts: React.FC = () => {
       };
       
       const response = await artifactManager.list({
-        parent_id: "tabula-platform/collection",
+        parent_id: "chiron-platform/collection",
         filters: filters,
         limit: 100,
         _rkwargs: true
@@ -212,7 +212,7 @@ const MyArtifacts: React.FC = () => {
                     ...(artifact.manifest?.tags || [])
                   ]}
                   image={artifact.manifest?.cover || undefined}
-                  downloadUrl={`https://hypha.aicell.io/tabula-platform/artifacts/${artifact.id.split('/').pop()}/create-zip-file`}
+                  downloadUrl={`https://hypha.aicell.io/chiron-platform/artifacts/${artifact.id.split('/').pop()}/create-zip-file`}
                   onEdit={() => navigate(`/edit/${encodeURIComponent(artifact.id)}`)}
                   onDelete={() => {
                     setArtifactToDelete(artifact);

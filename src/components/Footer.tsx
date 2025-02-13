@@ -4,7 +4,7 @@ import { BiCube } from 'react-icons/bi';
 const footerLinks = [
   {
     label: "View source code on GitHub",
-    href: "https://github.com/aicell-io/tabula-platform",
+    href: "https://github.com/aicell-io/chiron-platform",
     icon: "/img/github.png",
     caption: "Source Code"
   },
@@ -16,7 +16,7 @@ const footerLinks = [
   },
   {
     label: "Report issues or request features",
-    href: "https://github.com/aicell-io/tabula-platform/issues",
+    href: "https://github.com/aicell-io/chiron-platform/issues",
     icon: "/img/feedback-icon.png",
     caption: "Feedback"
   }
@@ -61,13 +61,13 @@ const Footer: React.FC = () => {
           <div className="border-t border-gray-200 pt-6">
             <div className="flex items-center justify-center text-2xl font-bold text-blue-600 mb-4">
               <BiCube className="mr-2" size={24} />
-              Tabula Platform
+              Chiron Platform
             </div>
             <p className="text-base text-gray-700 font-medium mb-4">
               A privacy-preserving federated learning platform for single-cell transcriptomics
             </p>
             <p className="text-sm text-gray-600 leading-relaxed px-4">
-              Tabula Platform enables secure, collaborative model training across institutions while preserving data privacy and ethical constraints. Join our federation to contribute to advancing single-cell analysis while keeping sensitive data secure.
+              Chiron Platform enables secure, collaborative model training across institutions while preserving data privacy and ethical constraints. Join our federation to contribute to advancing single-cell analysis while keeping sensitive data secure.
             </p>
           </div>
         </div>

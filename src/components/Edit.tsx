@@ -674,7 +674,7 @@ const Edit: React.FC = () => {
               You are about to publish this artifact to:
             </p>
             <ul className="list-disc pl-5 space-y-2">
-              <li>The Tabula Platform</li>
+              <li>The Chiron Platform</li>
               <li>Zenodo (with DOI assignment)</li>
             </ul>
             <p className="text-red-600 font-medium">
