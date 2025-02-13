@@ -37,6 +37,21 @@ async def create_collection():
     )
     print(f"Collection created: {collection}")
 
+    # Create a deployment collection
+    deployment_collection = await artifact_manager.create(
+        alias="chiron-platform/ray-deployments",
+        type="collection",
+        manifest={
+            "name": "Chiron Platform Ray Deployments Collection",
+            "description": "A collection of Ray deployments for the Chiron Platform project",
+        },
+        config={
+            "permissions": {"*": "r", "@": "r+"},
+        },
+        overwrite=True
+    )
+    print(f"Deployment collection created: {deployment_collection}")
+
 if __name__ == "__main__":
     import asyncio
     asyncio.run(create_collection()) 

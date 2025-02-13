@@ -1,0 +1,3 @@
+ray[serve]==2.9.0
+hypha-rpc>=0.3.0
+httpx>=0.24.0 
