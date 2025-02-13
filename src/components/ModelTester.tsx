@@ -6,18 +6,9 @@ import { Menu } from '@headlessui/react';
 interface TestResult {
   name: string;
   success: boolean;
-  details: Array<{
-    name: string;
-    status: string;
-    errors: Array<{
-      msg: string;
-      loc: string[];
-    }>;
-    warnings: Array<{
-      msg: string;
-      loc: string[];
-    }>;
-  }>;
+  details: {
+    [key: string]: any;
+  };
 }
 
 interface ModelTesterProps {
@@ -70,26 +61,25 @@ const ModelTester: React.FC<ModelTesterProps> = ({ artifactId, version, isDisabl
     setIsOpen(false);
     
     try {
-      const runner = await server.getService('chiron-platform/tabula-model-runner', {mode: "last"});
-      const modelId = artifactId.split('/').pop();
-      const zipUrl = `https://hypha.aicell.io/chiron-platform/artifacts/${modelId}/create-zip-file${version ? `?version=${version}` : ''}`;
-      const result = await runner.test_model(modelId, zipUrl);
-      setTestResult(result);
-      setIsOpen(true);
-    } catch (err) {
+      const runner = await server.getService('chiron-platform/ray-deployment-manager', {mode: "last", case_conversion: "camel"});
+      const result = await runner.deploy(artifactId, version);
+      if(result.success) {
+        const serviceInfo = await runner.getServiceInfo();
+        const services = await server.getService(serviceInfo.id)
+        console.log("Available model services:", services)
+        result["services"] = services
+        setTestResult(result);
+        setIsOpen(true);
+      } else {
+        throw result.error
+      }
+      
+    } catch (err: any) {
       console.error('Test run failed:', err);
       setTestResult({
         name: 'Test Failed',
         success: false,
-        details: [{
-          name: 'Error',
-          status: 'failed',
-          errors: [{
-            msg: err instanceof Error ? err.message : 'Failed to run model test',
-            loc: ['test']
-          }],
-          warnings: []
-        }]
+        details: err,
       });
       setIsOpen(true);
     } finally {
@@ -102,27 +92,7 @@ const ModelTester: React.FC<ModelTesterProps> = ({ artifactId, version, isDisabl
 
     let content = `# Test Results: ${testResult.name}\n\n`;
     content += `**Status**: ${testResult.success ? '✅ Passed' : '❌ Failed'}\n\n`;
-
-    testResult.details.forEach(detail => {
-      content += `## ${detail.name}\n`;
-      content += `**Status**: ${detail.status}\n\n`;
-
-      if (detail.errors.length > 0) {
-        content += '### Errors\n';
-        detail.errors.forEach(error => {
-          content += `- **${error.loc.join(' > ')}**: ${error.msg}\n`;
-        });
-        content += '\n';
-      }
-
-      if (detail.warnings.length > 0) {
-        content += '### Warnings\n';
-        detail.warnings.forEach(warning => {
-          content += `- **${warning.loc.join(' > ')}**: ${warning.msg}\n`;
-        });
-        content += '\n';
-      }
-    });
+    content += JSON.stringify(testResult.details, null, 2);
 
     return content;
   };

@@ -181,7 +181,7 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
         severity: 'info'
       });
 
-      const rdfFile = fileNodes.find(file => file.path.endsWith('rdf.yaml'));
+      const rdfFile = fileNodes.find(file => file.path.endsWith('manifest.yaml'));
       if (rdfFile) {
         handleFileSelect(rdfFile);
       }
@@ -258,9 +258,9 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
         severity: 'info'
       });
 
-      const rdfFile = files.find(file => file.path.endsWith('rdf.yaml'));
+      const rdfFile = files.find(file => file.path.endsWith('manifest.yaml'));
       if (!rdfFile) {
-        throw new Error('No rdf.yaml file found in the upload');
+        throw new Error('No manifest.yaml file found in the upload');
       }
 
       let manifest: Manifest;
@@ -273,8 +273,8 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
           manifest.version = `${manifest.version}`;
         }
       } catch (error) {
-        console.error('Error parsing rdf.yaml:', error);
-        throw new Error('Invalid rdf.yaml format');
+        console.error('Error parsing manifest.yaml:', error);
+        throw new Error('Invalid manifest.yaml format');
       }
 
       let artifactId: string;
@@ -348,6 +348,11 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
       });
 
       setIsUploaded(true);
+      
+      // Navigate to Edit component with the artifact ID
+      if (artifactId) {
+        navigate(`/edit/${artifactId}`);
+      }
 
     } catch (error) {
       console.error('Upload failed:', error);
@@ -482,8 +487,8 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
       setFiles(nodes);
       setShowDragDrop(false);
 
-      // Select rdf.yaml by default if it exists
-      const rdfFile = nodes.find(file => file.path.endsWith('rdf.yaml'));
+      // Select manifest.yaml by default if it exists
+      const rdfFile = nodes.find(file => file.path.endsWith('manifest.yaml'));
       if (rdfFile) {
         handleFileSelect(rdfFile);
       }
@@ -517,7 +522,7 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
 
   // Find the rdf file from the files array
   const getRdfFile = () => {
-    return files.find(file => file.path.endsWith('rdf.yaml'));
+    return files.find(file => file.path.endsWith('manifest.yaml'));
   };
 
   return (
@@ -602,12 +607,12 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
                       )}
                     </span>
 
-                    {/* File Name with Star for rdf.yaml */}
+                    {/* File Name with Star for manifest.yaml */}
                     <div className="flex items-center gap-2 flex-1">
                       <span className="truncate text-sm font-medium tracking-wide">
                         {file.name}
                       </span>
-                      {file.name === 'rdf.yaml' && (
+                      {file.name === 'manifest.yaml' && (
                         <svg className="w-4 h-4 text-yellow-400 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                           <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
                         </svg>
@@ -783,7 +788,7 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
                     </h3>
                     <ol className="list-decimal list-inside space-y-3 text-gray-600 text-base">
                       <li className="leading-relaxed">Prepare your model or dataset following the Chiron Platform specifications</li>
-                      <li className="leading-relaxed">Include a detailed <code className="bg-gray-200 px-1.5 py-0.5 rounded text-sm font-mono">rdf.yaml</code> file with metadata about your research</li>
+                      <li className="leading-relaxed">Include a detailed <code className="bg-gray-200 px-1.5 py-0.5 rounded text-sm font-mono">manifest.yaml</code> file with metadata about your research</li>
                       <li className="leading-relaxed">Add documentation about your research methodology and data collection process</li>
                       <li className="leading-relaxed">Compress all files into a ZIP archive for upload</li>
                     </ol>
@@ -859,4 +864,4 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
   );
 };
 
-export default Upload; 
+export default Upload;

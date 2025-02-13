@@ -30,7 +30,7 @@ spec:
           emptyDir: {}
       containers:
         - name: hypha-ray-manager-container
-          image: oeway/hypha-ray-manager:0.1.3
+          image: oeway/hypha-ray-manager:0.1.5
           imagePullPolicy: Always
           volumeMounts:
             - name: dshm

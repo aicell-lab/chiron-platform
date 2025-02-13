@@ -224,7 +224,7 @@ const Edit: React.FC = () => {
         severity: 'success'
       });
 
-      // Don't automatically select rdf.yaml here - let the effect handle it
+      // Don't automatically select manifest.yaml here - let the effect handle it
     } catch (error) {
       console.error('Error loading artifact files:', error);
       setUploadStatus({
@@ -349,6 +349,25 @@ const Edit: React.FC = () => {
         message: 'Saving changes...',
         severity: 'info'
       });
+
+      // Special handling for manifest.yaml
+      if (file.name === 'manifest.yaml') {
+        try {
+          const content = unsavedChanges[file.path];
+          const manifest = yaml.load(content) as any;
+          
+          // Update the artifact's manifest
+          await artifactManager.edit({
+            artifact_id: artifactId,
+            version: "stage",
+            manifest: manifest,
+            _rkwargs: true
+          });
+        } catch (error) {
+          console.error('Error parsing manifest.yaml:', error);
+          throw new Error('Invalid manifest.yaml format');
+        }
+      }
 
       // Get the presigned URL for uploading
       const presignedUrl = await artifactManager.put_file({
@@ -771,9 +790,9 @@ const Edit: React.FC = () => {
       } else {
         setActiveTab(tabParam as 'files' | 'review' || 'files');
         
-        // If no specific file is selected and rdf.yaml exists, select it
+        // If no specific file is selected and manifest.yaml exists, select it
         if (!selectedFile) {
-          const rdfFile = files.find(file => file.path.endsWith('rdf.yaml'));
+          const rdfFile = files.find(file => file.path.endsWith('manifest.yaml'));
           if (rdfFile) {
             handleFileSelect(rdfFile);
           }
@@ -994,15 +1013,16 @@ const Edit: React.FC = () => {
 
   // Update the renderActionButtons function
   const renderActionButtons = () => {
-    // Get the latest content for rdf.yaml, including unsaved changes
+    // Get the latest content for manifest.yaml, including unsaved changes
     const getLatestRdfContent = () => {
-      const rdfFile = files.find(file => file.path.endsWith('rdf.yaml'));
+      const rdfFile = files.find(file => file.path.endsWith('manifest.yaml'));
       if (!rdfFile) return '';
       return unsavedChanges[rdfFile.path] ?? 
         (typeof rdfFile.content === 'string' ? rdfFile.content : '');
     };
 
-    const isRdfFile = selectedFile?.path.endsWith('rdf.yaml');
+    const isRdfFile = selectedFile?.path.endsWith('manifest.yaml');
+    const hasUnsavedChanges = selectedFile && unsavedChanges[selectedFile.path];
     const shouldDisableActions = isRdfFile && (!isContentValid || hasContentChanged);
 
     return (
@@ -1010,14 +1030,10 @@ const Edit: React.FC = () => {
         {selectedFile && isTextFile(selectedFile.name) && (
           <button
             onClick={() => handleSave(selectedFile)}
-            disabled={!unsavedChanges[selectedFile.path] || 
-                     uploadStatus?.severity === 'info' || 
-                     (isRdfFile && !isContentValid)}
+            disabled={!hasUnsavedChanges || uploadStatus?.severity === 'info'}
             title={`Save (${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+S)`}
             className={`px-6 py-2 rounded-md font-medium transition-colors whitespace-nowrap flex items-center gap-2
-              ${!unsavedChanges[selectedFile.path] || 
-                uploadStatus?.severity === 'info' || 
-                (isRdfFile && !isContentValid)
+              ${!hasUnsavedChanges || uploadStatus?.severity === 'info'
                 ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
                 : 'bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-300'}`}
           >
@@ -1047,7 +1063,7 @@ const Edit: React.FC = () => {
           <ModelTester
             artifactId={artifactId}
             version={isStaged ? 'stage' : artifactInfo?.version}
-            isDisabled={!isStaged || shouldDisableActions}
+            isDisabled={!isStaged}
           />
         )}
 
@@ -1369,9 +1385,9 @@ const Edit: React.FC = () => {
         metaKey: true, // for Mac
         handler: (e: KeyboardEvent) => {
           e.preventDefault();
-          if (selectedFile?.path.endsWith('rdf.yaml')) {
+          if (selectedFile?.path.endsWith('manifest.yaml')) {
             // Get latest content including unsaved changes
-            const rdfFile = files.find(file => file.path.endsWith('rdf.yaml'));
+            const rdfFile = files.find(file => file.path.endsWith('manifest.yaml'));
             if (!rdfFile) return;
             
             // Trigger validation via button click
@@ -1540,4 +1556,4 @@ const Edit: React.FC = () => {
   );
 };
 
-export default Edit; 
+export default Edit;

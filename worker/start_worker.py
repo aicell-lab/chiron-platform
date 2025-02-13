@@ -33,11 +33,10 @@ class Worker:
                 await self.manager.undeploy_artifact(deployment_id)
             logger.info("All deployments cleaned up")
 
-    async def deploy(self, artifact_id: str, context: Optional[Dict] = None) -> Dict[str, Any]:
+    async def deploy(self, artifact_id: str, version: str=None, context: Optional[Dict] = None) -> Dict[str, Any]:
         """Deploy a single artifact."""
         try:
-            await self.manager.deploy_artifact(artifact_id)
-            return {"success": True, "message": f"Successfully deployed {artifact_id}"}
+            return await self.manager.deploy_artifact(artifact_id, version=version)
         except Exception as e:
             logger.error(f"Error deploying {artifact_id}: {e}")
             return {"success": False, "error": str(e)}
@@ -54,11 +53,9 @@ class Worker:
     async def list_deployments(self, context: Optional[Dict] = None) -> Dict[str, Any]:
         """List all current deployments."""
         try:
-            deployments = await self.manager.list_deployments()
-            return {
-                "success": True,
-                "deployments": deployments
-            }
+            # Get deployments from Ray Serve
+            serve_deployments = await self.manager.list_deployments()
+            return serve_deployments
         except Exception as e:
             logger.error(f"Error listing deployments: {e}")
             return {"success": False, "error": str(e)}
@@ -66,6 +63,10 @@ class Worker:
     async def ping(self, context: Optional[Dict] = None) -> str:
         """Simple health check endpoint."""
         return "pong"
+    
+    async def get_service_info(self, context: Optional[Dict] = None) -> Dict[str, Any]:
+        """Get information about the service."""
+        return await self.manager.get_service_info()
 
     async def register_service(self):
         """Register the Ray deployment manager as a Hypha service."""
@@ -87,11 +88,7 @@ class Worker:
                 ray.init(address=ray_address)
 
             # Initialize the deployment manager
-            self.manager = RayDeploymentManager(
-                server_url=server_url,
-                workspace=workspace,
-                token=token
-            )
+            self.manager = RayDeploymentManager()
 
             # Connect to Hypha server
             self.client = await connect_to_server({
@@ -101,7 +98,7 @@ class Worker:
             })
 
             # Connect the manager to Hypha
-            await self.manager.connect()
+            await self.manager.connect(self.client)
             logger.info(f"Connected to Hypha server at {server_url}")
 
             # Register the service
@@ -116,6 +113,7 @@ class Worker:
                 "deploy": self.deploy,
                 "undeploy": self.undeploy,
                 "list_deployments": self.list_deployments,
+                "get_service_info": self.get_service_info,
             })
 
             logger.info(f"Service registered with ID: {service_info['id']}")
