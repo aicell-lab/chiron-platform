@@ -20,6 +20,8 @@ deployment_config:
     num_gpus: 1
     num_cpus: 1
     memory: 4294967296  # 4GB RAM
+    runtime_env:
+      pip: ["torch==2.1.2", "torchvision==0.16.2"]
   max_ongoing_requests: 1
   max_queued_requests: 10
   autoscaling_config:

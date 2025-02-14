@@ -11,7 +11,7 @@ import { useDropzone } from 'react-dropzone';
 import { Dialog as HeadlessDialog, Transition } from '@headlessui/react';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import ModelTester from './ModelTester';
-import ModelValidator from './ModelValidator';
+import ModelDeployer from './ModelDeployer';
 
 interface FileNode {
   name: string;
@@ -792,9 +792,9 @@ const Edit: React.FC = () => {
         
         // If no specific file is selected and manifest.yaml exists, select it
         if (!selectedFile) {
-          const rdfFile = files.find(file => file.path.endsWith('manifest.yaml'));
-          if (rdfFile) {
-            handleFileSelect(rdfFile);
+          const manifestFile = files.find(file => file.path.endsWith('manifest.yaml'));
+          if (manifestFile) {
+            handleFileSelect(manifestFile);
           }
         }
       }
@@ -1015,15 +1015,15 @@ const Edit: React.FC = () => {
   const renderActionButtons = () => {
     // Get the latest content for manifest.yaml, including unsaved changes
     const getLatestRdfContent = () => {
-      const rdfFile = files.find(file => file.path.endsWith('manifest.yaml'));
-      if (!rdfFile) return '';
-      return unsavedChanges[rdfFile.path] ?? 
-        (typeof rdfFile.content === 'string' ? rdfFile.content : '');
+      const manifestFile = files.find(file => file.path.endsWith('manifest.yaml'));
+      if (!manifestFile) return '';
+      return unsavedChanges[manifestFile.path] ?? 
+        (typeof manifestFile.content === 'string' ? manifestFile.content : '');
     };
 
-    const isRdfFile = selectedFile?.path.endsWith('manifest.yaml');
+    const ismanifestFile = selectedFile?.path.endsWith('manifest.yaml');
     const hasUnsavedChanges = selectedFile && unsavedChanges[selectedFile.path];
-    const shouldDisableActions = isRdfFile && (!isContentValid || hasContentChanged);
+    const shouldDisableActions = ismanifestFile && (!isContentValid || hasContentChanged);
 
     return (
       <div className="flex gap-2">
@@ -1044,27 +1044,21 @@ const Edit: React.FC = () => {
           </button>
         )}
 
-        {/* Update ModelValidator to use latest content */}
-        {isRdfFile && (
-          <div title={`Run Validator (${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+R)`}>
-            <ModelValidator
-              rdfContent={getLatestRdfContent()}
-              isDisabled={!server}
-              onValidationComplete={handleValidationComplete}
-              data-testid="model-validator-button"
+        {/* Model Deployment and Testing */}
+        {artifactId && (
+          <div className="flex gap-2">
+            <ModelDeployer
+              artifactId={artifactId}
+              version={isStaged ? 'stage' : artifactInfo?.version}
+              isDisabled={false}
+              onDeploymentComplete={() => setIsContentValid(true)}
+            />
+            <ModelTester
+              artifactId={artifactId}
+              version={isStaged ? 'stage' : artifactInfo?.version}
+              isDisabled={false}
             />
           </div>
-        )}
-
-        
-
-        {/* Update ModelTester */}
-        {artifactId && (
-          <ModelTester
-            artifactId={artifactId}
-            version={isStaged ? 'stage' : artifactInfo?.version}
-            isDisabled={!isStaged}
-          />
         )}
 
         {/* Update Review & Publish button */}
@@ -1387,8 +1381,8 @@ const Edit: React.FC = () => {
           e.preventDefault();
           if (selectedFile?.path.endsWith('manifest.yaml')) {
             // Get latest content including unsaved changes
-            const rdfFile = files.find(file => file.path.endsWith('manifest.yaml'));
-            if (!rdfFile) return;
+            const manifestFile = files.find(file => file.path.endsWith('manifest.yaml'));
+            if (!manifestFile) return;
             
             // Trigger validation via button click
             const validator = document.querySelector('[data-testid="model-validator-button"]');
@@ -1452,7 +1446,7 @@ const Edit: React.FC = () => {
                   </span>
                 </div>
                 <div className="text-xs text-gray-500 font-mono mt-2">
-                  ID: {artifactInfo.id}
+                  ID: {artifactInfo.id.split("/").pop()}
                 </div>
               </>
             ) : (

@@ -181,9 +181,9 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
         severity: 'info'
       });
 
-      const rdfFile = fileNodes.find(file => file.path.endsWith('manifest.yaml'));
-      if (rdfFile) {
-        handleFileSelect(rdfFile);
+      const manifestFile = fileNodes.find(file => file.path.endsWith('manifest.yaml'));
+      if (manifestFile) {
+        handleFileSelect(manifestFile);
       }
     } catch (error) {
       console.error('Error reading zip file:', error);
@@ -258,16 +258,16 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
         severity: 'info'
       });
 
-      const rdfFile = files.find(file => file.path.endsWith('manifest.yaml'));
-      if (!rdfFile) {
+      const manifestFile = files.find(file => file.path.endsWith('manifest.yaml'));
+      if (!manifestFile) {
         throw new Error('No manifest.yaml file found in the upload');
       }
 
       let manifest: Manifest;
       try {
-        const content = typeof rdfFile.content === 'string' 
-          ? rdfFile.content
-          : new TextDecoder().decode(rdfFile.content);
+        const content = typeof manifestFile.content === 'string' 
+          ? manifestFile.content
+          : new TextDecoder().decode(manifestFile.content);
         manifest = yaml.load(content) as Manifest;
         if (manifest?.version) {
           manifest.version = `${manifest.version}`;
@@ -348,11 +348,6 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
       });
 
       setIsUploaded(true);
-      
-      // Navigate to Edit component with the artifact ID
-      if (artifactId) {
-        navigate(`/edit/${artifactId}`);
-      }
 
     } catch (error) {
       console.error('Upload failed:', error);
@@ -488,9 +483,9 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
       setShowDragDrop(false);
 
       // Select manifest.yaml by default if it exists
-      const rdfFile = nodes.find(file => file.path.endsWith('manifest.yaml'));
-      if (rdfFile) {
-        handleFileSelect(rdfFile);
+      const manifestFile = nodes.find(file => file.path.endsWith('manifest.yaml'));
+      if (manifestFile) {
+        handleFileSelect(manifestFile);
       }
     } catch (error) {
       console.error('Error loading artifact files:', error);
@@ -521,7 +516,7 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
   };
 
   // Find the rdf file from the files array
-  const getRdfFile = () => {
+  const getmanifestFile = () => {
     return files.find(file => file.path.endsWith('manifest.yaml'));
   };
 
@@ -658,8 +653,8 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
                   {/* Buttons section */}
                   <div className="flex gap-2 flex-shrink-0">
                     <ModelValidator
-                      rdfContent={getRdfFile()?.content as string}
-                      isDisabled={!getRdfFile() || !server}
+                      rdfContent={getmanifestFile()?.content as string}
+                      isDisabled={!getmanifestFile() || !server}
                       onValidationComplete={handleValidationComplete}
                     />
                     {!uploadedArtifact ? (
@@ -864,4 +859,4 @@ const Upload: React.FC<UploadProps> = ({ artifactId, onBack }) => {
   );
 };
 
-export default Upload;
+export default Upload; 

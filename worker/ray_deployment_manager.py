@@ -7,13 +7,15 @@ from ray import serve
 from hypha_rpc import connect_to_server
 import httpx
 from functools import partial
+import json
+from urllib.parse import urljoin
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ray-deployment-manager")
 
 class RayDeploymentManager:
-    def __init__(self):
+    def __init__(self, ray_context):
         """Initialize the Ray Deployment Manager.
         
         Args:
@@ -24,6 +26,8 @@ class RayDeploymentManager:
         self.artifact_manager = None
         self.deployment_collection_id = "ray-deployments"
         self.service_info = None
+        self.ray_context = ray_context
+        self.dashboard_url = f"http://{ray_context.dashboard_url}"
 
     def _get_deployment_name(self, artifact_id: str) -> str:
         """Convert artifact ID to a deployment name.
@@ -44,7 +48,7 @@ class RayDeploymentManager:
         assert ray.is_initialized(), "Ray must be initialized before using RayDeploymentManager"
         self.artifact_manager = await server.get_service("public/artifact-manager")
         self.server = server
-        logger.info("Connected to Hypha server")
+        logger.info(f"Connected to Hypha server and Ray dashboard at {self.dashboard_url}")
 
     async def load_deployment_code(self, artifact_id: str, version=None, file_path: str = "main.py", timeout: int = 30) -> Optional[Dict[str, Any]]:
         """Load and execute deployment code from an artifact directly in memory.
@@ -121,19 +125,20 @@ class RayDeploymentManager:
                 
             # Read the manifest to get deployment configuration
             artifact = await self.artifact_manager.read(artifact_id, version=version)
-            manifest = artifact["manifest"]
+            manifest = artifact.get("manifest")
             if not manifest or "deployment_config" not in manifest:
                 raise ValueError(f"Invalid manifest or missing deployment_config for {artifact_id}")
                 
             deployment_config = manifest["deployment_config"]
             
             try:
+                deployment_name = self._get_deployment_name(artifact_id)
+                deployment_config["name"] = deployment_name
                 ChironModelDeployment = serve.deployment(**deployment_config)(ChironModel)
                 # Bind the arguments to the deployment and return an Application
                 app = ChironModelDeployment.bind()
                 # Deploy the application
-                deployment_name = self._get_deployment_name(artifact_id)
-                ray.serve.run(app, name=deployment_name, route_prefix=None)
+                ray.serve.run(app, name="Chiron")
             except Exception as e:
                 raise RuntimeError(f"Ray Serve deployment failed: {str(e)}")
                 
@@ -145,7 +150,7 @@ class RayDeploymentManager:
                 except Exception as e:
                     logger.error(f"Failed to update services after deploying {artifact_id}: {e}")
                     # Continue since the deployment itself was successful
-            return {"success": True, "message": f"Successfully deployed {artifact_id}, service id: {self.service_info['id']}"}
+            return {"success": True, "message": f"Successfully deployed {artifact_id}", "service_id": self.service_info['id']}
             
         except Exception as e:
             logger.error(f"Error deploying {artifact_id}: {e}")
@@ -169,18 +174,19 @@ class RayDeploymentManager:
             List of deployments with their manifests and status
         """
         try:
-            # Get deployments from Ray Serve
-            serve_deployments = ray.serve.list_deployments()
+            # Get deployments from Ray Serve HTTP API
+            if not self.dashboard_url:
+                raise RuntimeError("Ray dashboard URL is not available")
+            ray_dashboard_url = self.dashboard_url
+            async with httpx.AsyncClient() as client:
+                response = await client.get(urljoin(ray_dashboard_url, "/api/serve/applications/"))
+                response.raise_for_status()
+                serve_data = response.json()
+
             # Convert serve deployments to dictionary format
-            deployments = {
-                name: {
-                    "name": name,
-                    "status": deployment.status,
-                    "route_prefix": deployment.route_prefix,
-                    "replica_count": deployment.num_replicas
-                }
-                for name, deployment in serve_deployments.items()
-            }
+            deployments = {}
+            for app_name, app_info in serve_data.get("applications", {}).items():
+                deployments[app_name] = app_info
             return {
                 "success": True,
                 "deployments": deployments
@@ -231,26 +237,29 @@ class RayDeploymentManager:
         Each model's deployment handle will be exposed as a service function.
         """
         try:
-            # Get all current deployments
-            serve_deployments = ray.serve.list_deployments()
+            # Get all current deployments from Ray Serve HTTP API
+            if not self.dashboard_url:
+                raise RuntimeError("Ray dashboard URL is not available")
+            ray_dashboard_url = self.dashboard_url
+            async with httpx.AsyncClient() as client:
+                response = await client.get(urljoin(ray_dashboard_url, "/api/serve/applications/"))
+                response.raise_for_status()
+                serve_data = response.json()
             
             # Create service functions for each deployment
             service_functions = {}
             
             # Define a partial function to create model functions
-            async def create_model_function(handle, name, data, context=None):
-                try:
-                    result = await handle.remote(data)
-                    return {"success": True, "result": result}
-                except Exception as e:
-                    logger.error(f"Error calling model {name}: {e}")
-                    return {"success": False, "error": str(e)}
-            
-            for name, deployment in serve_deployments.items():
-                # Get the deployment handle
-                handle = ray.serve.get_deployment(name).get_handle()
-                model_function = partial(create_model_function, handle, name)
-                service_functions[name] = model_function
+            async def create_model_function(handle, name, data=None, context=None):
+                return await handle.remote(data=data)
+
+            for app_name, app_info in serve_data.get("applications", {}).items():
+                if app_name == "Chiron" and app_info.get("status") == "RUNNING":
+                    for k in app_info["deployments"].keys():
+                        # Get the deployment handle using the application name
+                        handle = serve.get_deployment_handle(k, app_name)
+                        model_function = partial(create_model_function, handle, app_name)
+                        service_functions[app_name] = model_function
             
             # Register all model functions as a single service
             service_info = await self.server.register_service({
@@ -268,5 +277,5 @@ class RayDeploymentManager:
             return service_info
             
         except Exception as e:
-            logger.error(f"Error updating services: {e}")
+            logger.error(f"Error updating services: {e}, dashboard url: {self.dashboard_url}")
             raise

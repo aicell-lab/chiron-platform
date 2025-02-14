@@ -25,14 +25,6 @@ class Worker:
         self.running = False
         self.client = None
 
-    async def cleanup(self):
-        """Cleanup resources before shutdown."""
-        if self.manager:
-            # Undeploy all artifacts
-            for deployment_id in list(self.manager.deployments.keys()):
-                await self.manager.undeploy_artifact(deployment_id)
-            logger.info("All deployments cleaned up")
-
     async def deploy(self, artifact_id: str, version: str=None, context: Optional[Dict] = None) -> Dict[str, Any]:
         """Deploy a single artifact."""
         try:
@@ -82,19 +74,19 @@ class Worker:
             if not token:
                 raise ValueError("HYPHA_TOKEN environment variable must be set")
 
-            # Initialize Ray if not already initialized
-            if not ray.is_initialized():
-                ray_address = os.getenv("RAY_ADDRESS")
-                ray.init(address=ray_address)
+            # Initialize Ray
+            ray_address = os.getenv("RAY_ADDRESS")
+            ray_context=ray.init(address=ray_address)
 
             # Initialize the deployment manager
-            self.manager = RayDeploymentManager()
+            self.manager = RayDeploymentManager(ray_context)
 
             # Connect to Hypha server
             self.client = await connect_to_server({
                 "server_url": server_url,
                 "workspace": workspace,
-                "token": token
+                "token": token,
+                "method_timeout": 300,
             })
 
             # Connect the manager to Hypha
@@ -127,7 +119,6 @@ class Worker:
             logger.error(f"Failed to start worker: {e}")
             raise
         finally:
-            await self.cleanup()
             logger.info("Worker shutdown complete")
 
 async def main():
@@ -140,8 +131,6 @@ async def main():
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         sys.exit(1)
-    finally:
-        await worker.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main()) 

@@ -3,24 +3,32 @@ import { useHyphaStore } from '../store/hyphaStore';
 import ReactMarkdown from 'react-markdown';
 import { Menu } from '@headlessui/react';
 
-interface TestResult {
+interface DeploymentResult {
   name: string;
   success: boolean;
   details: {
     [key: string]: any;
   };
+  services?: any;
 }
 
-interface ModelTesterProps {
+interface ModelDeployerProps {
   artifactId?: string;
   version?: string;
   isDisabled?: boolean;
   className?: string;
+  onDeploymentComplete?: (services: any) => void;
 }
 
-const ModelTester: React.FC<ModelTesterProps> = ({ artifactId, version, isDisabled, className = '' }) => {
+const ModelDeployer: React.FC<ModelDeployerProps> = ({ 
+  artifactId, 
+  version, 
+  isDisabled, 
+  className = '',
+  onDeploymentComplete 
+}) => {
   const { server, isLoggedIn } = useHyphaStore();
-  const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const [deploymentResult, setDeploymentResult] = useState<DeploymentResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
 
@@ -52,9 +60,9 @@ const ModelTester: React.FC<ModelTesterProps> = ({ artifactId, version, isDisabl
         dropdown.style.left = '0px';
       }
     }
-  }, [isOpen, testResult]);
+  }, [isOpen, deploymentResult]);
 
-  const runTest = async () => {
+  const runDeploy = async () => {
     if (!artifactId || !server) return;
 
     setIsLoading(true);
@@ -62,24 +70,22 @@ const ModelTester: React.FC<ModelTesterProps> = ({ artifactId, version, isDisabl
     
     try {
       const runner = await server.getService('chiron-platform/ray-deployment-manager', {mode: "last", case_conversion: "camel"});
-      const serviceInfo = await runner.getServiceInfo();
-      if (!serviceInfo) {
-        throw new Error('No deployed model found. Please deploy the model first.');
+      const result = await runner.deploy(artifactId, version);
+      if(result.success) {
+        const serviceInfo = await runner.getServiceInfo();
+        const services = await server.getService(serviceInfo.id);
+        result["services"] = services;
+        setDeploymentResult(result);
+        setIsOpen(true);
+        onDeploymentComplete?.(services);
+      } else {
+        throw result.error;
       }
-      const services = await server.getService(serviceInfo.id);
-      const service = services[artifactId.split("/")[1].replaceAll("-", "_")]
-      const result = await service();
-      setTestResult({
-        name: 'Test Passed',
-        success: true,
-        details: result,
-      });
-      setIsOpen(true);
       
     } catch (err: any) {
-      console.error('Test run failed:', err);
-      setTestResult({
-        name: 'Test Failed',
+      console.error('Deployment failed:', err);
+      setDeploymentResult({
+        name: 'Deployment Failed',
         success: false,
         details: err,
       });
@@ -90,11 +96,11 @@ const ModelTester: React.FC<ModelTesterProps> = ({ artifactId, version, isDisabl
   };
 
   const getMarkdownContent = () => {
-    if (!testResult) return '';
+    if (!deploymentResult) return '';
 
-    let content = `# Test Results\n\n`;
-    content += `**Status**: ${testResult.success ? '✅ Passed' : '❌ Failed'}\n\n`;
-    content += testResult.details?JSON.stringify(testResult.details, null, 2): "";
+    let content = `# Deployment Results\n\n`;
+    content += `**Status**: ${deploymentResult.success ? '✅ Deployed' : '❌ Failed'}\n\n`;
+    content += deploymentResult ? JSON.stringify(deploymentResult, null, 2) : "";
 
     return content;
   };
@@ -103,7 +109,7 @@ const ModelTester: React.FC<ModelTesterProps> = ({ artifactId, version, isDisabl
     <div className={`relative ${className}`}>
       <div className="flex h-[40px]" ref={buttonRef}>
         <button
-          onClick={runTest}
+          onClick={runDeploy}
           disabled={isDisabled || isLoading || !isLoggedIn}
           className={`inline-flex items-center gap-2 px-4 h-full rounded-l-md font-medium transition-colors
             ${isDisabled || !isLoggedIn
@@ -113,23 +119,21 @@ const ModelTester: React.FC<ModelTesterProps> = ({ artifactId, version, isDisabl
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
-              d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
-              d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              d="M5 15l7-7 7 7" />
           </svg>
-          <span>{!isLoggedIn ? 'Login to Test' : 'Test Model'}</span>
+          <span>{!isLoggedIn ? 'Login to Deploy' : 'Deploy'}</span>
         </button>
 
         <Menu as="div" className="relative h-full">
           <Menu.Button
-            onClick={() => testResult && setIsOpen(!isOpen)}
+            onClick={() => deploymentResult && setIsOpen(!isOpen)}
             className={`inline-flex items-center px-2 h-full rounded-r-md font-medium transition-colors border-l
               ${isDisabled || !isLoggedIn
                 ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
                 : isLoading
                   ? 'bg-blue-600 text-white'
-                  : testResult
-                    ? testResult.success
+                  : deploymentResult
+                    ? deploymentResult.success
                       ? 'bg-green-600 text-white hover:bg-green-700'
                       : 'bg-red-600 text-white hover:bg-red-700'
                     : 'bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-300'
@@ -141,27 +145,27 @@ const ModelTester: React.FC<ModelTesterProps> = ({ artifactId, version, isDisabl
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
               </svg>
-            ) : testResult ? (
+            ) : deploymentResult ? (
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
-                  d={testResult.success
+                  d={deploymentResult.success
                     ? "M5 13l4 4L19 7"
                     : "M6 18L18 6M6 6l12 12"} />
               </svg>
             ) : (
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
-                  d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                  d="M5 15l7-7 7 7" />
               </svg>
             )}
-            {testResult && (
+            {deploymentResult && (
               <svg className="w-5 h-5 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
               </svg>
             )}
           </Menu.Button>
 
-          {testResult && isOpen && (
+          {deploymentResult && isOpen && (
             <div 
               ref={dropdownRef}
               className="absolute mt-2 w-[600px] max-h-[80vh] overflow-y-auto origin-top-right bg-white rounded-md shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none z-50"
@@ -187,4 +191,4 @@ const ModelTester: React.FC<ModelTesterProps> = ({ artifactId, version, isDisabl
   );
 };
 
-export default ModelTester;
+export default ModelDeployer;

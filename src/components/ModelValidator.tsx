@@ -9,14 +9,14 @@ interface ValidationResult {
 }
 
 interface ModelValidatorProps {
-  rdfContent?: string;
+  manifestContent?: string;
   isDisabled?: boolean;
   className?: string;
   onValidationComplete?: (result: ValidationResult) => void;
 }
 
 const ModelValidator: React.FC<ModelValidatorProps> = ({ 
-  rdfContent, 
+  manifestContent, 
   isDisabled, 
   className = '',
   onValidationComplete 
@@ -27,15 +27,15 @@ const ModelValidator: React.FC<ModelValidatorProps> = ({
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   const handleValidate = async () => {
-    if (!rdfContent || !server) return;
+    if (!manifestContent || !server) return;
 
     setIsLoading(true);
     setIsMenuOpen(false);
     
     try {
       const runner = await server.getService('chiron-platform/tabula-model-runner', {mode: "last"});
-      const rdfDict = yaml.load(rdfContent);
-      const result = await runner.validate(rdfDict);
+      const manifestDict = yaml.load(manifestContent);
+      const result = await runner.validate(manifestDict);
       
       setValidationResult(result);
       setIsMenuOpen(true);

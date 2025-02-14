@@ -8,6 +8,7 @@ import { Resource } from '../types/resource';
 interface ConnectionConfig {
   server_url: string;
   token?: string;
+  method_timeout?: number;
 }
 
 interface LoginConfig {
@@ -213,7 +214,8 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
       // Use the new connect function with the token
       await get().connect({
         server_url: 'https://hypha.aicell.io',
-        token: token
+        token: token,
+        method_timeout: 300,
       });
 
       // Set both isAuthenticated and isLoggedIn to true after successful login
