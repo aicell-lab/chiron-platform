@@ -259,7 +259,7 @@ class RayDeploymentManager:
                         # Get the deployment handle using the application name
                         handle = serve.get_deployment_handle(k, app_name)
                         model_function = partial(create_model_function, handle, app_name)
-                        service_functions[app_name] = model_function
+                        service_functions[k] = model_function
             
             # Register all model functions as a single service
             service_info = await self.server.register_service({
