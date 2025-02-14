@@ -215,7 +215,7 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
       await get().connect({
         server_url: 'https://hypha.aicell.io',
         token: token,
-        method_timeout: 300,
+        method_timeout: 600,
       });
 
       // Set both isAuthenticated and isLoggedIn to true after successful login

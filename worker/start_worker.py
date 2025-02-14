@@ -86,7 +86,7 @@ class Worker:
                 "server_url": server_url,
                 "workspace": workspace,
                 "token": token,
-                "method_timeout": 300,
+                "method_timeout": 600,
             })
 
             # Connect the manager to Hypha

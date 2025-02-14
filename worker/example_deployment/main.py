@@ -1,4 +1,9 @@
+
 class ChironModel(object):
+    def __init__(self):
+        self.model = None
+        self.iteration = 0
+
     async def __call__(self, data=None):
         import torch
         import torch.nn as nn
@@ -7,7 +12,7 @@ class ChironModel(object):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Initialize transformer directly
-        self.model = nn.Transformer(
+        self.model = self.model or nn.Transformer(
             d_model=64,
             nhead=4,
             num_encoder_layers=2,
@@ -32,5 +37,7 @@ class ChironModel(object):
         loss = self.criterion(output, tgt)
         loss.backward()
         self.optimizer.step()
+
+        self.iteration += 1
         
-        return {"loss": loss.item(), "message": "Completed one training iteration"}
+        return {"loss": loss.item(), "message": "Completed one training iteration",  "iteration": self.iteration}
