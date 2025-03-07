@@ -1,0 +1,2 @@
+  - name: hypha-ray-manager-container
+    image: oeway/hypha-ray-manager:0.1.10 

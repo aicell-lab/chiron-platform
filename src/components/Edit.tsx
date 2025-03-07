@@ -37,6 +37,10 @@ interface ArtifactInfo {
   description?: string;
   version?: string;
   versions?: string[];
+  type?: string;
+  config?: any;
+  created_at?: number;
+  last_modified?: number;
 }
 
 // Add this interface near the top with other interfaces
@@ -50,7 +54,14 @@ interface KeyboardShortcut {
   key: string;
   ctrlKey?: boolean;
   metaKey?: boolean;
-  handler: () => void;
+  handler: (e: KeyboardEvent) => void;
+}
+
+// Add ValidationResult interface
+interface ValidationResult {
+  success: boolean;
+  errors?: string[];
+  warnings?: string[];
 }
 
 const Edit: React.FC = () => {
@@ -198,7 +209,11 @@ const Edit: React.FC = () => {
         id: artifactId,
         description: artifact.manifest.description,
         version: currentVersion,
-        versions: artifact.versions || []
+        versions: artifact.versions || [],
+        type: artifact.manifest.type,
+        config: artifact.manifest.config,
+        created_at: artifact.created_at,
+        last_modified: artifact.last_modified
       });
 
       if (!fileList || fileList.length === 0) {
@@ -480,7 +495,7 @@ const Edit: React.FC = () => {
         version: artifactInfo.version || '1.0',
       },
       config: artifactInfo.config || {},
-      type: 'model',
+      type: artifactInfo.type || 'model',
       created_at: artifactInfo.created_at || Date.now(),
       last_modified: artifactInfo.last_modified || Date.now(),
     };
@@ -694,7 +709,6 @@ const Edit: React.FC = () => {
             </p>
             <ul className="list-disc pl-5 space-y-2">
               <li>The Chiron Platform</li>
-              <li>Zenodo (with DOI assignment)</li>
             </ul>
             <p className="text-red-600 font-medium">
               ⚠️ Warning: This action cannot be undone. Once published, the artifact cannot be withdrawn from either platform.
@@ -1044,8 +1058,8 @@ const Edit: React.FC = () => {
           </button>
         )}
 
-        {/* Model Deployment and Testing */}
-        {artifactId && (
+        {/* Model Deployment and Testing - only show for model type */}
+        {artifactId && artifactInfo?.type !== 'worker' && (
           <div className="flex gap-2">
             <ModelDeployer
               artifactId={artifactId}
@@ -1237,7 +1251,7 @@ const Edit: React.FC = () => {
           _rkwargs: true
         });
         // Filter out directories, only keep files
-        const filesToCopy = existingFiles.filter(file => file.type === 'file');
+        const filesToCopy = existingFiles.filter((file: { type: string }) => file.type === 'file');
 
         // Set up progress tracking
         setCopyProgress({
@@ -1441,9 +1455,19 @@ const Edit: React.FC = () => {
               <>
                 <div className="flex items-center justify-between">
                   <h3 className="font-medium text-gray-900">{artifactInfo.name}</h3>
-                  <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded-full">
-                    {artifactInfo.version === 'stage' ? 'stage' : `v${artifactInfo.version || '1.0'}`}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {artifactInfo.type === 'worker' && (
+                      <span className="text-xs bg-indigo-100 text-indigo-800 px-2 py-1 rounded-full flex items-center gap-1">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+                        </svg>
+                        Worker
+                      </span>
+                    )}
+                    <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded-full">
+                      {artifactInfo.version === 'stage' ? 'stage' : `v${artifactInfo.version || '1.0'}`}
+                    </span>
+                  </div>
                 </div>
                 <div className="text-xs text-gray-500 font-mono mt-2">
                   ID: {artifactInfo.id.split("/").pop()}

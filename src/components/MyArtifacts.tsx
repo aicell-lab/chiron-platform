@@ -213,11 +213,22 @@ const MyArtifacts: React.FC = () => {
                   ]}
                   image={artifact.manifest?.cover || undefined}
                   downloadUrl={`https://hypha.aicell.io/chiron-platform/artifacts/${artifact.id.split('/').pop()}/create-zip-file`}
-                  onEdit={() => navigate(`/edit/${encodeURIComponent(artifact.id)}`)}
+                  onEdit={artifact.type !== 'worker' ? () => navigate(`/edit/${encodeURIComponent(artifact.id)}`) : undefined}
                   onDelete={() => {
                     setArtifactToDelete(artifact);
                     setIsDeleteDialogOpen(true);
                   }}
+                  onManage={artifact.type === 'worker' ? () => {
+                    const workerInfo = {
+                      type: 'worker',
+                      name: artifact.manifest?.name || artifact.alias,
+                      description: artifact.manifest?.description || '',
+                      id: artifact.id,
+                      version: artifact.manifest?.version || '0.1.0'
+                    };
+                    navigate(`/manage-worker/${encodeURIComponent(artifact.id)}`, { state: { workerInfo } });
+                  } : undefined}
+                  hideEdit={artifact.type === 'worker'}
                   isStaged={!!artifact.staging}
                   status={artifact.staging ? 'staged' : 'published'}
                   artifactType={artifact.type}

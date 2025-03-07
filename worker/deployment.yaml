@@ -28,9 +28,12 @@ spec:
           emptyDir: {}
         - name: temp-dir
           emptyDir: {}
+        - name: datasets-volume
+          persistentVolumeClaim:
+            claimName: datasets-pvc
       containers:
         - name: hypha-ray-manager-container
-          image: oeway/hypha-ray-manager:0.1.7
+          image: oeway/hypha-ray-manager:0.1.14
           imagePullPolicy: Always
           volumeMounts:
             - name: dshm
@@ -39,6 +42,8 @@ spec:
               mountPath: /home/ray/.cache  # Mount the ephemeral volume to the .cache folder
             - name: temp-dir
               mountPath: /tmp
+            - name: datasets-volume
+              mountPath: /app/datasets
           env:
             - name: RAY_ADDRESS
               value: "ray://raycluster-kuberay-head-svc.ray-cluster.svc.cluster.local:10001"

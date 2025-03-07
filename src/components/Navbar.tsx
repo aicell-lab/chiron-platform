@@ -59,9 +59,9 @@ const Navbar: React.FC = () => {
               <BsDatabase className="mr-2" size={18} />
               Datasets
             </Link>
-            <Link to="/applications" className={navLinkClasses("/applications")}>
+            <Link to="/workers" className={navLinkClasses("/workers")}>
               <HiOutlineBeaker className="mr-2" size={20} />
-              Applications
+              Workers
             </Link>
             <Link to="/about" className={navLinkClasses("/about")}>
               <AiOutlineInfoCircle className="mr-2" size={18} />
@@ -99,6 +99,8 @@ const Navbar: React.FC = () => {
             <button 
               className="md:hidden"
               onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+              aria-label="Toggle mobile menu"
+              title="Toggle mobile menu"
             >
               <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
@@ -143,11 +145,11 @@ const Navbar: React.FC = () => {
               Datasets
             </Link>
             <Link 
-              to="/applications" 
-              className={mobileNavLinkClasses("/applications")}
+              to="/workers" 
+              className={mobileNavLinkClasses("/workers")}
             >
               <HiOutlineBeaker className="mr-2" size={20} />
-              Applications
+              Workers
             </Link>
             <Link 
               to="/about" 

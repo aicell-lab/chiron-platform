@@ -5,9 +5,10 @@ import SearchBar from './SearchBar';
 import ResourceCard from './ResourceCard';
 import PartnerScroll from './PartnerScroll';
 import { Grid } from '@mui/material';
+import { Resource } from '../types/resource';
 
 interface ResourceGridProps {
-  type?: 'model' | 'application' | 'notebook' | 'dataset';
+  type?: 'model' | 'worker' | 'notebook' | 'dataset';
 }
 
 interface PaginationProps {
@@ -75,7 +76,7 @@ export const ResourceGrid: React.FC<ResourceGridProps> = ({ type }) => {
     const typeMap: { [key: string]: string } = {
       'models': 'model',
       'datasets': 'dataset',
-      'applications': 'application',
+      'workers': 'worker',
       'notebooks': 'notebook'
     };
     return typeMap[path] || null;
@@ -127,6 +128,12 @@ export const ResourceGrid: React.FC<ResourceGridProps> = ({ type }) => {
     setSearchQuery(query);
   };
 
+  // Handle search confirmation (e.g., when user presses enter)
+  const handleSearchConfirm = (query: string) => {
+    setServerSearchQuery(query);
+    setCurrentPage(1);
+  };
+
   const totalPages = Math.ceil(totalItems / itemsPerPage);
 
   return (
@@ -145,6 +152,7 @@ export const ResourceGrid: React.FC<ResourceGridProps> = ({ type }) => {
         />
         <SearchBar 
           onSearchChange={handleSearchChange}
+          onSearchConfirm={handleSearchConfirm}
         />
       </div>
       <Grid container spacing={2} sx={{ padding: { xs: 0.5, sm: 1, md: 2 } }}>

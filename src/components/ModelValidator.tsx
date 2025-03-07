@@ -33,7 +33,7 @@ const ModelValidator: React.FC<ModelValidatorProps> = ({
     setIsMenuOpen(false);
     
     try {
-      const runner = await server.getService('chiron-platform/tabula-model-runner', {mode: "last"});
+      const runner = await server.getService('chiron-platform/chiron-runner', {mode: "last"});
       const manifestDict = yaml.load(manifestContent);
       const result = await runner.validate(manifestDict);
       

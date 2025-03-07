@@ -14,6 +14,7 @@ import './index.css'
 import './github-markdown.css'
 import { HyphaProvider } from './HyphaContext';
 import ModelTrainer from './components/ModelTrainer';
+import ManageWorker from './components/ManageWorker';
 
 // Create a wrapper component that uses Router hooks
 const AppContent: React.FC = () => {
@@ -52,13 +53,14 @@ const AppContent: React.FC = () => {
           <Route path="/resources/:id" element={<ResourceDetails />} />
           <Route path="/about" element={<About />} />
           <Route path="/models" element={<ResourceGrid type="model" />} />
-          <Route path="/applications" element={<ResourceGrid type="application" />} />
+          <Route path="/workers" element={<ResourceGrid type="worker" />} />
           <Route path="/notebooks" element={<ResourceGrid type="notebook" />} />
           <Route path="/datasets" element={<ResourceGrid type="dataset" />} />
           <Route path="/upload" element={<Upload />} />
           <Route path="/my-artifacts" element={<MyArtifacts />} />
           <Route path="/edit/:artifactId" element={<Edit />} />
           <Route path="/model-trainer/:id" element={<ModelTrainer />} />
+          <Route path="/manage-worker/:artifactId" element={<ManageWorker />} />
         </Routes>
       </main>
       <Footer />

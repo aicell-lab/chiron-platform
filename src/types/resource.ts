@@ -9,6 +9,12 @@ export interface Citation {
   doi?: string;
 }
 
+export interface Badge {
+  url: string;
+  icon?: string;
+  label: string;
+}
+
 export interface ResourceManifest {
   name: string;
   icon?: string;
@@ -28,6 +34,7 @@ export interface ResourceManifest {
   license?: string;
   type?: string[];
   covers?: string[];
+  badges?: Badge[];
 }
 
 export interface Resource {

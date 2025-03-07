@@ -4,15 +4,22 @@ from typing import Optional, Dict, Any
 
 import ray
 from ray import serve
-from hypha_rpc import connect_to_server
 import httpx
 from functools import partial
 import json
 from urllib.parse import urljoin
+import sys
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 logger = logging.getLogger("ray-deployment-manager")
+logger.setLevel(logging.INFO)
 
 class RayDeploymentManager:
     def __init__(self, ray_context):
