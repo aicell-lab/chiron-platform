@@ -25,6 +25,7 @@ import {
   Grid,
   CircularProgress,
   Alert,
+  LinearProgress,
 } from '@mui/material';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import { useHyphaStore } from '../store/hyphaStore';
@@ -51,6 +52,19 @@ interface WorkerDatasets {
   datasets: Dataset[];
 }
 
+interface TrainingConfig {
+  modelType: string;
+  learningRate: string;
+  batchSize: string;
+  epochs: string;
+  numRounds: string;
+  minFitClients: string;
+  minEvaluateClients: string;
+  minAvailableClients: string;
+  fractionFit: string;
+  fractionEvaluate: string;
+}
+
 // Mock training data for the chart (we'll replace this with real data later)
 const mockTrainingData = Array.from({ length: 20 }, (_, i) => ({
   epoch: i + 1,
@@ -69,11 +83,17 @@ const ModelTrainer: React.FC = () => {
   const [workerDatasets, setWorkerDatasets] = useState<WorkerDatasets[]>([]);
   const [selectedDatasets, setSelectedDatasets] = useState<{workerId: string, datasetName: string}[]>([]);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
-  const [trainingConfig, setTrainingConfig] = useState({
+  const [trainingConfig, setTrainingConfig] = useState<TrainingConfig>({
     modelType: 'tabula',
     learningRate: '0.001',
     batchSize: '32',
-    epochs: '100',
+    epochs: '1',
+    numRounds: '10',
+    minFitClients: '1',
+    minEvaluateClients: '1',
+    minAvailableClients: '1',
+    fractionFit: '1.0',
+    fractionEvaluate: '1.0'
   });
   const [isTraining, setIsTraining] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,11 +101,72 @@ const ModelTrainer: React.FC = () => {
   const [orchestratorInfo, setOrchestratorInfo] = useState<any>(null);
   const [modelClients, setModelClients] = useState<any[]>([]);
 
+  // Training progress state
+  const [progressValue, setProgressValue] = useState(0);
+  const [maxRounds, setMaxRounds] = useState(0);
+  const [currentMessage, setCurrentMessage] = useState<string | null>(null);
+  
+  // Training metrics state
+  const [trainRounds, setTrainRounds] = useState<number[]>([]);
+  const [trainLossData, setTrainLossData] = useState<number[]>([]);
+  const [trainAccData, setTrainAccData] = useState<number[]>([]);
+  const [valRounds, setValRounds] = useState<number[]>([]);
+  const [valLossData, setValLossData] = useState<number[]>([]);
+  const [valAccData, setValAccData] = useState<number[]>([]);
+  
+  // Current metrics for display
+  const [currentTrainingLoss, setCurrentTrainingLoss] = useState<number | null>(null);
+  const [currentTrainingAcc, setCurrentTrainingAcc] = useState<number | null>(null);
+  const [currentValLoss, setCurrentValLoss] = useState<number | null>(null);
+  const [currentValAcc, setCurrentValAcc] = useState<number | null>(null);
+
+  // Add new state for orchestrator worker
+  const [selectedOrchestratorWorker, setSelectedOrchestratorWorker] = useState<string>('');
+  const [workerManager, setWorkerManager] = useState<any>(null);
+
   useEffect(() => {
     if (isLoggedIn && artifactManager) {
       loadWorkers();
     }
   }, [isLoggedIn, artifactManager]);
+
+  useEffect(() => {
+    if (isLoggedIn && server) {
+      // Listen for progress events from the orchestrator
+      server.on("progress", (data: any) => {
+        if (data.message) {
+          setCurrentMessage(data.message);
+        }
+        if (!data.progress) return;
+
+        const { type, round, metrics } = data.progress;
+        
+        // Handle training (fit) progress
+        if (type === "fit") {
+          const { loss, accuracy } = metrics;
+          setTrainRounds(prev => [...prev, round]);
+          setTrainLossData(prev => [...prev, loss]);
+          setTrainAccData(prev => [...prev, accuracy]);
+          setCurrentTrainingLoss(loss);
+          setCurrentTrainingAcc(accuracy);
+          setProgressValue(round);
+        } 
+        // Handle validation (evaluate) progress
+        else if (type === "evaluate") {
+          setValRounds(prev => [...prev, round]);
+          setValLossData(prev => [...prev, metrics.loss]);
+          setValAccData(prev => [...prev, metrics.accuracy]);
+          setCurrentValLoss(metrics.loss);
+          setCurrentValAcc(metrics.accuracy);
+        }
+        // Handle training finish
+        else if (type === "finish") {
+          setIsTraining(false);
+          setCurrentMessage("Training completed!");
+        }
+      });
+    }
+  }, [isLoggedIn, server]);
 
   const loadWorkers = async () => {
     try {
@@ -172,49 +253,95 @@ const ModelTrainer: React.FC = () => {
   };
 
   const handleStartTraining = async () => {
+    if (!selectedOrchestratorWorker) {
+      setError('Please select a worker to run the orchestrator');
+      return;
+    }
+
     try {
       setIsTraining(true);
       setError(null);
+      
+      // Clear previous training data
+      setTrainRounds([]);
+      setTrainLossData([]);
+      setTrainAccData([]);
+      setValRounds([]);
+      setValLossData([]);
+      setValAccData([]);
+      setCurrentTrainingLoss(null);
+      setCurrentTrainingAcc(null);
+      setCurrentValLoss(null);
+      setCurrentValAcc(null);
+      setCurrentMessage(null);
 
-      // Launch orchestrator first
-      for (const workerId of selectedWorkers) {
+      const numRounds = parseInt(trainingConfig.numRounds);
+      setProgressValue(0);
+      setMaxRounds(numRounds);
+
+      // Get the worker service
+      const manager = await server.getService(selectedOrchestratorWorker.split('/')[1]);
+      setWorkerManager(manager);
+
+      // Launch orchestrator on the selected worker
+      const response = await manager.launch_orchestrator({
+        num_rounds: numRounds,
+        _rkwargs: true
+      });
+
+      if (response.error) {
+        throw new Error(`Failed to launch orchestrator: ${response.error}`);
+      }
+
+      setOrchestratorInfo(response);
+
+      // Launch model clients for each selected worker/dataset pair
+      for (const { workerId, datasetName } of selectedDatasets) {
         const workerService = await server.getService(workerId.split('/')[1]);
-        
-        // Launch orchestrator
-        const orchestratorResponse = await workerService.launch_orchestrator({
-          num_rounds: parseInt(trainingConfig.epochs),
+        const modelResponse = await workerService.load_model({
+          model_id: trainingConfig.modelType,
+          dataset_path: datasetName,
           _rkwargs: true
         });
 
-        if (orchestratorResponse.error) {
-          throw new Error(`Failed to launch orchestrator: ${orchestratorResponse.error}`);
+        if (modelResponse.error) {
+          throw new Error(`Failed to launch model client: ${modelResponse.error}`);
         }
 
-        setOrchestratorInfo(orchestratorResponse);
-
-        // Launch model clients for each selected dataset
-        const workerDatasets = selectedDatasets.filter(ds => ds.workerId === workerId);
-        
-        for (const dataset of workerDatasets) {
-          const modelResponse = await workerService.load_model({
-            model_id: trainingConfig.modelType,
-            dataset_path: dataset.datasetName,
-            _rkwargs: true
-          });
-
-          if (modelResponse.error) {
-            throw new Error(`Failed to launch model client: ${modelResponse.error}`);
-          }
-
-          setModelClients(prev => [...prev, modelResponse]);
-        }
+        setModelClients(prev => [...prev, modelResponse]);
       }
 
-      // Move to next step
-      handleNext();
+      handleNext(); // Move to next step in stepper
     } catch (err) {
       console.error('Error starting training:', err);
       setError(err instanceof Error ? err.message : 'Failed to start training');
+      setIsTraining(false);
+    }
+  };
+
+  const handleStopTraining = async () => {
+    if (!workerManager || !orchestratorInfo) {
+      return;
+    }
+
+    try {
+      await workerManager.stop_orchestrator({
+        orchestrator_id: orchestratorInfo.orchestrator_id,
+        _rkwargs: true
+      });
+
+      // Stop all model clients
+      for (const { workerId } of selectedDatasets) {
+        try {
+          const workerService = await server.getService(workerId.split('/')[1]);
+          // You might need to implement a method to stop specific model clients
+          // This depends on your worker API
+        } catch (error) {
+          console.error(`Failed to stop model client on worker ${workerId}:`, error);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to stop training:', err);
     } finally {
       setIsTraining(false);
     }
@@ -360,6 +487,25 @@ const ModelTrainer: React.FC = () => {
             </Typography>
             <Paper sx={{ p: 3, maxWidth: 600, mx: 'auto' }}>
               <Grid container spacing={3}>
+                {/* Worker Selection */}
+                <Grid item xs={12}>
+                  <FormControl fullWidth>
+                    <InputLabel>Select Worker for Orchestrator</InputLabel>
+                    <Select
+                      value={selectedOrchestratorWorker}
+                      onChange={(e) => setSelectedOrchestratorWorker(e.target.value)}
+                      label="Select Worker for Orchestrator"
+                    >
+                      {workers.map((worker) => (
+                        <MenuItem key={worker.id} value={worker.id}>
+                          {worker.manifest.name}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </Grid>
+
+                {/* Model Selection */}
                 <Grid item xs={12}>
                   <FormControl fullWidth>
                     <InputLabel>Model Type</InputLabel>
@@ -373,7 +519,9 @@ const ModelTrainer: React.FC = () => {
                     </Select>
                   </FormControl>
                 </Grid>
-                <Grid item xs={12}>
+
+                {/* Rest of the configuration fields */}
+                <Grid item xs={12} sm={6}>
                   <TextField
                     fullWidth
                     label="Learning Rate"
@@ -383,7 +531,7 @@ const ModelTrainer: React.FC = () => {
                     inputProps={{ step: '0.0001' }}
                   />
                 </Grid>
-                <Grid item xs={12}>
+                <Grid item xs={12} sm={6}>
                   <TextField
                     fullWidth
                     label="Batch Size"
@@ -392,31 +540,115 @@ const ModelTrainer: React.FC = () => {
                     onChange={handleConfigChange('batchSize')}
                   />
                 </Grid>
-                <Grid item xs={12}>
+                <Grid item xs={12} sm={6}>
                   <TextField
                     fullWidth
-                    label="Number of Epochs"
+                    label="Local Epochs"
                     type="number"
                     value={trainingConfig.epochs}
                     onChange={handleConfigChange('epochs')}
                   />
                 </Grid>
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Number of Rounds"
+                    type="number"
+                    value={trainingConfig.numRounds}
+                    onChange={handleConfigChange('numRounds')}
+                  />
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Min Fit Clients"
+                    type="number"
+                    value={trainingConfig.minFitClients}
+                    onChange={handleConfigChange('minFitClients')}
+                  />
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Min Evaluate Clients"
+                    type="number"
+                    value={trainingConfig.minEvaluateClients}
+                    onChange={handleConfigChange('minEvaluateClients')}
+                  />
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Fraction Fit"
+                    type="number"
+                    value={trainingConfig.fractionFit}
+                    onChange={handleConfigChange('fractionFit')}
+                    inputProps={{ step: '0.1', min: 0, max: 1 }}
+                  />
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    label="Fraction Evaluate"
+                    type="number"
+                    value={trainingConfig.fractionEvaluate}
+                    onChange={handleConfigChange('fractionEvaluate')}
+                    inputProps={{ step: '0.1', min: 0, max: 1 }}
+                  />
+                </Grid>
               </Grid>
+
               {error && (
                 <Alert severity="error" sx={{ mt: 3 }}>
                   {error}
                 </Alert>
               )}
-              <Box sx={{ mt: 3, display: 'flex', justifyContent: 'center' }}>
+
+              <Box sx={{ mt: 3, display: 'flex', justifyContent: 'center', gap: 2 }}>
                 <Button
                   variant="contained"
                   color="primary"
                   onClick={handleStartTraining}
-                  disabled={isTraining}
+                  disabled={isTraining || !selectedOrchestratorWorker || selectedDatasets.length === 0}
+                  startIcon={isTraining ? <CircularProgress size={20} /> : null}
                 >
-                  {isTraining ? 'Starting Training...' : 'Start Training'}
+                  {isTraining ? 'Training...' : 'Start Training'}
                 </Button>
+                {isTraining && (
+                  <Button
+                    variant="outlined"
+                    color="secondary"
+                    onClick={handleStopTraining}
+                  >
+                    Stop Training
+                  </Button>
+                )}
               </Box>
+
+              {/* Selected Configuration Summary */}
+              {selectedOrchestratorWorker && selectedDatasets.length > 0 && (
+                <Box sx={{ mt: 4, p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
+                  <Typography variant="subtitle2" gutterBottom>
+                    Training Setup Summary:
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Orchestrator Worker: {workers.find(w => w.id === selectedOrchestratorWorker)?.manifest.name}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Selected Datasets: {selectedDatasets.length}
+                  </Typography>
+                  <List dense>
+                    {selectedDatasets.map(({ workerId, datasetName }, index) => (
+                      <ListItem key={index}>
+                        <ListItemText
+                          primary={datasetName}
+                          secondary={workers.find(w => w.id === workerId)?.manifest.name}
+                        />
+                      </ListItem>
+                    ))}
+                  </List>
+                </Box>
+              )}
             </Paper>
           </Box>
         );
@@ -434,70 +666,151 @@ const ModelTrainer: React.FC = () => {
                 </Alert>
               ) : (
                 <>
+                  {/* Progress Information */}
                   <Box sx={{ mb: 3 }}>
                     <Typography variant="subtitle1" gutterBottom>
-                      Orchestrator Status
+                      Training Status
                     </Typography>
-                    {orchestratorInfo && (
-                      <Grid container spacing={2}>
-                        <Grid item xs={12} sm={6}>
-                          <Typography variant="body2" color="text.secondary">
-                            ID: {orchestratorInfo.orchestrator_id}
-                          </Typography>
-                        </Grid>
-                        <Grid item xs={12} sm={6}>
-                          <Typography variant="body2" color="text.secondary">
-                            Status: {orchestratorInfo.status || 'running'}
-                          </Typography>
-                        </Grid>
-                      </Grid>
+                    {currentMessage && (
+                      <Alert severity="info" sx={{ mb: 2 }}>
+                        {currentMessage}
+                      </Alert>
+                    )}
+                    {isTraining && (
+                      <Box sx={{ width: '100%', mb: 2 }}>
+                        <LinearProgress 
+                          variant="determinate" 
+                          value={(progressValue / maxRounds) * 100} 
+                        />
+                        <Typography variant="body2" color="text.secondary" align="center" sx={{ mt: 1 }}>
+                          Round {progressValue} of {maxRounds}
+                        </Typography>
+                      </Box>
                     )}
                   </Box>
 
-                  <Box sx={{ mb: 3 }}>
-                    <Typography variant="subtitle1" gutterBottom>
-                      Connected Model Clients
-                    </Typography>
-                    <List>
-                      {modelClients.map((client, index) => (
-                        <ListItem key={client.client_id}>
-                          <ListItemText
-                            primary={`Client ${index + 1}: ${client.client_id}`}
-                            secondary={`Status: ${client.status}`}
-                          />
-                        </ListItem>
-                      ))}
-                    </List>
-                  </Box>
+                  {/* Current Metrics */}
+                  <Grid container spacing={2} sx={{ mb: 3 }}>
+                    <Grid item xs={12} sm={6} md={3}>
+                      <Paper sx={{ p: 2, textAlign: 'center' }}>
+                        <Typography variant="subtitle2" color="text.secondary">
+                          Training Loss
+                        </Typography>
+                        <Typography variant="h6">
+                          {currentTrainingLoss?.toFixed(4) || '--'}
+                        </Typography>
+                      </Paper>
+                    </Grid>
+                    <Grid item xs={12} sm={6} md={3}>
+                      <Paper sx={{ p: 2, textAlign: 'center' }}>
+                        <Typography variant="subtitle2" color="text.secondary">
+                          Training Accuracy
+                        </Typography>
+                        <Typography variant="h6">
+                          {currentTrainingAcc ? `${(currentTrainingAcc * 100).toFixed(2)}%` : '--'}
+                        </Typography>
+                      </Paper>
+                    </Grid>
+                    <Grid item xs={12} sm={6} md={3}>
+                      <Paper sx={{ p: 2, textAlign: 'center' }}>
+                        <Typography variant="subtitle2" color="text.secondary">
+                          Validation Loss
+                        </Typography>
+                        <Typography variant="h6">
+                          {currentValLoss?.toFixed(4) || '--'}
+                        </Typography>
+                      </Paper>
+                    </Grid>
+                    <Grid item xs={12} sm={6} md={3}>
+                      <Paper sx={{ p: 2, textAlign: 'center' }}>
+                        <Typography variant="subtitle2" color="text.secondary">
+                          Validation Accuracy
+                        </Typography>
+                        <Typography variant="h6">
+                          {currentValAcc ? `${(currentValAcc * 100).toFixed(2)}%` : '--'}
+                        </Typography>
+                      </Paper>
+                    </Grid>
+                  </Grid>
 
-                  <Box sx={{ width: '100%', height: 400 }}>
-                    <LineChart
-                      width={800}
-                      height={400}
-                      data={mockTrainingData}
-                      margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="epoch" />
-                      <YAxis yAxisId="left" />
-                      <YAxis yAxisId="right" orientation="right" />
-                      <Tooltip />
-                      <Legend />
-                      <Line
-                        yAxisId="left"
-                        type="monotone"
-                        dataKey="loss"
-                        stroke="#8884d8"
-                        name="Loss"
-                      />
-                      <Line
-                        yAxisId="right"
-                        type="monotone"
-                        dataKey="accuracy"
-                        stroke="#82ca9d"
-                        name="Accuracy"
-                      />
-                    </LineChart>
+                  {/* Training Charts */}
+                  <Box sx={{ width: '100%', display: 'flex', flexWrap: 'wrap' }}>
+                    <Box sx={{ width: '100%', md: '50%', p: 1 }}>
+                      <LineChart
+                        width={500}
+                        height={300}
+                        margin={{ top: 20, right: 30, left: 20, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="round" />
+                        <YAxis yAxisId="left" />
+                        <YAxis yAxisId="right" orientation="right" />
+                        <Tooltip />
+                        <Legend />
+                        <Line
+                          yAxisId="left"
+                          type="monotone"
+                          data={trainRounds.map((round, i) => ({
+                            round,
+                            loss: trainLossData[i],
+                            accuracy: trainAccData[i]
+                          }))}
+                          dataKey="loss"
+                          name="Training Loss"
+                          stroke="#8884d8"
+                        />
+                        <Line
+                          yAxisId="right"
+                          type="monotone"
+                          data={trainRounds.map((round, i) => ({
+                            round,
+                            loss: trainLossData[i],
+                            accuracy: trainAccData[i]
+                          }))}
+                          dataKey="accuracy"
+                          name="Training Accuracy"
+                          stroke="#82ca9d"
+                        />
+                      </LineChart>
+                    </Box>
+                    <Box sx={{ width: '100%', md: '50%', p: 1 }}>
+                      <LineChart
+                        width={500}
+                        height={300}
+                        margin={{ top: 20, right: 30, left: 20, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="round" />
+                        <YAxis yAxisId="left" />
+                        <YAxis yAxisId="right" orientation="right" />
+                        <Tooltip />
+                        <Legend />
+                        <Line
+                          yAxisId="left"
+                          type="monotone"
+                          data={valRounds.map((round, i) => ({
+                            round,
+                            loss: valLossData[i],
+                            accuracy: valAccData[i]
+                          }))}
+                          dataKey="loss"
+                          name="Validation Loss"
+                          stroke="#8884d8"
+                        />
+                        <Line
+                          yAxisId="right"
+                          type="monotone"
+                          data={valRounds.map((round, i) => ({
+                            round,
+                            loss: valLossData[i],
+                            accuracy: valAccData[i]
+                          }))}
+                          dataKey="accuracy"
+                          name="Validation Accuracy"
+                          stroke="#82ca9d"
+                        />
+                      </LineChart>
+                    </Box>
                   </Box>
                 </>
               )}
