@@ -59,9 +59,9 @@ const Navbar: React.FC = () => {
               <BsDatabase className="mr-2" size={18} />
               Datasets
             </Link>
-            <Link to="/workers" className={navLinkClasses("/workers")}>
+            <Link to="/bioengine" className={navLinkClasses("/bioengine")}>
               <HiOutlineBeaker className="mr-2" size={20} />
-              Workers
+              BioEngine
             </Link>
             <Link to="/about" className={navLinkClasses("/about")}>
               <AiOutlineInfoCircle className="mr-2" size={18} />
@@ -145,11 +145,11 @@ const Navbar: React.FC = () => {
               Datasets
             </Link>
             <Link 
-              to="/workers" 
-              className={mobileNavLinkClasses("/workers")}
+              to="/bioengine" 
+              className={mobileNavLinkClasses("/bioengine")}
             >
               <HiOutlineBeaker className="mr-2" size={20} />
-              Workers
+              BioEngine
             </Link>
             <Link 
               to="/about" 

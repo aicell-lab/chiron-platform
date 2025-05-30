@@ -15,6 +15,8 @@ import './github-markdown.css'
 import { HyphaProvider } from './HyphaContext';
 import ModelTrainer from './components/ModelTrainer';
 import ManageWorker from './components/ManageWorker';
+import BioEngineHome from './components/BioEngineHome';
+import BioEngineWorker from './components/BioEngineWorker';
 
 // Create a wrapper component that uses Router hooks
 const AppContent: React.FC = () => {
@@ -61,6 +63,8 @@ const AppContent: React.FC = () => {
           <Route path="/edit/:artifactId" element={<Edit />} />
           <Route path="/model-trainer/:id" element={<ModelTrainer />} />
           <Route path="/manage-worker/:artifactId" element={<ManageWorker />} />
+          <Route path="/bioengine" element={<BioEngineHome />} />
+          <Route path="/bioengine/worker" element={<BioEngineWorker />} />
         </Routes>
       </main>
       <Footer />
