@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { HashRouter, Routes, Route, useLocation } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { HashRouter, Routes, Route, useLocation, Navigate } from 'react-router-dom';
 import Navbar from './components/Navbar';
 
 import ResourceGrid from './components/ResourceGrid';
@@ -13,16 +13,18 @@ import Edit from './components/Edit';
 import './index.css'
 import './github-markdown.css'
 import { HyphaProvider } from './HyphaContext';
+import { ProjectsProvider } from './providers/ProjectsProvider';
 import ModelTrainer from './components/ModelTrainer';
 import ManageWorker from './components/ManageWorker';
 import BioEngineHome from './components/BioEngineHome';
 import BioEngineWorker from './components/BioEngineWorker';
+import AgentLab from './pages/AgentLab';
 
 // Create a wrapper component that uses Router hooks
 const AppContent: React.FC = () => {
   const location = useLocation();
-  const searchParams = new URLSearchParams(location.search);
-  const hasResourceId = searchParams.has('id');
+  const isAgentLabRoute = location.pathname === '/lab' || location.pathname === '/notebook';
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // Add state for Snackbar
   const [snackbarOpen, setSnackbarOpen] = React.useState(false);
@@ -40,6 +42,29 @@ const AppContent: React.FC = () => {
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [location]);
+
+  const toggleSidebar = () => {
+    setSidebarOpen(!sidebarOpen);
+  };
+
+  // Close sidebar on mobile when route changes
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname]);
+
+  // For agent lab route, don't show the Navbar and use full-screen layout
+  if (isAgentLabRoute) {
+    return (
+      <div className="flex flex-col h-screen">
+        <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          <Routes>
+            <Route path="/lab" element={<AgentLab />} />
+            <Route path="/notebook" element={<Navigate to="/lab" replace />} />
+          </Routes>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -76,9 +101,11 @@ const AppContent: React.FC = () => {
 const App: React.FC = () => {
   return (
     <HyphaProvider>
-      <HashRouter>
-        <AppContent />
-      </HashRouter>
+      <ProjectsProvider>
+        <HashRouter>
+          <AppContent />
+        </HashRouter>
+      </ProjectsProvider>
     </HyphaProvider>
   );
 };

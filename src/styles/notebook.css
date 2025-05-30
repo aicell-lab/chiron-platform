@@ -1,0 +1,330 @@
+/* Notebook and Jupyter-like Styling */
+
+/* Base Editor Styles */
+.jupyter-editor {
+  font-family: 'JetBrains Mono', Menlo, Monaco, Consolas, monospace !important;
+  font-size: 13px !important;
+  line-height: 1.5 !important;
+  transition: border-color 0.2s ease;
+  overflow: visible !important;
+  max-width: 100%;
+  min-height: 76px; /* Initial minimum height: enough for 3 lines (19px * 3) + padding (19px) */
+}
+
+/* Cell Layout and Structure */
+.jupyter-cell-flex-container {
+  margin-bottom: 4px;
+  min-height: 40px;
+  display: flex;
+  width: 100%;
+  overflow: hidden;
+}
+
+.notebook-cell-container {
+  position: relative;
+  margin-bottom: 0.25rem;
+  border-radius: 0.375rem;
+  overflow: visible; /* Ensure shadow isn't clipped */
+  background: white;
+  border: 1px solid transparent;
+  transition: border-color 0.2s ease;
+}
+
+.notebook-cell-container:hover {
+  border-color: rgb(229 231 235); /* Tailwind gray-200 */
+}
+
+/* Add subtle shadow for parent cells only */
+.notebook-cell-container:not(.child-cell) {
+  /* x-offset | y-offset | blur-radius | spread-radius | color */
+  box-shadow: -2px 2px 5px -1px rgba(0, 0, 0, 0.06);
+}
+
+.notebook-cell {
+  position: relative;
+  transition: all 0.2s ease;
+}
+
+/* Editor Container Styling */
+.editor-container {
+  flex-grow: 1;
+  min-width: 0;
+  max-width: calc(100% - 74px); /* Account for execution count width */
+  overflow: hidden;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.output-area-container {
+  border: 2px solid rgb(229 231 235); /* Tailwind gray-200 */
+  border-radius: 4px;
+  flex-grow: 1;
+  min-width: 0;
+  margin-bottom: 10px;
+  max-width: calc(100% - 14px); /* Account for execution count width */
+  overflow: hidden;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+
+/* Border Styles for Different Cell Types */
+.code-cell .editor-container,
+.markdown-cell.editing .editor-container {
+  border: 2px solid rgb(229 231 235); /* Tailwind gray-200 */
+  border-radius: 4px;
+}
+
+/* Active States */
+.code-cell .editor-container-active,
+.markdown-cell.editing .editor-container-active,
+.markdown-cell.editing .editor-container:focus-within {
+  border-color: rgba(59, 131, 246, 0.417) !important; /* Tailwind blue-500 */
+  box-shadow: 0 2px 4px -1px rgba(59, 130, 246, 0.1);
+}
+
+.notebook-cell-active {
+  position: relative;
+}
+
+
+.child-cell::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 1px;
+  background-color: rgba(156, 163, 175, 0.261); /* Tailwind gray-400 */
+  transition: background-color 0.2s ease;
+  left: 8px;
+  box-shadow: 0 2px 2px -1px rgba(0, 0, 0, 0.2); /* Subtle shadow at bottom */
+}
+
+/* Remove old styles */
+.child-cell:first-of-type::before {
+  display: block;
+}
+
+/* Monaco Editor Overrides */
+.monaco-editor .margin,
+.monaco-editor .monaco-editor-background,
+.monaco-editor .inputarea.ime-input,
+.monaco-editor {
+  border: none !important;
+  outline: none !important;
+}
+
+.jupyter-editor .monaco-editor {
+  padding-left: 8px;
+  padding-right: 8px;
+  overflow: visible !important;
+}
+
+.jupyter-editor .monaco-editor .margin {
+  background: transparent !important;
+}
+
+.jupyter-editor .monaco-editor .line-numbers {
+  color: #999 !important;
+  font-size: 12px !important;
+  font-family: 'JetBrains Mono', Menlo, Monaco, Consolas, monospace !important;
+  margin-right: 8px !important;
+}
+
+/* Scrollbar Styling */
+.jupyter-editor .monaco-scrollable-element {
+  scrollbar-width: none !important;
+}
+
+.jupyter-editor .monaco-scrollable-element::-webkit-scrollbar {
+  display: none !important;
+}
+
+.monaco-scrollable-element > .scrollbar > .slider {
+  background: rgba(100, 100, 100, 0.4) !important;
+}
+
+/* Output Styling */
+.jupyter-output {
+  font-family: 'JetBrains Mono', Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 8px 0;
+}
+
+.jupyter-output pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.output-area {
+  font-family: 'JetBrains Mono', Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-x: auto;
+  padding: 4px 0;
+  max-width: 100%;
+}
+
+.jupyter-output-container {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Clean Output Containers */
+.jupyter-output-container,
+.output-area,
+.bg-gray-50 {
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* Execution Count Styling */
+.execution-count {
+  font-family: 'JetBrains Mono', Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  color: #878788;
+  width: 64px;
+  min-width: 64px;
+  text-align: right;
+  padding-right: 8px;
+  padding-top: 9px;
+  margin-top: 5px;
+  -webkit-user-select: none;
+  user-select: none;
+  font-weight: bold;
+}
+
+@media (max-width: 640px) {
+  .execution-count {
+    width: 48px;
+    min-width: 48px;
+    padding-right: 4px;
+  }
+}
+
+/* Markdown Cell Styling */
+.markdown-cell:not(.editing) .editor-container {
+  border: none;
+  box-shadow: none;
+}
+
+/* Remove Focus Outlines */
+.notebook-cell:focus-within {
+  outline: none !important;
+}
+
+
+.notebook-cell-container:focus {
+  outline: none !important;
+}
+
+
+/* Remove any lingering focus styles */
+.notebook-cell-container *:focus {
+  outline: none !important;
+}
+
+/* Clean up Monaco editor focus styles */
+.monaco-editor .focused {
+  outline: none !important;
+}
+
+/* Delete Button Group */
+.expanded .hidden {
+  display: flex;
+}
+
+.expanded {
+  background-color: #fff;
+  border-radius: 0.375rem;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.expanded:hover {
+  background-color: #fee2e2;
+}
+
+.whitespace-nowrap {
+  white-space: nowrap;
+  height: 100%;
+}
+
+/* Scroll and Overflow Handling */
+.monaco-editor .overflow-guard {
+  overflow: visible !important;
+}
+
+.monaco-editor-background {
+  pointer-events: auto !important;
+}
+
+.monaco-editor .scroll-decoration {
+  box-shadow: none !important;
+}
+
+/* Add styles for sidebar */
+.sidebar-enter {
+  width: 0;
+  overflow: hidden;
+}
+.sidebar-enter-active {
+  width: 240px;
+  transition: width 200ms ease-in-out;
+}
+.sidebar-exit {
+  width: 240px;
+  overflow: hidden;
+}
+.sidebar-exit-active {
+  width: 0;
+  transition: width 200ms ease-in-out;
+}
+
+/* Media queries for responsive sidebar */
+@media (max-width: 768px) {
+  .sidebar-collapsed-width {
+    width: 0 !important;
+  }
+  
+  .sidebar-expanded-width {
+    width: 100% !important;
+    position: absolute;
+    z-index: 50;
+    top: 0;
+    bottom: 0;
+    left: 0;
+  }
+}
+
+/* Styles for drag handle */
+.sidebar-resizer {
+  display: block;
+  position: absolute;
+  top: 0;
+  right: -3px;
+  height: 100%;
+  width: 6px;
+  background-color: transparent;
+  cursor: col-resize;
+  z-index: 20;
+}
+
+.sidebar-resizer:hover, 
+.sidebar-resizer:active {
+  background-color: #e5e7eb;
+}
+
+/* Adjust notebook page when sidebar is visible */
+.notebook-with-sidebar {
+  margin-left: 16px;
+}
+
+
+/* System cell specific styling */
+.system-cell {
+  background: transparent;
+}
+
+.system-cell .editor-container {
+  background: rgba(249, 250, 251, 0.5);
+} 

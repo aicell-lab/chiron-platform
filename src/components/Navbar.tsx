@@ -5,7 +5,8 @@ import { BiCube } from 'react-icons/bi';
 import { BsDatabase, BsCollection } from 'react-icons/bs';
 import { HiOutlineBeaker } from 'react-icons/hi';
 import { IoDocumentTextOutline, IoCloudUploadOutline } from 'react-icons/io5';
-import { AiOutlineInfoCircle } from 'react-icons/ai';
+import { TbEngine } from 'react-icons/tb';
+import { RiTestTubeLine } from 'react-icons/ri';
 import { RiLoginBoxLine } from 'react-icons/ri';
 import { useHyphaStore } from '../store/hyphaStore';
 
@@ -60,12 +61,12 @@ const Navbar: React.FC = () => {
               Datasets
             </Link>
             <Link to="/bioengine" className={navLinkClasses("/bioengine")}>
-              <HiOutlineBeaker className="mr-2" size={20} />
+              <TbEngine className="mr-2" size={20} />
               BioEngine
             </Link>
-            <Link to="/about" className={navLinkClasses("/about")}>
-              <AiOutlineInfoCircle className="mr-2" size={18} />
-              About
+            <Link to="/lab" className={navLinkClasses("/lab")}>
+              <RiTestTubeLine className="mr-2" size={20} />
+              Chiron Lab
             </Link>
           </div>
 
@@ -148,15 +149,15 @@ const Navbar: React.FC = () => {
               to="/bioengine" 
               className={mobileNavLinkClasses("/bioengine")}
             >
-              <HiOutlineBeaker className="mr-2" size={20} />
+              <TbEngine className="mr-2" size={20} />
               BioEngine
             </Link>
             <Link 
-              to="/about" 
-              className={mobileNavLinkClasses("/about")}
+              to="/lab" 
+              className={mobileNavLinkClasses("/lab")}
             >
-              <AiOutlineInfoCircle className="mr-2" size={18} />
-              About
+              <RiTestTubeLine className="mr-2" size={20} />
+              Chiron Lab
             </Link>
 
             {/* Add divider */}
