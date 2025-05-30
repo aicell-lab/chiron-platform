@@ -1218,7 +1218,7 @@ class MyNewApp:
               BioEngine Dashboard
             </h1>
             </div>
-            <p className="text-gray-600 mt-2">Manage and deploy your bioimage analysis applications</p>
+            <p className="text-gray-600 mt-2">Manage and deploy your single-cell analysis applications</p>
           </div>
           
           {serviceId && (
