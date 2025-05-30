@@ -30,6 +30,8 @@ const BioEngineGuide: React.FC = () => {
   const [promptCopied, setPromptCopied] = useState(false);
   const [interactiveMode, setInteractiveMode] = useState(false);
   const [shmSize, setShmSize] = useState('2g');
+  const [customImage, setCustomImage] = useState('');
+  const [platformOverride, setPlatformOverride] = useState('');
 
   // Ref for the troubleshooting dialog
   const troubleshootingDialogRef = useRef<HTMLDivElement>(null);
@@ -49,7 +51,7 @@ const BioEngineGuide: React.FC = () => {
   }, [showTroubleshooting]);
 
   const getPlatform = () => {
-    return `linux/${arch}`;
+    return platformOverride || '';
   };
 
   const getUserFlag = () => {
@@ -110,6 +112,9 @@ const BioEngineGuide: React.FC = () => {
     if (logDir) args.push(`--log_dir ${logDir}`);
     if (cacheDir) args.push(`--cache_dir ${cacheDir}`);
     
+    // Add custom image if specified
+    if (customImage) args.push(`--image ${customImage}`);
+    
     const argsString = args.length > 0 ? args.join(' ') : '';
     
     // SLURM mode uses the bash script instead of Docker
@@ -129,6 +134,8 @@ const BioEngineGuide: React.FC = () => {
     const userFlag = getUserFlag();
     const gpuFlag = getGpuFlag();
     const shmFlag = `--shm-size=${shmSize} `;
+    const platformFlag = platform ? `--platform ${platform} ` : '';
+    const imageToUse = customImage || 'ghcr.io/aicell-lab/bioengine-worker:0.1.17';
     
     // Determine mount directories and host paths
     let mountDir = '/tmp';
@@ -181,8 +188,8 @@ const BioEngineGuide: React.FC = () => {
     if (interactiveMode) {
       // Interactive mode - separate container run and python command with --entrypoint bash
       const containerCmd = os === 'windows' 
-        ? `${containerRuntime} run --platform ${platform} --rm -it ${shmFlag}--entrypoint bash ${gpuFlag}${volumeMounts} ghcr.io/aicell-lab/bioengine-worker:0.1.17`
-        : `${containerRuntime} run --platform ${platform} --rm -it ${shmFlag}${userFlag}--entrypoint bash ${gpuFlag}${volumeMounts} ghcr.io/aicell-lab/bioengine-worker:0.1.17`;
+        ? `${containerRuntime} run ${platformFlag}--rm -it ${shmFlag}--entrypoint bash ${gpuFlag}${volumeMounts} ${imageToUse}`
+        : `${containerRuntime} run ${platformFlag}--rm -it ${shmFlag}${userFlag}--entrypoint bash ${gpuFlag}${volumeMounts} ${imageToUse}`;
       
       const pythonCmd = `python -m bioengine_worker ${argsString}`;
       
@@ -195,9 +202,9 @@ const BioEngineGuide: React.FC = () => {
       // Single command mode
       let dockerCmd = '';
       if (os === 'windows') {
-        dockerCmd = `${containerRuntime} run ${gpuFlag}--platform ${platform} -it --rm ${shmFlag}${volumeMounts} ghcr.io/aicell-lab/bioengine-worker:0.1.17 python -m bioengine_worker ${argsString}`;
+        dockerCmd = `${containerRuntime} run ${gpuFlag}${platformFlag}-it --rm ${shmFlag}${volumeMounts} ${imageToUse} python -m bioengine_worker ${argsString}`;
       } else {
-        dockerCmd = `${containerRuntime} run ${gpuFlag}--platform ${platform} -it --rm ${shmFlag}${userFlag}${volumeMounts} ghcr.io/aicell-lab/bioengine-worker:0.1.17 python -m bioengine_worker ${argsString}`;
+        dockerCmd = `${containerRuntime} run ${gpuFlag}${platformFlag}-it --rm ${shmFlag}${userFlag}${volumeMounts} ${imageToUse} python -m bioengine_worker ${argsString}`;
       }
       
       return {
@@ -280,6 +287,8 @@ ${token ? `- **Token**: [CONFIGURED]` : ''}
 ${adminUsers ? `- **Admin Users**: ${adminUsers}` : ''}
 ${logDir ? `- **Log Directory**: ${logDir}` : ''}
 ${cacheDir ? `- **Cache Directory**: ${cacheDir}` : ''}
+${customImage ? `- **Custom Image**: ${customImage}` : ''}
+${platformOverride ? `- **Platform Override**: ${platformOverride}` : ''}
 
 ### Generated ${containerName} Command
 \`\`\`bash
@@ -500,7 +509,7 @@ Please help me troubleshoot this BioEngine Worker setup. Provide step-by-step gu
         className={`w-full flex items-center justify-between text-left rounded-xl p-4 transition-all duration-200 ${
           isExpanded 
             ? 'bg-gray-50 hover:bg-gray-100 border border-gray-200' 
-            : 'bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 border-2 border-blue-200 hover:border-blue-300 shadow-sm hover:shadow-md'
+            : 'bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 border-2 border-blue-200 hover:shadow-md'
         }`}
       >
         <div className="flex items-center">
@@ -946,6 +955,33 @@ Please help me troubleshoot this BioEngine Worker setup. Provide step-by-step gu
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                   <p className="text-xs text-gray-500 mt-1">Container path for cache data. Must start with /. Will update volume mount automatically</p>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Container Image</label>
+                  <input
+                    type="text"
+                    value={customImage}
+                    onChange={(e) => setCustomImage(e.target.value)}
+                    placeholder="ghcr.io/aicell-lab/tabula:0.1.6"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Custom container image to use. Leave empty for default bioengine-worker. For Tabula: ghcr.io/aicell-lab/tabula:0.1.6</p>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Platform Override</label>
+                  <select
+                    value={platformOverride}
+                    onChange={(e) => setPlatformOverride(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    aria-label="Select platform override"
+                  >
+                    <option value="">Auto-detect (default)</option>
+                    <option value="linux/amd64">linux/amd64</option>
+                    <option value="linux/arm64">linux/arm64</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">Override platform detection. Docker usually auto-detects correctly, so leave as default unless needed</p>
                 </div>
               </div>
             )}
