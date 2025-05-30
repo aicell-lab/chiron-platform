@@ -253,13 +253,13 @@ const BioEngineGuide: React.FC = () => {
 
 ## Context & Background
 
-I'm trying to set up a **BioEngine Worker** for bioimage analysis. BioEngine is part of the AI4Life project and provides cloud-powered AI tools for bioimage analysis. Here's what I need help with:
+I'm trying to set up a **BioEngine Worker** for single-cell analysis. BioEngine is part of the AI4Life project and provides cloud-powered AI tools for single-cell analysis. Here's what I need help with:
 
 ### What is BioEngine?
-- BioEngine is a distributed computing platform for running AI models on bioimage data
+- BioEngine is a distributed computing platform for running AI models on life sciences
 - It uses Ray (distributed computing framework) and Hypha (service orchestration) 
 - Workers can run in different modes: single-machine (local), SLURM (HPC clusters), or connect to existing Ray clusters
-- The system allows deploying and running AI models for bioimage analysis tasks
+- The system allows deploying and running AI models
 
 ### My Current Setup
 - **Operating System**: ${os === 'macos' ? 'macOS' : os === 'linux' ? 'Linux' : 'Windows'}

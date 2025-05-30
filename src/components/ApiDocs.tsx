@@ -36,7 +36,7 @@ const ApiDocs: React.FC = () => {
       {user ? (
         <div className="space-y-4">
           <p className="text-gray-600">
-            Generate a new API token to use with the BioImage Model Zoo API.
+            Generate a new API token to use with the Chiron Platform API.
           </p>
           <div className="flex flex-col space-y-3">
             <button
@@ -311,10 +311,10 @@ async function interactWithModelZoo() {
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-gray-900 mb-4">
-          BioImage Model Zoo API
+          Chiron Platform API
         </h1>
         <p className="text-gray-600">
-          Interact with the BioImage Model Zoo programmatically using our API. 
+          Interact with the Chiron Platform programmatically using our API. 
           Choose your preferred language below to see example code and documentation.
         </p>
       </div>

@@ -322,7 +322,7 @@ const BioEngineHome: React.FC = () => {
           BioEngine
         </h1>
         <p className="text-xl text-gray-600 font-medium">
-          Unveiling cloud-powered AI for simplified Bioimage Analysis
+          Unveiling cloud-powered AI for simplified Single-Cell Biology
         </p>
         <div className="w-24 h-1 bg-gradient-to-r from-blue-500 to-purple-500 mx-auto mt-4 rounded-full"></div>
       </div>
