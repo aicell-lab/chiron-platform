@@ -92,23 +92,7 @@ const BioEngineHome: React.FC = () => {
   const [customToken, setCustomToken] = useState('');
   const [connectionLoading, setConnectionLoading] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [defaultServiceOnline, setDefaultServiceOnline] = useState<boolean | null>(null);
   const [manualRefreshLoading, setManualRefreshLoading] = useState(false);
-
-  // Function to check if default service is online
-  const checkDefaultServiceStatus = async () => {
-    try {
-      const response = await fetch('https://hypha.aicell.io/bioimage-io/services/bioengine-worker/get_status?_mode=first');
-      if (response.ok) {
-        setDefaultServiceOnline(true);
-      } else {
-        setDefaultServiceOnline(false);
-      }
-    } catch (err) {
-      console.warn('Default BioEngine service is offline:', err);
-      setDefaultServiceOnline(false);
-    }
-  };
 
   const fetchBioEngineServices = useCallback(async (isManualRefresh = false) => {
     if (!isLoggedIn) {
@@ -126,27 +110,13 @@ const BioEngineHome: React.FC = () => {
       setServicesError(null);
       const services = await server.listServices({"type": "bioengine-worker"});
       
-      const defaultService: BioEngineService = {
-        id: "bioimage-io/bioengine-worker",
-        name: "BioImage.IO BioEngine Worker",
-        description: "Default BioEngine worker instance for the BioImage.IO community"
-      };
-      
-      const hasDefaultService = services.some((service: BioEngineService) => service.id === defaultService.id);
-      
-      // Only include default service if it's online and not already in the list
-      let allServices = [...services];
-      if (!hasDefaultService && defaultServiceOnline === true) {
-        allServices = [defaultService, ...services];
-      }
-      
       // Check if we found new services and scroll to them
-      const foundNewServices = allServices.length > bioEngineServices.length;
+      const foundNewServices = services.length > bioEngineServices.length;
       
-      setBioEngineServices(allServices);
+      setBioEngineServices(services);
       
       // Scroll to services section if new services were found
-      if (foundNewServices && allServices.length > 0 && servicesRef.current) {
+      if (foundNewServices && services.length > 0 && servicesRef.current) {
         setTimeout(() => {
           servicesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }, 100);
@@ -165,14 +135,9 @@ const BioEngineHome: React.FC = () => {
         setServicesLoading(false);
       }
     }
-  }, [isLoggedIn, server, defaultServiceOnline, bioEngineServices.length]);
+  }, [isLoggedIn, server, bioEngineServices.length]);
 
-  // Check default service status on mount
-  useEffect(() => {
-    checkDefaultServiceStatus();
-  }, []);
-
-  // Fetch services when login state changes or default service status changes
+  // Fetch services when login state changes
   useEffect(() => {
     if (isLoggedIn) {
       fetchBioEngineServices();
@@ -294,16 +259,6 @@ const BioEngineHome: React.FC = () => {
           </div>
           <p className="text-gray-600 font-medium mb-2 text-center">No BioEngine instances found</p>
           <p className="text-gray-500 text-sm text-center mb-4">No instances available in workspace <span className="font-mono bg-gray-100 px-2 py-1 rounded text-xs">{server?.config?.workspace || 'current'}</span></p>
-          {defaultServiceOnline === false && (
-            <p className="text-sm text-gray-400 text-center">
-              Note: Default BioEngine service is currently offline
-            </p>
-          )}
-          {defaultServiceOnline === null && (
-            <p className="text-sm text-gray-400 text-center">
-              Checking default BioEngine service status...
-            </p>
-          )}
         </div>
       );
     }
