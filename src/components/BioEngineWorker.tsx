@@ -40,40 +40,32 @@ type ServiceStatus = {
   };
   ray_cluster: {
     head_address: string;
+    start_time_s: number | "N/A";
+    start_time: string | "N/A";
+    uptime: string | "N/A";
     worker_nodes: {
-      Alive: Array<{
-        WorkerID: string | null;
-        NodeID: string;
-        NodeIP: string;
-        "Total GPU": number;
-        "Available GPU": number;
-        "GPU Utilization": number;
-        "Total CPU": number;
-        "Available CPU": number;
-        "CPU Utilization": number;
-        "Total Memory": number;
-        "Available Memory": number;
-        "Memory Utilization": number;
+      [state: string]: Array<{
+        node_id: string;
+        node_ip: string;
+        total_gpu: number;
+        available_gpu: number;
+        total_cpu: number;
+        available_cpu: number;
+        total_memory: number;
+        available_memory: number;
       }>;
-      Dead: Array<any>;
-    } | "N/A";
-    start_time_s: number;
-    start_time: string;
-    uptime: string;
-    autoscaler: any;
-    note: string;
+    } | {};
   };
   bioengine_apps: {
     service_id: string | null;
+    note?: string;
     [key: string]: any;
   };
-  bioengine_datasets?: {
+  bioengine_datasets: {
     available_datasets: Record<string, any>;
     loaded_datasets: Record<string, any>;
   };
 };
-
-
 
 type ArtifactType = {
   id: string;
@@ -179,6 +171,7 @@ const BioEngineWorker: React.FC = () => {
   const [artifactManager, setArtifactManager] = useState<any>(null);
   const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [manifestCache, setManifestCache] = useState<Record<string, any>>({});
   
   // Create/Edit App Dialog state
   const [createAppDialogOpen, setCreateAppDialogOpen] = useState(false);
@@ -192,6 +185,16 @@ const BioEngineWorker: React.FC = () => {
   const [editingFileName, setEditingFileName] = useState<string | null>(null);
   const [newFileName, setNewFileName] = useState('');
   const [loginErrorTimeout, setLoginErrorTimeout] = useState<NodeJS.Timeout | null>(null);
+  const [currentTime, setCurrentTime] = useState(Date.now());
+  
+  // Update current time every second for live uptime calculation
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 1000);
+    
+    return () => clearInterval(timer);
+  }, []);
   
   useEffect(() => {
     // Clear any existing timeout first
@@ -255,6 +258,8 @@ const BioEngineWorker: React.FC = () => {
   useEffect(() => {
     if (isLoggedIn && artifactManager && serviceId) {
       fetchAvailableArtifacts();
+      // Also refetch status to get manifests for deployed artifacts
+      fetchStatus(false);
     }
   }, [artifactManager, isLoggedIn, serviceId]);
 
@@ -271,12 +276,11 @@ const BioEngineWorker: React.FC = () => {
   }, []);
 
   const formatTimeInfo = (timestamp: number): { formattedTime: string, uptime: string } => {
-    const now = new Date();
     const startTime = new Date(timestamp * 1000);
     
     const formattedTime = startTime.toLocaleString();
     
-    const diffMs = now.getTime() - startTime.getTime();
+    const diffMs = currentTime - startTime.getTime();
     const diffSec = Math.floor(diffMs / 1000);
     
     let uptime = '';
@@ -301,6 +305,14 @@ const BioEngineWorker: React.FC = () => {
 
 
 
+  // Use a ref to store the current manifest cache to avoid stale closures
+  const manifestCacheRef = React.useRef<Record<string, any>>({});
+  
+  // Update ref whenever manifestCache state changes
+  React.useEffect(() => {
+    manifestCacheRef.current = manifestCache;
+  }, [manifestCache]);
+
   const fetchStatus = async (showLoading = true) => {
     if (!serviceId || !isLoggedIn) {
       setError(serviceId ? 'Please log in to view BioEngine status' : 'No service ID provided');
@@ -314,25 +326,85 @@ const BioEngineWorker: React.FC = () => {
       }
       
       const bioengineWorker = await server.getService(serviceId);
-      const statusData = await bioengineWorker.get_status();
+      let statusData = await bioengineWorker.get_status();
       
-      if (statusData && statusData.bioengine_apps && artifactManager) {
-        for (const [key, deployment] of Object.entries(statusData.bioengine_apps)) {
-          if (key !== 'service_id' && typeof deployment === 'object' && deployment !== null) {
-            (deployment as any).artifact_id = key;
-            
-            const artifactId = key;
-            if (artifactId) {
-              try {
-                const artifact = await artifactManager.read({artifact_id: artifactId, _rkwargs: true});
-                if (artifact) {
-                  (deployment as any).manifest = artifact.manifest;
-                }
-              } catch (err) {
-                console.warn(`Failed to fetch manifest for deployed artifact ${artifactId}:`, err);
-              }
+      // Preserve existing manifests before processing new status data
+      const existingManifests: Record<string, any> = {};
+      if (status?.bioengine_apps) {
+        for (const [key, deployment] of Object.entries(status.bioengine_apps)) {
+          if (key !== 'service_id' && key !== 'note' && typeof deployment === 'object' && deployment !== null) {
+            const existingManifest = (deployment as any).manifest;
+            if (existingManifest) {
+              existingManifests[key] = existingManifest;
             }
           }
+        }
+      }
+      
+      // Process deployments and fetch manifests
+      if (statusData && statusData.bioengine_apps) {
+        const manifestPromises: Promise<{key: string, manifest: any}>[] = [];
+        // Use the ref to get the most current cache state
+        const currentManifestCache = { ...manifestCacheRef.current };
+        
+        for (const [key, deployment] of Object.entries(statusData.bioengine_apps)) {
+          if (key !== 'service_id' && key !== 'note' && typeof deployment === 'object' && deployment !== null) {
+            (deployment as any).artifact_id = key;
+            
+            // First, try to use existing manifest if available
+            if (existingManifests[key]) {
+              (deployment as any).manifest = existingManifests[key];
+              console.log(`Using existing manifest for deployed artifact: ${key}`);
+            } else if (currentManifestCache[key]) {
+              // Use cached manifest from available artifacts
+              (deployment as any).manifest = currentManifestCache[key];
+              console.log(`Using cached manifest for deployed artifact: ${key}`);
+            } else if (artifactManager) {
+              // Only fetch if not in cache and not in existing manifests
+              const manifestPromise = (async (): Promise<{key: string, manifest: any}> => {
+                try {
+                  console.log(`Fetching manifest for deployed artifact: ${key}`);
+                  const artifact = await artifactManager.read({artifact_id: key, _rkwargs: true});
+                  if (artifact && artifact.manifest) {
+                    console.log(`Successfully fetched manifest for ${key}:`, artifact.manifest);
+                    // Add to local cache immediately
+                    currentManifestCache[key] = artifact.manifest;
+                    return { key, manifest: artifact.manifest };
+                  } else {
+                    console.warn(`No manifest found for deployed artifact ${key}`);
+                    return { key, manifest: null };
+                  }
+                } catch (err) {
+                  console.error(`Failed to fetch manifest for deployed artifact ${key}:`, err);
+                  return { key, manifest: null };
+                }
+              })();
+              manifestPromises.push(manifestPromise);
+            }
+          }
+        }
+        
+        // Wait for all manifest fetches to complete and update the status data
+        if (manifestPromises.length > 0) {
+          console.log(`Waiting for ${manifestPromises.length} manifest fetches to complete...`);
+          const manifestResults = await Promise.all(manifestPromises);
+          
+          // Create a deep copy of statusData to ensure React detects the change
+          const updatedStatusData = JSON.parse(JSON.stringify(statusData));
+          
+          // Apply the fetched manifests and update cache
+          manifestResults.forEach(({ key, manifest }) => {
+            if (manifest && updatedStatusData.bioengine_apps[key]) {
+              updatedStatusData.bioengine_apps[key].manifest = manifest;
+            }
+          });
+          
+          // Update the cache state with all the new manifests
+          setManifestCache(currentManifestCache);
+          
+          // Use the updated status data
+          statusData = updatedStatusData;
+          console.log('All manifest fetches completed and applied to status data');
         }
       }
       
@@ -383,7 +455,7 @@ const BioEngineWorker: React.FC = () => {
       const modeSettings: Record<string, string> = {};
       
       try {
-        const publicCollectionId = 'bioimage-io/bioengine-apps';
+        const publicCollectionId = 'chiron-platform/bioengine-apps';
         let publicArtifacts: ArtifactType[] = [];
         
         try {
@@ -416,6 +488,12 @@ const BioEngineWorker: React.FC = () => {
             
             if (artifactData) {
               art.manifest = artifactData.manifest;
+              
+              // Add to manifest cache for reuse
+              setManifestCache(prevCache => ({
+                ...prevCache,
+                [art.id]: artifactData.manifest
+              }));
               
               if (art.manifest?.deployment_config?.modes) {
                 console.log(`${art.id} has modes:`, 
@@ -1288,34 +1366,44 @@ class MyNewApp:
                 <span className="font-medium text-gray-700">Head Address:</span>
                 <span className="text-gray-900">{status?.ray_cluster?.head_address}</span>
               </div>
-              {status?.ray_cluster?.start_time_s && (
+              {status?.ray_cluster?.start_time_s && status.ray_cluster.start_time_s !== "N/A" && (
                 <>
                   <div className="flex justify-between">
                     <span className="font-medium text-gray-700">Start Time:</span>
                     <span className="text-gray-900">
-                      {formatTimeInfo(status.ray_cluster.start_time_s).formattedTime}
+                      {formatTimeInfo(status.ray_cluster.start_time_s as number).formattedTime}
                     </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="font-medium text-gray-700">Uptime:</span>
                     <span className="text-gray-900">
-                      {formatTimeInfo(status.ray_cluster.start_time_s).uptime}
+                      {formatTimeInfo(status.ray_cluster.start_time_s as number).uptime}
                     </span>
                   </div>
                 </>
               )}
-              {status?.ray_cluster?.note && (
-                <div className="mt-4">
-                  <p className="text-sm text-gray-600">Note: {status.ray_cluster.note}</p>
-                </div>
+              {status?.ray_cluster?.start_time_s === "N/A" && (
+                <>
+                  <div className="flex justify-between">
+                    <span className="font-medium text-gray-700">Start Time:</span>
+                    <span className="text-gray-500">N/A (External cluster)</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium text-gray-700">Uptime:</span>
+                    <span className="text-gray-500">N/A (External cluster)</span>
+                  </div>
+                </>
               )}
+
             </div>
           </div>
         </div>
       </div>
       
       {/* Worker Nodes */}
-      {status.ray_cluster.worker_nodes !== "N/A" && (
+      {status.ray_cluster.worker_nodes && 
+       typeof status.ray_cluster.worker_nodes === 'object' && 
+       Object.keys(status.ray_cluster.worker_nodes).length > 0 && (
         <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-sm border border-white/20 mb-8 hover:shadow-md transition-all duration-200">
           <div className="p-6">
             <div className="flex justify-between items-center mb-6">
@@ -1342,44 +1430,37 @@ class MyNewApp:
                   </tr>
                 </thead>
                 <tbody>
-                  {status.ray_cluster.worker_nodes.Alive.map((node, index) => (
-                    <tr key={index} className="border-b">
-                      <td className="px-4 py-2">{node.NodeIP}</td>
-                      <td className="px-4 py-2 truncate max-w-[150px]" title={node.NodeID}>
-                        {node.NodeID.substring(0, 8)}...
-                      </td>
-                      <td className="px-4 py-2">
-                        {node["Available CPU"]}/{node["Total CPU"]} ({Math.round((node["Available CPU"] / node["Total CPU"]) * 100)}% available)
-                      </td>
-                      <td className="px-4 py-2">
-                        {node["Available GPU"]}/{node["Total GPU"]} ({Math.round((node["Available GPU"] / node["Total GPU"]) * 100)}% available)
-                      </td>
-                      <td className="px-4 py-2">
-                        {(node["Available Memory"] / 1024 / 1024 / 1024).toFixed(2)}GB/
-                        {(node["Total Memory"] / 1024 / 1024 / 1024).toFixed(2)}GB
-                        ({Math.round((node["Available Memory"] / node["Total Memory"]) * 100)}% available)
-                      </td>
-                      <td className="px-4 py-2">
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                          Alive
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                  {status.ray_cluster.worker_nodes.Dead.map((node, index) => (
-                    <tr key={`dead-${index}`} className="border-b">
-                      <td className="px-4 py-2" colSpan={5}>
-                        {JSON.stringify(node)}
-                      </td>
-                      <td className="px-4 py-2">
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                          Dead
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                  {status.ray_cluster.worker_nodes.Alive.length === 0 && 
-                   status.ray_cluster.worker_nodes.Dead.length === 0 && (
+                  {Object.entries(status.ray_cluster.worker_nodes as Record<string, any[]>).map(([nodeState, nodes]) => 
+                    nodes.map((node: any, index: number) => (
+                      <tr key={`${nodeState}-${index}`} className="border-b">
+                        <td className="px-4 py-2">{node.node_ip}</td>
+                        <td className="px-4 py-2 truncate max-w-[150px]" title={node.node_id}>
+                          {node.node_id.substring(0, 8)}...
+                        </td>
+                        <td className="px-4 py-2">
+                          {node.available_cpu}/{node.total_cpu} ({Math.round((node.available_cpu / node.total_cpu) * 100)}% available)
+                        </td>
+                        <td className="px-4 py-2">
+                          {node.available_gpu}/{node.total_gpu} ({node.total_gpu > 0 ? Math.round((node.available_gpu / node.total_gpu) * 100) : 0}% available)
+                        </td>
+                        <td className="px-4 py-2">
+                          {(node.available_memory / 1024 / 1024 / 1024).toFixed(2)}GB/
+                          {(node.total_memory / 1024 / 1024 / 1024).toFixed(2)}GB
+                          ({Math.round((node.available_memory / node.total_memory) * 100)}% available)
+                        </td>
+                        <td className="px-4 py-2">
+                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                            nodeState.toUpperCase() === 'ALIVE' 
+                              ? 'bg-green-100 text-green-800' 
+                              : 'bg-red-100 text-red-800'
+                          }`}>
+                            {nodeState.toUpperCase()}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                  {Object.keys(status.ray_cluster.worker_nodes as Record<string, any[]>).length === 0 && (
                     <tr>
                       <td colSpan={6} className="px-4 py-2 text-center">No worker nodes available</td>
                     </tr>
