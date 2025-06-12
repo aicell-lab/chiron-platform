@@ -813,7 +813,7 @@ Please help me troubleshoot this BioEngine Worker setup. Provide step-by-step gu
 
             {/* Data Directory */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Data Directory (Optional)</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Data Directory</label>
               <input
                 type="text"
                 value={dataDir}
