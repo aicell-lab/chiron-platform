@@ -130,7 +130,10 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
   fetchResources: async (page: number, searchQuery?: string) => {
     try {
       console.log('Fetching resources for page:', page, searchQuery);
-      const offset = (page - 1) * get().itemsPerPage;
+      let offset = (page - 1) * get().itemsPerPage;
+      if(offset < 0) {
+        offset = 0;
+      }
       
       // Construct the base URL
       let url = `https://hypha.aicell.io/chiron-platform/artifacts/collection/children?pagination=true&offset=${offset}&limit=${get().itemsPerPage}`;
