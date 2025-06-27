@@ -112,7 +112,7 @@ export const createExecuteCodeFunction = (
           const errorText = errorData.traceback ? 
             errorData.traceback.join('\n') :
             `${errorData.ename || 'Error'}: ${errorData.evalue || 'Unknown error'}`;
-          
+          console.error("Failed to execute code:", code, errorData);
           addKernelLogEntry({ type: 'error', content: errorText, cellId });
           onOutput?.({
             type: 'stderr', 
@@ -145,9 +145,8 @@ export const createExecuteCodeFunction = (
     } catch (error) {
       // Handle errors during stream creation or processing
       if (!isTimedOut) {
-        console.error('[Deno Executor] Error executing code:', error);
         const errorMsg = error instanceof Error ? error.message : String(error);
-        
+        console.error('[Deno Executor] Error executing code:', errorMsg);
         addKernelLogEntry({ 
           type: 'error', 
           content: `Execution failed: ${errorMsg}`, 
@@ -199,8 +198,8 @@ const processKernelOutput = (
       onOutput?.({
         type: streamType,
         content: content,
-        short_content: content.length > 4096 ? 
-          `${content.substring(0, 2000)}... [truncated] ...${content.substring(content.length - 2000)}` : 
+        short_content: content.length > 128 * 1024 ? 
+          `${content.substring(0, 64 * 1024)}... [truncated at 128k chars] ...${content.substring(content.length - 64 * 1024)}` : 
           content
       });
       break;
@@ -222,7 +221,7 @@ const processKernelOutput = (
         content: errorText,
         short_content: errorText
       });
-      break;
+      throw new Error(errorText);
       
     case 'display_data':
     case 'update_display_data':
@@ -241,9 +240,34 @@ const processKernelOutput = (
       onOutput?.({
         type: displayOutputType,
         content: displayContent,
-        short_content: displayContent.length > 4096 ? 
-          `${displayContent.substring(0, 2000)}... [truncated] ...${displayContent.substring(displayContent.length - 2000)}` : 
-          displayContent,
+        short_content: (() => {
+          // Handle different display types appropriately
+          if (displayOutputType === 'img') {
+            // For images, show metadata instead of base64 data
+            if (displayContent.startsWith('data:image/')) {
+              const mimeMatch = displayContent.match(/data:(image\/[^;]+)/);
+              const mimeType = mimeMatch ? mimeMatch[1] : 'image';
+              return `[Image: ${mimeType}, size: ${displayContent.length} chars]`;
+            }
+            return `[Image content, size: ${displayContent.length} chars]`;
+          } else if (displayOutputType === 'html') {
+            // For HTML, show brief preview
+            const maxHtmlLength = 1024;
+            if (displayContent.length <= maxHtmlLength) return displayContent;
+            return `[HTML content (${displayContent.length} chars): ${displayContent.substring(0, 200)}...]`;
+          } else if (displayOutputType === 'svg') {
+            // For SVG, show brief preview
+            const maxSvgLength = 512;
+            if (displayContent.length <= maxSvgLength) return displayContent;
+            return `[SVG content (${displayContent.length} chars): ${displayContent.substring(0, 200)}...]`;
+          } else {
+            // For text content, use 128k limit
+            if (displayContent.length > 128 * 1024) {
+              return `${displayContent.substring(0, 64 * 1024)}... [truncated at 128k chars] ...${displayContent.substring(displayContent.length - 64 * 1024)}`;
+            }
+            return displayContent;
+          }
+        })(),
         attrs: (displayData.metadata || {})
       });
       break;
@@ -287,9 +311,21 @@ const processKernelOutput = (
       onOutput?.({
         type: output.type || 'stdout',
         content: defaultContent,
-        short_content: typeof defaultContent === 'string' && defaultContent.length > 4096 ? 
-          `${defaultContent.substring(0, 2000)}... [truncated] ...${defaultContent.substring(defaultContent.length - 2000)}` : 
-          defaultContent,
+        short_content: (() => {
+          if (typeof defaultContent !== 'string') return defaultContent;
+          
+          // Check if it looks like base64 or binary content
+          if (defaultContent.match(/^[A-Za-z0-9+/]+=*$/) && defaultContent.length > 1000) {
+            return `[Binary/Base64 content, size: ${defaultContent.length} chars]`;
+          }
+          
+          // For text content, use 128k limit
+          if (defaultContent.length > 128 * 1024) {
+            return `${defaultContent.substring(0, 64 * 1024)}... [truncated at 128k chars] ...${defaultContent.substring(defaultContent.length - 64 * 1024)}`;
+          }
+          
+          return defaultContent;
+        })(),
         attrs: output.attrs
       });
   }

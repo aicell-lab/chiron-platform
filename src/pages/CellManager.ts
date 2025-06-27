@@ -13,14 +13,7 @@ type CellType = 'markdown' | 'code' | 'thinking';
 type ExecutionState = "idle" | "running" | "success" | "error";
 type CellRole = "user" | "assistant" | "system";
 
-// Create convert instance
-const convert = new Convert({
-  fg: '#000',
-  bg: '#fff',
-  newline: true,
-  escapeXML: true,
-  stream: false
-});
+
 
 
 const stripAnsi = (str: string) => {
@@ -31,22 +24,46 @@ const stripAnsi = (str: string) => {
 // Helper function to create shortened content for long outputs
 // Function to create a short version of output content
 const createShortContent = (content: string, type: string): string => {
-    const maxLength = 4096;
-  
-    if (content.length <= maxLength) return content;
-    
     switch (type) {
       case 'stdout':
       case 'stderr':
-        return `${stripAnsi(content.substring(0, maxLength))}...`;
+      case 'execute_input':
+        // For text content, use 128k limit
+        const maxTextLength = 128 * 1024;
+        if (content.length <= maxTextLength) return content;
+        return `${stripAnsi(content.substring(0, maxTextLength))}... [truncated at 128k chars]`;
+      
       case 'html':
-        return `[HTML content truncated...]`;
+        // For HTML, keep it short since it's usually not readable in chat context
+        const maxHtmlLength = 1024;
+        if (content.length <= maxHtmlLength) return content;
+        return `[HTML content (${content.length} chars): ${content.substring(0, 200)}...]`;
+      
       case 'img':
-        return `[Image content truncated...]`;
+        // For images, just show metadata - no need for base64 data
+        if (content.startsWith('data:image/')) {
+          const mimeMatch = content.match(/data:(image\/[^;]+)/);
+          const mimeType = mimeMatch ? mimeMatch[1] : 'image';
+          return `[Image: ${mimeType}, size: ${content.length} chars]`;
+        }
+        return `[Image content, size: ${content.length} chars]`;
+      
       case 'svg':
-        return `[SVG content truncated...]`;
+        // For SVG, show a brief preview since it might contain readable content
+        const maxSvgLength = 512;
+        if (content.length <= maxSvgLength) return content;
+        return `[SVG content (${content.length} chars): ${content.substring(0, 200)}...]`;
+      
       default:
-        return `${content.substring(0, maxLength)}...`;
+        // For other content types, check if it looks like base64 or binary
+        if (content.match(/^[A-Za-z0-9+/]+=*$/) && content.length > 1000) {
+          return `[Binary/Base64 content, size: ${content.length} chars]`;
+        }
+        
+        // For regular text content, use 128k limit
+        const maxDefaultLength = 128 * 1024;
+        if (content.length <= maxDefaultLength) return content;
+        return `${content.substring(0, maxDefaultLength)}... [truncated at 128k chars]`;
     }
   };
     
@@ -64,7 +81,6 @@ interface NotebookCell {
     scrolled?: boolean;
     trusted?: boolean;
     isNew?: boolean;
-    role?: CellRole;
     isEditing?: boolean;
     isCodeVisible?: boolean;
     isOutputVisible?: boolean;
@@ -188,7 +204,6 @@ export class CellManager {
         collapsed: false,
         trusted: true,
         isNew: type === "code",
-        role: role,
         isEditing: false,
         isCodeVisible: true,
         isOutputVisible: true,
@@ -265,7 +280,6 @@ export class CellManager {
         collapsed: false,
         trusted: true,
         isNew: type === "code",
-        role: role,
         isEditing: false,
         isCodeVisible: true,
         isOutputVisible: true,
@@ -454,10 +468,9 @@ export class CellManager {
     // Process stderr if exists
     if (stderrContent) {
       try {
-        const htmlContent = convert.toHtml(stderrContent);
         processedItems.push({
           type: 'stderr',
-          content: htmlContent,
+          content: stripAnsi(stderrContent),
           attrs: {
             className: 'output-area error-output',
             isProcessedAnsi: true,
@@ -597,7 +610,6 @@ export class CellManager {
           ? {
               ...cell,
               role,
-              metadata: { ...cell.metadata, role },
             }
           : cell
       )
@@ -671,10 +683,14 @@ export class CellManager {
     try {
       const outputs: OutputItem[] = [];
       let shortOutput = '';
+      let fullOutput = '';
+      const isSystemCell = cell.role === "system";
+      
       await this.executeCodeFn(currentCode, {
         onOutput: (output: OutputItem) => {
           outputs.push(output);
           shortOutput += output.short_content + '\n';
+          fullOutput += output.content + '\n';
           this.updateCellExecutionState(id, "running", outputs);
         },
         onStatus: (status: string) => {
@@ -690,7 +706,10 @@ export class CellManager {
       if (shouldMoveFocus) {
         this.moveToNextCell(id);
       }
-      return `[Cell Id: ${id}]\n${stripAnsi(shortOutput.trim()) || "Code executed successfully."}`;
+      
+      // For system cells, return full output; for regular cells, return short output
+      const outputToReturn = isSystemCell ? fullOutput : shortOutput;
+      return `[Cell Id: ${id}]\n${stripAnsi(outputToReturn.trim()) || "Code executed successfully."}`;
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
@@ -700,8 +719,7 @@ export class CellManager {
       // Process ANSI codes in the error message
       if (errorMessage.includes("[0;") || errorMessage.includes("[1;")) {
         try {
-          const htmlContent = convert.toHtml(errorMessage);
-          content = htmlContent;
+          content = stripAnsi(errorMessage);
           isProcessedAnsi = true;
         } catch (e) {
           console.error("Error converting ANSI in error message:", e);
@@ -1166,7 +1184,6 @@ export class CellManager {
             collapsed: false,
             trusted: true,
             isNew: type === "code",
-            role: role,
             isEditing: false,
             isCodeVisible: true,
             isOutputVisible: true,
@@ -1236,13 +1253,10 @@ export class CellManager {
               switch (output.type) {
                 case "stdout":
                 case "stderr":
-                  const shortContent = createShortContent(
-                    output.content,
-                    output.type
-                  );
+                  // For system cells, use full content without truncation
                   content += `${
                     output.type === "stderr" ? "Error: " : ""
-                  }${shortContent}\n`;
+                  }${output.content}\n`;
                   break;
                 case "html":
                   content += "[HTML Output]\n";
@@ -1255,11 +1269,8 @@ export class CellManager {
                   break;
                 default:
                   if (output.content) {
-                    const shortContent = createShortContent(
-                      output.content,
-                      "text"
-                    );
-                    content += `${shortContent}\n`;
+                    // For system cells, use full content without truncation
+                    content += `${output.content}\n`;
                   }
               }
             }

@@ -210,7 +210,7 @@ export const setupNotebookService = async ({
     
     const token = await server.generateToken();
     await executeCode(`import micropip
-await micropip.install(['numpy', 'nbformat', 'pandas', 'matplotlib', 'plotly', 'hypha-rpc', 'pyodide-http', 'ipywidgets'])
+await micropip.install(['numpy', 'nbformat', 'pandas', 'matplotlib', 'plotly', 'hypha-rpc', 'pyodide-http'])
 import pyodide_http
 pyodide_http.patch_all()
 %matplotlib inline
@@ -228,22 +228,28 @@ os.environ['HYPHA_SERVER_URL'] = '${server.config.public_base_url}'
 os.environ['HYPHA_WORKSPACE'] = '${server.config.workspace}'
 os.environ['HYPHA_TOKEN'] = '${token}'
 os.environ['HYPHA_PROJECT_ID'] = '${projectId}'
+os.environ['HYPHA_PROJECT_ALIAS'] = '${projectId}'.split('/')[-1]
 os.environ['HYPHA_USER_ID'] = '${server.config.user.id}'
 print("Environment variables set successfully.")
     `, {
       onOutput: (output: any) => {
-        console.log(output);
+        if (output && output.type === 'stderr') {
+          console.error("[Notebook] Error:", output.content);
+        } else if (output && output.type === 'stdout') {
+          console.log("[Notebook] Stdout:", output.content);
+        } else {
+          console.log("[Notebook] Output:", output);
+        }
       },
       onStatus: (status: any) => {
-        console.log(status);
+        console.log("[Notebook] Status:", status);
       }
     });
 
     return api;
   } catch (error) {
-    console.error("Failed to register notebook service:", error);
     throw error;
   }
 };
 
-export type { HyphaCoreWindow, HyphaCoreService }; 
+export type { HyphaCoreWindow, HyphaCoreService };
