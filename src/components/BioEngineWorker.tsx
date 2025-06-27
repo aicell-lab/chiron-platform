@@ -33,47 +33,37 @@ const styles = `
 `;
 
 type ServiceStatus = {
-  service: {
-    start_time_s: number;
-    start_time: string;
-    uptime: string;
-  };
-  cluster: {
+  service_start_time: number;
+  ray_cluster: {
     head_address: string;
-    worker_nodes: {
-      Alive: Array<{
-        WorkerID: string | null;
-        NodeID: string;
-        NodeIP: string;
-        "Total GPU": number;
-        "Available GPU": number;
-        "GPU Utilization": number;
-        "Total CPU": number;
-        "Available CPU": number;
-        "CPU Utilization": number;
-        "Total Memory": number;
-        "Available Memory": number;
-        "Memory Utilization": number;
-      }>;
-      Dead: Array<any>;
-    } | "N/A";
-    start_time_s: number;
-    start_time: string;
-    uptime: string;
-    autoscaler: any;
-    note: string;
+    start_time: number | "N/A";
+    cluster: {
+      total_gpu: number;
+      available_gpu: number;
+      total_cpu: number;
+      available_cpu: number;
+      total_memory: number;
+      available_memory: number;
+      total_object_store_memory: number;
+      available_object_store_memory: number;
+    };
+    worker_nodes: Record<string, Array<{
+      "node_id": string;
+      "node_ip": string;
+      "total_gpu": number;
+      "total_cpu": number;
+      "total_memory": number;
+    }>>;
   };
-  deployments: {
+  bioengine_apps: {
     service_id: string | null;
     [key: string]: any;
   };
-  datasets?: {
+  bioengine_datasets: {
     available_datasets: Record<string, any>;
     loaded_datasets: Record<string, any>;
   };
 };
-
-
 
 type ArtifactType = {
   id: string;
@@ -123,9 +113,7 @@ type ArtifactType = {
 type DeploymentType = {
   deployment_name: string;
   artifact_id: string;
-  start_time_s: number;
-  start_time: string;
-  uptime: string;
+  start_time: number;
   status: string;
   available_methods?: string[];
   replica_states?: Record<string, number>;
@@ -179,6 +167,10 @@ const BioEngineWorker: React.FC = () => {
   const [artifactManager, setArtifactManager] = useState<any>(null);
   const [deletingArtifactId, setDeletingArtifactId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [manifestCache, setManifestCache] = useState<Record<string, any>>({});
+  
+  // Deployment cooldown tracking
+  const [deploymentCooldowns, setDeploymentCooldowns] = useState<Record<string, number>>({});
   
   // Create/Edit App Dialog state
   const [createAppDialogOpen, setCreateAppDialogOpen] = useState(false);
@@ -192,6 +184,35 @@ const BioEngineWorker: React.FC = () => {
   const [editingFileName, setEditingFileName] = useState<string | null>(null);
   const [newFileName, setNewFileName] = useState('');
   const [loginErrorTimeout, setLoginErrorTimeout] = useState<NodeJS.Timeout | null>(null);
+  const [currentTime, setCurrentTime] = useState(Date.now());
+  const [nodesExpanded, setNodesExpanded] = useState(false);
+  
+  // Update current time every second for live uptime calculation
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 1000);
+    
+    return () => clearInterval(timer);
+  }, []);
+  
+  // Cleanup expired deployment cooldowns
+  useEffect(() => {
+    const now = Date.now();
+    setDeploymentCooldowns(prev => {
+      const updated = { ...prev };
+      let hasChanges = false;
+      
+      for (const [artifactId, cooldownEnd] of Object.entries(updated)) {
+        if (now > cooldownEnd) {
+          delete updated[artifactId];
+          hasChanges = true;
+        }
+      }
+      
+      return hasChanges ? updated : prev;
+    });
+  }, [currentTime]);
   
   useEffect(() => {
     // Clear any existing timeout first
@@ -255,6 +276,8 @@ const BioEngineWorker: React.FC = () => {
   useEffect(() => {
     if (isLoggedIn && artifactManager && serviceId) {
       fetchAvailableArtifacts();
+      // Also refetch status to get manifests for deployed artifacts
+      fetchStatus(false);
     }
   }, [artifactManager, isLoggedIn, serviceId]);
 
@@ -271,12 +294,11 @@ const BioEngineWorker: React.FC = () => {
   }, []);
 
   const formatTimeInfo = (timestamp: number): { formattedTime: string, uptime: string } => {
-    const now = new Date();
     const startTime = new Date(timestamp * 1000);
     
     const formattedTime = startTime.toLocaleString();
     
-    const diffMs = now.getTime() - startTime.getTime();
+    const diffMs = currentTime - startTime.getTime();
     const diffSec = Math.floor(diffMs / 1000);
     
     let uptime = '';
@@ -301,6 +323,14 @@ const BioEngineWorker: React.FC = () => {
 
 
 
+  // Use a ref to store the current manifest cache to avoid stale closures
+  const manifestCacheRef = React.useRef<Record<string, any>>({});
+  
+  // Update ref whenever manifestCache state changes
+  React.useEffect(() => {
+    manifestCacheRef.current = manifestCache;
+  }, [manifestCache]);
+
   const fetchStatus = async (showLoading = true) => {
     if (!serviceId || !isLoggedIn) {
       setError(serviceId ? 'Please log in to view BioEngine status' : 'No service ID provided');
@@ -314,25 +344,85 @@ const BioEngineWorker: React.FC = () => {
       }
       
       const bioengineWorker = await server.getService(serviceId);
-      const statusData = await bioengineWorker.get_status();
+      let statusData = await bioengineWorker.get_status();
       
-      if (statusData && statusData.deployments && artifactManager) {
-        for (const [key, deployment] of Object.entries(statusData.deployments)) {
-          if (key !== 'service_id' && typeof deployment === 'object' && deployment !== null) {
-            (deployment as any).artifact_id = key;
-            
-            const artifactId = key;
-            if (artifactId) {
-              try {
-                const artifact = await artifactManager.read({artifact_id: artifactId, _rkwargs: true});
-                if (artifact) {
-                  (deployment as any).manifest = artifact.manifest;
-                }
-              } catch (err) {
-                console.warn(`Failed to fetch manifest for deployed artifact ${artifactId}:`, err);
-              }
+      // Preserve existing manifests before processing new status data
+      const existingManifests: Record<string, any> = {};
+      if (status?.bioengine_apps) {
+        for (const [key, deployment] of Object.entries(status.bioengine_apps)) {
+          if (key !== 'service_id' && key !== 'note' && typeof deployment === 'object' && deployment !== null) {
+            const existingManifest = (deployment as any).manifest;
+            if (existingManifest) {
+              existingManifests[key] = existingManifest;
             }
           }
+        }
+      }
+      
+      // Process deployments and fetch manifests
+      if (statusData && statusData.bioengine_apps) {
+        const manifestPromises: Promise<{key: string, manifest: any}>[] = [];
+        // Use the ref to get the most current cache state
+        const currentManifestCache = { ...manifestCacheRef.current };
+        
+        for (const [key, deployment] of Object.entries(statusData.bioengine_apps)) {
+          if (key !== 'service_id' && key !== 'note' && typeof deployment === 'object' && deployment !== null) {
+            (deployment as any).artifact_id = key;
+            
+            // First, try to use existing manifest if available
+            if (existingManifests[key]) {
+              (deployment as any).manifest = existingManifests[key];
+              console.log(`Using existing manifest for deployed artifact: ${key}`);
+            } else if (currentManifestCache[key]) {
+              // Use cached manifest from available artifacts
+              (deployment as any).manifest = currentManifestCache[key];
+              console.log(`Using cached manifest for deployed artifact: ${key}`);
+            } else if (artifactManager) {
+              // Only fetch if not in cache and not in existing manifests
+              const manifestPromise = (async (): Promise<{key: string, manifest: any}> => {
+                try {
+                  console.log(`Fetching manifest for deployed artifact: ${key}`);
+                  const artifact = await artifactManager.read({artifact_id: key, _rkwargs: true});
+                  if (artifact && artifact.manifest) {
+                    console.log(`Successfully fetched manifest for ${key}:`, artifact.manifest);
+                    // Add to local cache immediately
+                    currentManifestCache[key] = artifact.manifest;
+                    return { key, manifest: artifact.manifest };
+                  } else {
+                    console.warn(`No manifest found for deployed artifact ${key}`);
+                    return { key, manifest: null };
+                  }
+                } catch (err) {
+                  console.error(`Failed to fetch manifest for deployed artifact ${key}:`, err);
+                  return { key, manifest: null };
+                }
+              })();
+              manifestPromises.push(manifestPromise);
+            }
+          }
+        }
+        
+        // Wait for all manifest fetches to complete and update the status data
+        if (manifestPromises.length > 0) {
+          console.log(`Waiting for ${manifestPromises.length} manifest fetches to complete...`);
+          const manifestResults = await Promise.all(manifestPromises);
+          
+          // Create a deep copy of statusData to ensure React detects the change
+          const updatedStatusData = JSON.parse(JSON.stringify(statusData));
+          
+          // Apply the fetched manifests and update cache
+          manifestResults.forEach(({ key, manifest }) => {
+            if (manifest && updatedStatusData.bioengine_apps[key]) {
+              updatedStatusData.bioengine_apps[key].manifest = manifest;
+            }
+          });
+          
+          // Update the cache state with all the new manifests
+          setManifestCache(currentManifestCache);
+          
+          // Use the updated status data
+          statusData = updatedStatusData;
+          console.log('All manifest fetches completed and applied to status data');
         }
       }
       
@@ -383,7 +473,7 @@ const BioEngineWorker: React.FC = () => {
       const modeSettings: Record<string, string> = {};
       
       try {
-        const publicCollectionId = 'bioimage-io/bioengine-apps';
+        const publicCollectionId = 'chiron-platform/bioengine-apps';
         let publicArtifacts: ArtifactType[] = [];
         
         try {
@@ -416,6 +506,12 @@ const BioEngineWorker: React.FC = () => {
             
             if (artifactData) {
               art.manifest = artifactData.manifest;
+              
+              // Add to manifest cache for reuse
+              setManifestCache(prevCache => ({
+                ...prevCache,
+                [art.id]: artifactData.manifest
+              }));
               
               if (art.manifest?.deployment_config?.modes) {
                 console.log(`${art.id} has modes:`, 
@@ -465,8 +561,6 @@ const BioEngineWorker: React.FC = () => {
       setDeployingArtifactId(artifactId);
       setDeploymentLoading(true);
       
-      fetchStatus(false);
-      
       const bioengineWorker = await server.getService(serviceId);
       
       let deploymentName;
@@ -476,12 +570,19 @@ const BioEngineWorker: React.FC = () => {
         deploymentName = await bioengineWorker.deploy_artifact(artifactId);
       }
       
-      await fetchStatus();
+      // Set deployment cooldown for 5 seconds
+      setDeploymentCooldowns(prev => ({
+        ...prev,
+        [artifactId]: Date.now() + 5000
+      }));
+      
+      // Immediately fetch status to check for deployment
+      await fetchStatus(false);
       
       setDeploymentLoading(false);
       setDeployingArtifactId(null);
       
-      console.log(`Successfully deployed ${artifactId} as ${deploymentName} in ${deployMode || 'default'} mode`);
+      console.log(`Successfully submitted deployment for ${artifactId} as ${deploymentName} in ${deployMode || 'default'} mode`);
     } catch (err) {
       console.error('Deployment failed:', err);
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -496,6 +597,50 @@ const BioEngineWorker: React.FC = () => {
       ...artifactModes,
       [artifactId]: checked ? 'gpu' : 'cpu'
     });
+  };
+
+  // Helper functions for deployment state
+  const isArtifactDeployed = (artifactId: string): boolean => {
+    return !!(status?.bioengine_apps && artifactId in status.bioengine_apps);
+  };
+
+  const getDeploymentStatus = (artifactId: string): string | null => {
+    if (!status?.bioengine_apps || !(artifactId in status.bioengine_apps)) return null;
+    const deployment = status.bioengine_apps[artifactId];
+    return typeof deployment === 'object' && deployment !== null ? deployment.status : null;
+  };
+
+  const isDeployButtonDisabled = (artifactId: string): boolean => {
+    // Disable if currently deploying this artifact
+    if (deployingArtifactId === artifactId) return true;
+    
+    // Disable if another artifact is being deployed
+    if (deployingArtifactId !== null && deployingArtifactId !== artifactId) return true;
+    
+    // Disable if in cooldown period
+    const cooldownEnd = deploymentCooldowns[artifactId];
+    if (cooldownEnd && Date.now() < cooldownEnd) return true;
+    
+    // Disable if artifact is in DELETING state
+    if (isArtifactDeployed(artifactId)) {
+      const status = getDeploymentStatus(artifactId);
+      if (status === 'DELETING') return true;
+      return status !== 'DEPLOYING';
+    }
+    
+    return false;
+  };
+
+  const getDeployButtonText = (artifactId: string): string => {
+    if (deployingArtifactId === artifactId) return 'Deploy';
+    
+    const cooldownEnd = deploymentCooldowns[artifactId];
+    if (cooldownEnd && Date.now() < cooldownEnd) {
+      const secondsLeft = Math.ceil((cooldownEnd - Date.now()) / 1000);
+      return `Deploy (${secondsLeft}s)`;
+    }
+    
+    return 'Deploy';
   };
 
   const handleUndeployArtifact = async (artifactId: string) => {
@@ -990,6 +1135,57 @@ class MyNewApp:
     }
   };
 
+  const handleSaveAsCopy = async () => {
+    if (!serviceId || !isLoggedIn || !artifactManager) return;
+    
+    setCreateAppLoading(true);
+    setCreateAppError(null);
+    
+    try {
+      const bioengineWorker = await server.getService(serviceId);
+      
+      // Find the manifest.yaml file
+      const manifestFile = files.find(file => file.name === 'manifest.yaml');
+      if (!manifestFile) {
+        setCreateAppError('manifest.yaml file is required');
+        return;
+      }
+      
+      // Parse the manifest YAML and modify it for the copy
+      let manifestObj;
+      try {
+        manifestObj = yaml.load(manifestFile.content);
+        console.log('Parsed manifest object for copy:', manifestObj);
+        
+        // The manifest will be used as-is for the copy
+        // Users can modify the ID and name in the editor if needed
+      } catch (yamlErr) {
+        setCreateAppError(`Invalid YAML in manifest.yaml: ${yamlErr}`);
+        return;
+      }
+      
+      // Update the manifest.yaml file with the current content (no modifications)
+      const updatedFiles = files.map(file => ({
+        name: file.name,
+        content: file.content,
+        type: 'text'
+      }));
+      
+      console.log('Creating copy of artifact in user workspace');
+      await bioengineWorker.create_artifact({files: updatedFiles, _rkwargs: true});
+      
+      handleCloseCreateAppDialog();
+      await fetchAvailableArtifacts();
+      
+      console.log('Successfully created artifact copy');
+    } catch (err) {
+      console.error('Failed to create artifact copy:', err);
+      setCreateAppError(`Failed to create artifact copy: ${err}`);
+    } finally {
+      setCreateAppLoading(false);
+    }
+  };
+
   // File management handlers
   const handleAddNewFile = () => {
     if (!newFileName.trim()) return;
@@ -1154,6 +1350,20 @@ class MyNewApp:
     );
   };
 
+  // Helper function to parse service ID
+  const parseServiceId = (serviceId: string) => {
+    const parts = serviceId.split(':');
+    if (parts.length === 2) {
+      const [workspaceAndClient, serviceName] = parts;
+      const workspaceClientParts = workspaceAndClient.split('/');
+      if (workspaceClientParts.length === 2) {
+        const [workspace, clientId] = workspaceClientParts;
+        return { workspace, clientId, serviceName };
+      }
+    }
+    return { workspace: 'Unknown', clientId: 'Unknown', serviceName: 'Unknown' };
+  };
+
   if (loading) {
     return (
       <div className="flex justify-center items-center h-96">
@@ -1186,16 +1396,16 @@ class MyNewApp:
     );
   }
 
-  const deployments = Object.entries(status?.deployments || {})
-    .filter(([key]) => key !== 'service_id' && key !== 'note')
+  const deployments = Object.entries(status?.bioengine_apps || {})
+    .filter(([key, value]) => key !== 'service_id' && key !== 'note' && typeof value === 'object' && value !== null)
     .map(([key, value]) => ({ 
       artifact_id: key,
-      ...value 
+      ...(value as any)
     } as DeploymentType));
   
   const hasDeployments = deployments.length > 0;
-  const deploymentServiceId = status?.deployments?.service_id;
-  const deploymentNote = status?.deployments?.note;
+  const deploymentServiceId = status?.bioengine_apps?.service_id;
+  const deploymentNote = status?.bioengine_apps?.note;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
@@ -1249,26 +1459,41 @@ class MyNewApp:
               <h3 className="text-lg font-semibold text-gray-800">Service Information</h3>
             </div>
             <div className="space-y-3">
-              <div className="flex justify-between">
-                <span className="font-medium text-gray-700">Service ID:</span>
-                <span className="text-gray-900">{serviceId}</span>
-              </div>
-              {status?.service?.start_time_s && (
+              {status?.service_start_time && (
                 <>
                   <div className="flex justify-between">
                     <span className="font-medium text-gray-700">Start Time:</span>
                     <span className="text-gray-900">
-                      {formatTimeInfo(status.service.start_time_s).formattedTime}
+                      {formatTimeInfo(status.service_start_time).formattedTime}
                     </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="font-medium text-gray-700">Uptime:</span>
                     <span className="text-gray-900">
-                      {formatTimeInfo(status.service.start_time_s).uptime}
+                      {formatTimeInfo(status.service_start_time).uptime}
                     </span>
                   </div>
                 </>
               )}
+              {serviceId && (() => {
+                const { workspace, clientId, serviceName } = parseServiceId(serviceId);
+                return (
+                  <>
+                    <div className="flex justify-between">
+                      <span className="font-medium text-gray-700">Workspace:</span>
+                      <span className="text-gray-900 font-mono">{workspace}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="font-medium text-gray-700">Client ID:</span>
+                      <span className="text-gray-900 font-mono">{clientId}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="font-medium text-gray-700">Service Name:</span>
+                      <span className="text-gray-900 font-mono">{serviceName}</span>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </div>
         </div>
@@ -1278,115 +1503,239 @@ class MyNewApp:
             <div className="flex items-center mb-4">
               <div className="w-10 h-10 bg-gradient-to-r from-purple-500 to-purple-600 rounded-xl flex items-center justify-center mr-3">
                 <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2H5a2 2 0 00-2 2v2M7 7h10" />
                 </svg>
               </div>
               <h3 className="text-lg font-semibold text-gray-800">Cluster Information</h3>
             </div>
             <div className="space-y-3">
-              <div className="flex justify-between">
-                <span className="font-medium text-gray-700">Head Address:</span>
-                <span className="text-gray-900">{status?.cluster?.head_address}</span>
-              </div>
-              {status?.cluster?.start_time_s && (
+              {status?.ray_cluster?.start_time && status.ray_cluster.start_time !== "N/A" && (
                 <>
                   <div className="flex justify-between">
                     <span className="font-medium text-gray-700">Start Time:</span>
                     <span className="text-gray-900">
-                      {formatTimeInfo(status.cluster.start_time_s).formattedTime}
+                      {formatTimeInfo(status.ray_cluster.start_time as number).formattedTime}
                     </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="font-medium text-gray-700">Uptime:</span>
                     <span className="text-gray-900">
-                      {formatTimeInfo(status.cluster.start_time_s).uptime}
+                      {formatTimeInfo(status.ray_cluster.start_time as number).uptime}
                     </span>
                   </div>
                 </>
               )}
-              {status?.cluster?.note && (
-                <div className="mt-4">
-                  <p className="text-sm text-gray-600">Note: {status.cluster.note}</p>
-                </div>
+              {status?.ray_cluster?.start_time === "N/A" && (
+                <>
+                  <div className="flex justify-between">
+                    <span className="font-medium text-gray-700">Start Time:</span>
+                    <span className="text-gray-500">N/A (External cluster)</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium text-gray-700">Uptime:</span>
+                    <span className="text-gray-500">N/A (External cluster)</span>
+                  </div>
+                </>
               )}
+              <div className="flex justify-between">
+                <span className="font-medium text-gray-700">Head Address:</span>
+                <span className="text-gray-900 font-mono">{status?.ray_cluster?.head_address}</span>
+              </div>
             </div>
           </div>
         </div>
       </div>
       
-      {/* Worker Nodes */}
-      {status.cluster.worker_nodes !== "N/A" && (
+      {/* Cluster Resources */}
+      {status?.ray_cluster?.cluster && (
         <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-sm border border-white/20 mb-8 hover:shadow-md transition-all duration-200">
           <div className="p-6">
             <div className="flex justify-between items-center mb-6">
               <div className="flex items-center">
                 <div className="w-10 h-10 bg-gradient-to-r from-green-500 to-green-600 rounded-xl flex items-center justify-center mr-3">
                   <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2v-8a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                   </svg>
                 </div>
-                <h3 className="text-lg font-semibold text-gray-800">Worker Nodes</h3>
+                <h3 className="text-lg font-semibold text-gray-800">Cluster Resources</h3>
               </div>
             </div>
             
-            <div className="overflow-x-auto">
-              <table className="w-full table-auto">
-                <thead>
-                  <tr className="border-b">
-                    <th className="px-4 py-2 text-left">Node IP</th>
-                    <th className="px-4 py-2 text-left">Node ID</th>
-                    <th className="px-4 py-2 text-left">CPU</th>
-                    <th className="px-4 py-2 text-left">GPU</th>
-                    <th className="px-4 py-2 text-left">Memory</th>
-                    <th className="px-4 py-2 text-left">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {status.cluster.worker_nodes.Alive.map((node, index) => (
-                    <tr key={index} className="border-b">
-                      <td className="px-4 py-2">{node.NodeIP}</td>
-                      <td className="px-4 py-2 truncate max-w-[150px]" title={node.NodeID}>
-                        {node.NodeID.substring(0, 8)}...
-                      </td>
-                      <td className="px-4 py-2">
-                        {node["Available CPU"]}/{node["Total CPU"]} ({Math.round((node["Available CPU"] / node["Total CPU"]) * 100)}% available)
-                      </td>
-                      <td className="px-4 py-2">
-                        {node["Available GPU"]}/{node["Total GPU"]} ({Math.round((node["Available GPU"] / node["Total GPU"]) * 100)}% available)
-                      </td>
-                      <td className="px-4 py-2">
-                        {(node["Available Memory"] / 1024 / 1024 / 1024).toFixed(2)}GB/
-                        {(node["Total Memory"] / 1024 / 1024 / 1024).toFixed(2)}GB
-                        ({Math.round((node["Available Memory"] / node["Total Memory"]) * 100)}% available)
-                      </td>
-                      <td className="px-4 py-2">
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                          Alive
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                  {status.cluster.worker_nodes.Dead.map((node, index) => (
-                    <tr key={`dead-${index}`} className="border-b">
-                      <td className="px-4 py-2" colSpan={5}>
-                        {JSON.stringify(node)}
-                      </td>
-                      <td className="px-4 py-2">
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                          Dead
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                  {status.cluster.worker_nodes.Alive.length === 0 && 
-                   status.cluster.worker_nodes.Dead.length === 0 && (
-                    <tr>
-                      <td colSpan={6} className="px-4 py-2 text-center">No worker nodes available</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+              {/* CPU Usage */}
+              <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-blue-700">CPU Cores</span>
+                  <span className="text-xs text-blue-600">
+                    {status.ray_cluster.cluster.total_cpu > 0 
+                      ? Math.round(((status.ray_cluster.cluster.total_cpu - status.ray_cluster.cluster.available_cpu) / status.ray_cluster.cluster.total_cpu) * 100)
+                      : 0}% used
+                  </span>
+                </div>
+                <div className="text-lg font-bold text-blue-800 mb-2">
+                  {status.ray_cluster.cluster.total_cpu - status.ray_cluster.cluster.available_cpu} / {status.ray_cluster.cluster.total_cpu}
+                </div>
+                <div className="w-full bg-blue-200 rounded-full h-2">
+                  <div 
+                    className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
+                    style={{ 
+                      width: status.ray_cluster.cluster.total_cpu > 0 
+                        ? `${((status.ray_cluster.cluster.total_cpu - status.ray_cluster.cluster.available_cpu) / status.ray_cluster.cluster.total_cpu) * 100}%`
+                        : '0%'
+                    }}
+                  ></div>
+                </div>
+              </div>
+
+              {/* GPU Usage */}
+              <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-purple-700">GPU Cards</span>
+                  <span className="text-xs text-purple-600">
+                    {status.ray_cluster.cluster.total_gpu > 0 
+                      ? Math.round(((status.ray_cluster.cluster.total_gpu - status.ray_cluster.cluster.available_gpu) / status.ray_cluster.cluster.total_gpu) * 100)
+                      : 0}% used
+                  </span>
+                </div>
+                <div className="text-lg font-bold text-purple-800 mb-2">
+                  {status.ray_cluster.cluster.total_gpu - status.ray_cluster.cluster.available_gpu} / {status.ray_cluster.cluster.total_gpu}
+                </div>
+                <div className="w-full bg-purple-200 rounded-full h-2">
+                  <div 
+                    className="bg-purple-600 h-2 rounded-full transition-all duration-300" 
+                    style={{ 
+                      width: status.ray_cluster.cluster.total_gpu > 0 
+                        ? `${((status.ray_cluster.cluster.total_gpu - status.ray_cluster.cluster.available_gpu) / status.ray_cluster.cluster.total_gpu) * 100}%`
+                        : '0%'
+                    }}
+                  ></div>
+                </div>
+              </div>
+
+              {/* Memory Usage */}
+              <div className="bg-gradient-to-br from-orange-50 to-orange-100 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-orange-700">Memory</span>
+                  <span className="text-xs text-orange-600">
+                    {status.ray_cluster.cluster.total_memory > 0 
+                      ? Math.round(((status.ray_cluster.cluster.total_memory - status.ray_cluster.cluster.available_memory) / status.ray_cluster.cluster.total_memory) * 100)
+                      : 0}% used
+                  </span>
+                </div>
+                <div className="text-lg font-bold text-orange-800 mb-2">
+                  {((status.ray_cluster.cluster.total_memory - status.ray_cluster.cluster.available_memory) / 1024 / 1024 / 1024).toFixed(1)} / {(status.ray_cluster.cluster.total_memory / 1024 / 1024 / 1024).toFixed(1)}GB
+                </div>
+                <div className="w-full bg-orange-200 rounded-full h-2">
+                  <div 
+                    className="bg-orange-600 h-2 rounded-full transition-all duration-300" 
+                    style={{ 
+                      width: status.ray_cluster.cluster.total_memory > 0 
+                        ? `${((status.ray_cluster.cluster.total_memory - status.ray_cluster.cluster.available_memory) / status.ray_cluster.cluster.total_memory) * 100}%`
+                        : '0%'
+                    }}
+                  ></div>
+                </div>
+              </div>
+
+              {/* Object Store Memory Usage */}
+              <div className="bg-gradient-to-br from-teal-50 to-teal-100 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-teal-700">Object Store</span>
+                  <span className="text-xs text-teal-600">
+                    {Math.round(((status.ray_cluster.cluster.total_object_store_memory - status.ray_cluster.cluster.available_object_store_memory) / status.ray_cluster.cluster.total_object_store_memory) * 100)}% used
+                  </span>
+                </div>
+                <div className="text-lg font-bold text-teal-800 mb-2">
+                  {((status.ray_cluster.cluster.total_object_store_memory - status.ray_cluster.cluster.available_object_store_memory) / 1024 / 1024 / 1024).toFixed(1)} / {(status.ray_cluster.cluster.total_object_store_memory / 1024 / 1024 / 1024).toFixed(1)}GB
+                </div>
+                <div className="w-full bg-teal-200 rounded-full h-2">
+                  <div 
+                    className="bg-teal-600 h-2 rounded-full transition-all duration-300" 
+                    style={{ width: `${((status.ray_cluster.cluster.total_object_store_memory - status.ray_cluster.cluster.available_object_store_memory) / status.ray_cluster.cluster.total_object_store_memory) * 100}%` }}
+                  ></div>
+                </div>
+              </div>
             </div>
+
+            {/* Expandable Nodes Section */}
+            {status.ray_cluster.worker_nodes && Object.keys(status.ray_cluster.worker_nodes).length > 0 && (
+              <div className="border-t border-gray-200 pt-6">
+                <button
+                  onClick={() => setNodesExpanded(!nodesExpanded)}
+                  className="flex items-center justify-between w-full text-left p-3 bg-gray-50 rounded-xl hover:bg-gray-100 transition-colors duration-200"
+                >
+                  <div className="flex items-center">
+                    <svg className="w-5 h-5 text-gray-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+                    </svg>
+                    <span className="font-medium text-gray-700">
+                      Worker Nodes ({Object.values(status.ray_cluster.worker_nodes).reduce((total, nodes) => total + nodes.length, 0)})
+                    </span>
+                  </div>
+                  <svg 
+                    className={`w-5 h-5 text-gray-500 transition-transform duration-200 ${nodesExpanded ? 'rotate-180' : ''}`} 
+                    fill="none" 
+                    stroke="currentColor" 
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {nodesExpanded && (
+                  <div className="mt-4 space-y-3 animate-slideUp">
+                    {Object.entries(status.ray_cluster.worker_nodes).map(([nodeState, nodes]) => 
+                      nodes.map((node, index) => (
+                        <div key={`${nodeState}-${node.node_id}`} className="bg-white border border-gray-200 rounded-xl p-4">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                              <div className="flex items-center mb-2">
+                                <div className={`w-2 h-2 rounded-full mr-2 ${
+                                  nodeState === 'ALIVE' ? 'bg-green-500' : 'bg-red-500'
+                                }`}></div>
+                                <span className="font-medium text-gray-800">
+                                  Node {index + 1}
+                                </span>
+                              </div>
+                              <div className="space-y-1 text-sm">
+                                <div className="flex justify-between">
+                                  <span className="text-gray-600">IP Address:</span>
+                                  <span className="text-gray-900 font-mono">{node.node_ip}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-gray-600">Node ID:</span>
+                                  <span className="text-gray-900 font-mono truncate max-w-[150px]" title={node.node_id}>
+                                    {node.node_id.substring(0, 12)}...
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                            <div>
+                              <div className="space-y-2 text-sm">
+                                <div className="flex justify-between">
+                                  <span className="text-gray-600">CPU Cores:</span>
+                                  <span className="text-gray-900 font-semibold">{node.total_cpu}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-gray-600">GPU Cards:</span>
+                                  <span className="text-gray-900 font-semibold">{node.total_gpu}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-gray-600">Memory:</span>
+                                  <span className="text-gray-900 font-semibold">
+                                    {(node.total_memory / 1024 / 1024 / 1024).toFixed(1)}GB
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1493,15 +1842,30 @@ class MyNewApp:
                           className="px-4 py-2 text-sm bg-gradient-to-r from-red-400 to-red-500 text-white rounded-xl opacity-50 cursor-not-allowed flex items-center shadow-sm"
                         >
                           <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                          {deployment.status === "DEPLOYING" ? "Cancel Deployment" : "Undeploy"}
+                          {deployment.status === "DEPLOYING" ? "Canceling..." : "Undeploying..."}
+                        </button>
+                      ) : deployment.status === "DELETING" ? (
+                        <button
+                          disabled={true}
+                          className="px-4 py-2 text-sm bg-gradient-to-r from-gray-400 to-gray-500 text-white rounded-xl opacity-50 cursor-not-allowed flex items-center shadow-sm"
+                        >
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                          Deleting...
                         </button>
                       ) : (
                         <button
                           onClick={() => handleUndeployArtifact(deployment.artifact_id)}
-                          disabled={false}
-                          className="px-4 py-2 text-sm bg-gradient-to-r from-red-500 to-red-600 text-white rounded-xl hover:from-red-600 hover:to-red-700 shadow-sm hover:shadow-md transition-all duration-200"
+                          disabled={undeployingArtifactId === deployment.artifact_id}
+                          className="px-4 py-2 text-sm bg-gradient-to-r from-red-500 to-red-600 text-white rounded-xl hover:from-red-600 hover:to-red-700 disabled:opacity-50 shadow-sm hover:shadow-md transition-all duration-200"
                         >
-                          {deployment.status === "DEPLOYING" ? "Cancel Deployment" : "Undeploy"}
+                          {undeployingArtifactId === deployment.artifact_id ? (
+                            <>
+                              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                              {getDeploymentStatus(deployment.artifact_id) === "DEPLOYING" ? "Canceling..." : "Undeploying..."}
+                            </>
+                          ) : (
+                            getDeploymentStatus(deployment.artifact_id) === "DEPLOYING" ? "Cancel Deployment" : "Undeploy"
+                          )}
                         </button>
                       )}
                     </div>
@@ -1509,13 +1873,13 @@ class MyNewApp:
                   
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      {deployment.start_time_s && (
+                      {deployment.start_time && (
                         <div className="mb-3">
                           <p className="text-sm text-gray-600">
-                            <span className="font-medium">Start Time:</span> {formatTimeInfo(deployment.start_time_s).formattedTime}
+                            <span className="font-medium">Start Time:</span> {formatTimeInfo(deployment.start_time).formattedTime}
                           </p>
                           <p className="text-sm text-gray-600">
-                            <span className="font-medium">Uptime:</span> {formatTimeInfo(deployment.start_time_s).uptime}
+                            <span className="font-medium">Uptime:</span> {formatTimeInfo(deployment.start_time).uptime}
                           </p>
                         </div>
                       )}
@@ -1635,7 +1999,7 @@ class MyNewApp:
               <div className="flex justify-between items-start">
                 <div className="flex">
                   <svg className="w-5 h-5 text-red-400 mr-2 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12  8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                   <div>
                     <h4 className="text-sm font-medium text-red-800">Deployment Error</h4>
@@ -1779,15 +2143,40 @@ class MyNewApp:
                             className="px-6 py-3 bg-gradient-to-r from-gray-400 to-gray-500 text-white rounded-xl cursor-not-allowed flex items-center shadow-sm"
                           >
                             <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                            Deploy
+                            Deploying...
                           </button>
+                        ) : isArtifactDeployed(artifact.id) ? (
+                          getDeploymentStatus(artifact.id) === "DELETING" ? (
+                            <button
+                              disabled={true}
+                              className="px-6 py-3 bg-gradient-to-r from-gray-400 to-gray-500 text-white rounded-xl cursor-not-allowed flex items-center shadow-sm"
+                            >
+                              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                              Deleting...
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => handleUndeployArtifact(artifact.id)}
+                              disabled={undeployingArtifactId === artifact.id}
+                              className="px-6 py-3 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-xl hover:from-red-600 hover:to-red-700 disabled:opacity-50 shadow-sm hover:shadow-md transition-all duration-200"
+                            >
+                              {undeployingArtifactId === artifact.id ? (
+                                <>
+                                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                                  {getDeploymentStatus(artifact.id) === "DEPLOYING" ? "Canceling..." : "Undeploying..."}
+                                </>
+                              ) : (
+                                getDeploymentStatus(artifact.id) === "DEPLOYING" ? "Cancel Deployment" : "Undeploy"
+                              )}
+                            </button>
+                          )
                         ) : (
                           <button
                             onClick={() => handleDeployArtifact(artifact.id, artifactModes[artifact.id])}
-                            disabled={deployingArtifactId !== null && deployingArtifactId !== artifact.id}
+                            disabled={isDeployButtonDisabled(artifact.id)}
                             className="px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-xl hover:from-blue-700 hover:to-blue-800 disabled:from-gray-400 disabled:to-gray-500 shadow-sm hover:shadow-md transition-all duration-200"
                           >
-                            Deploy
+                            {getDeployButtonText(artifact.id)}
                           </button>
                         )}
                       </div>
@@ -1864,7 +2253,7 @@ class MyNewApp:
                           <div className="flex items-center gap-1">
                             {!file.isEditable && (
                               <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L4.314 16.5c-.77.833.192 2.5 1.732 2.5z" />
                               </svg>
                             )}
                           <span 
@@ -1988,6 +2377,31 @@ class MyNewApp:
               >
                 Cancel
               </button>
+              
+              {/* Show "Save as Copy" button only when editing an artifact that's not in user's workspace */}
+              {editingArtifact && !isUserOwnedArtifact(editingArtifact.id) && (
+                <button 
+                  onClick={handleSaveAsCopy}
+                  disabled={createAppLoading || files.length === 0 || !files.some(f => f.name === 'manifest.yaml')}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center"
+                  title="Create a copy of this app in your workspace"
+                >
+                  {createAppLoading ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                      Creating Copy...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 00-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                      </svg>
+                      Save as Copy
+                    </>
+                  )}
+                </button>
+              )}
+              
               <button 
                 onClick={handleCreateOrUpdateApp}
                 disabled={createAppLoading || files.length === 0 || !files.some(f => f.name === 'manifest.yaml')}
@@ -2006,8 +2420,6 @@ class MyNewApp:
           </div>
         </div>
       )}
-
-
       </div>
     </div>
   );
