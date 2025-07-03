@@ -296,11 +296,11 @@ class MyNewApp:
 
   // Check if "Save as Copy" should be shown
   const shouldShowSaveAsCopy = (artifactId: string): boolean => {
-    const isFromBioimageIoWorkspace = artifactId.startsWith('chiron-platform/');
+    const isFromChironPlatformWorkspace = artifactId.startsWith('chiron-platform/');
     const userWorkspace = server.config.workspace;
-    const isUserWorkspaceNotBioimageIo = userWorkspace !== 'chiron-platform';
+    const isUserWorkspaceNotChironPlatform = userWorkspace !== 'chiron-platform';
 
-    return isFromBioimageIoWorkspace && isUserWorkspaceNotBioimageIo;
+    return isFromChironPlatformWorkspace && isUserWorkspaceNotChironPlatform;
   };
 
   // Delete artifact handler
