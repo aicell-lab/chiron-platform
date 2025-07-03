@@ -16,8 +16,8 @@ import { HyphaProvider } from './HyphaContext';
 import { ProjectsProvider } from './providers/ProjectsProvider';
 import ModelTrainer from './components/ModelTrainer';
 import ManageWorker from './components/ManageWorker';
-import BioEngineHome from './components/BioEngineHome';
-import BioEngineWorker from './components/BioEngineWorker';
+import BioEngineHome from './components/BioEngine/BioEngineHome';
+import BioEngineWorker from './components/BioEngine/BioEngineWorker';
 import AgentLab from './pages/AgentLab';
 
 // Create a wrapper component that uses Router hooks

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useHyphaStore } from '../store/hyphaStore';
+import { useHyphaStore } from '../../store/hyphaStore';
 import BioEngineGuide from './BioEngineGuide';
 
 type BioEngineService = {
@@ -8,6 +8,12 @@ type BioEngineService = {
   name: string;
   description: string;
   service?: any;
+};
+
+// Helper function to compare arrays
+const arraysEqual = (a: string[], b: string[]): boolean => {
+  if (a.length !== b.length) return false;
+  return a.every((val, index) => val === b[index]);
 };
 
 // ServiceCard component for fancy instance cards
@@ -38,9 +44,9 @@ const ServiceCard: React.FC<{
             <h3 className="text-xl font-semibold text-gray-800">{service.name}</h3>
           </div>
         </div>
-        
+
         <p className="text-gray-600 mb-4 leading-relaxed">{service.description || 'No description available'}</p>
-        
+
         {/* Copyable Service ID */}
         <div className="mb-4">
           <label className="block text-sm font-medium text-gray-700 mb-2">Service ID</label>
@@ -66,9 +72,9 @@ const ServiceCard: React.FC<{
           </div>
         </div>
       </div>
-      
+
       <div className="p-6 pt-0">
-        <button 
+        <button
           onClick={() => onNavigate(service.id)}
           className="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-xl hover:from-blue-700 hover:to-blue-800 shadow-sm hover:shadow-md transition-all duration-200 font-medium"
         >
@@ -83,7 +89,7 @@ const BioEngineHome: React.FC = () => {
   const navigate = useNavigate();
   const { server, isLoggedIn } = useHyphaStore();
   const servicesRef = useRef<HTMLDivElement>(null);
-  
+
   const [bioEngineServices, setBioEngineServices] = useState<BioEngineService[]>([]);
   const [servicesLoading, setServicesLoading] = useState(false);
   const [servicesError, setServicesError] = useState<string | null>(null);
@@ -105,23 +111,35 @@ const BioEngineHome: React.FC = () => {
       if (isManualRefresh) {
         setManualRefreshLoading(true);
       } else {
-        setServicesLoading(true);
+        // Only show loading if we don't have any services yet
+        if (bioEngineServices.length === 0) {
+          setServicesLoading(true);
+        }
       }
       setServicesError(null);
-      const services = await server.listServices({"type": "bioengine-worker"});
       
-      // Check if we found new services and scroll to them
-      const foundNewServices = services.length > bioEngineServices.length;
-      
-      setBioEngineServices(services);
-      
-      // Scroll to services section if new services were found
-      if (foundNewServices && services.length > 0 && servicesRef.current) {
-        setTimeout(() => {
-          servicesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }, 100);
+      // Get the list of services from the workspace
+      const services = await server.listServices({ "type": "bioengine-worker" });
+
+      // Compare with current services list to see if anything changed
+      const servicesChanged = !arraysEqual(
+        services.map((s: BioEngineService) => s.id).sort(),
+        bioEngineServices.map(s => s.id).sort()
+      );
+
+      // Only update state if something actually changed
+      if (servicesChanged) {
+        setBioEngineServices(services);
+        
+        // Check if we found new services and scroll to them
+        const foundNewServices = services.length > bioEngineServices.length;
+        if (foundNewServices && services.length > 0 && servicesRef.current) {
+          setTimeout(() => {
+            servicesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }, 100);
+        }
       }
-      
+
       if (isManualRefresh) {
         setManualRefreshLoading(false);
       } else {
@@ -135,19 +153,24 @@ const BioEngineHome: React.FC = () => {
         setServicesLoading(false);
       }
     }
-  }, [isLoggedIn, server, bioEngineServices.length]);
+  }, [isLoggedIn, server, bioEngineServices, servicesRef]);
 
-  // Fetch services when login state changes
+  // Initialize services on mount
   useEffect(() => {
     if (isLoggedIn) {
       fetchBioEngineServices();
-    } else {
+    }
+  }, [isLoggedIn, fetchBioEngineServices]);
+
+  // Fetch services when login state changes (avoid duplicate with initial effect)
+  useEffect(() => {
+    if (!isLoggedIn) {
       // Reset services state when logged out
       setBioEngineServices([]);
       setServicesLoading(false);
       setServicesError('Please log in to view your BioEngine instances');
     }
-  }, [isLoggedIn, fetchBioEngineServices]);
+  }, [isLoggedIn]);
 
   // Auto-refresh services every 5 seconds
   useEffect(() => {
@@ -168,16 +191,16 @@ const BioEngineHome: React.FC = () => {
   const navigateToDashboard = (serviceId: string) => {
     navigate(`/bioengine/worker?service_id=${serviceId}`);
   };
-  
+
   const handleCustomServiceIdSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!customServiceId.trim()) return;
 
     console.log(`Connecting to custom BioEngine service: '${customServiceId}'`);
-    
+
     setConnectionLoading(true);
     setConnectionError(null);
-    
+
     try {
       await server.getService(customServiceId);
       navigateToDashboard(customServiceId);
@@ -192,13 +215,13 @@ const BioEngineHome: React.FC = () => {
       setConnectionLoading(false);
     }
   };
-  
+
   const handleTokenSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!customToken.trim()) return;
-    
+
     setConnectionLoading(true);
-    
+
     try {
       await server.getService(customServiceId, { token: customToken });
       setTokenDialogOpen(false);
@@ -209,7 +232,7 @@ const BioEngineHome: React.FC = () => {
       setConnectionLoading(false);
     }
   };
-  
+
   const handleTokenDialogClose = () => {
     setTokenDialogOpen(false);
     setCustomToken('');
@@ -222,9 +245,9 @@ const BioEngineHome: React.FC = () => {
       return (
         <div className="flex justify-center items-center h-64">
           <div className="flex flex-col items-center">
-            <img 
-              src="/img/bioengine-logo-black.svg" 
-              alt="BioEngine Loading" 
+            <img
+              src="/static/img/bioengine-logo-black.svg"
+              alt="BioEngine Loading"
               className="w-32 h-auto opacity-60 animate-pulse"
             />
             <p className="text-gray-500 text-sm mt-4 animate-pulse">Loading BioEngine instances...</p>
@@ -273,25 +296,29 @@ const BioEngineHome: React.FC = () => {
   };
 
   return (
-    <div className="container mx-auto px-4 py-8">
+            <div className="max-w-[1400px] mx-auto px-4 py-8">
       {/* Fancy Header - Always visible */}
       <div className="text-center mb-12">
-        <h1 className="text-5xl font-bold bg-gradient-to-r from-blue-600 via-purple-600 to-cyan-600 bg-clip-text text-transparent mb-4 leading-tight">
-          BioEngine
-        </h1>
-        <p className="text-xl text-gray-600 font-medium">
+        <div className="flex items-end justify-center gap-4 mb-4">
+          <img src="/bioengine-icon.svg" alt="BioEngine Logo" className="w-12 h-12 mb-3" />
+          <h1 className="text-5xl font-bold bg-gradient-to-r from-blue-600 via-purple-600 to-cyan-600 bg-clip-text text-transparent leading-tight">
+            BioEngine
+          </h1>
+        </div>
+        <div className="w-24 h-1 bg-gradient-to-r from-blue-500 to-purple-500 mx-auto mt-4 rounded-full"></div>
+        <p className="mt-4 text-xl text-gray-600 font-medium">
           Unveiling cloud-powered AI for simplified Single-Cell Biology
         </p>
-        <div className="w-24 h-1 bg-gradient-to-r from-blue-500 to-purple-500 mx-auto mt-4 rounded-full"></div>
+        
       </div>
-      
+
       {/* BioEngine Guide - Always visible */}
       <div className="max-w-6xl mx-auto mb-8">
         <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-sm border border-white/20 p-6 hover:shadow-md transition-all duration-200">
           <BioEngineGuide />
         </div>
       </div>
-      
+
       {/* Services List - Shows login warning when needed */}
       <div className="mb-8" ref={servicesRef}>
         <div className="flex items-center justify-center mb-6">
@@ -312,12 +339,11 @@ const BioEngineHome: React.FC = () => {
             <span className="ml-2 text-sm">Refresh</span>
           </button>
         </div>
-        
+
         {/* Combined section with Connect and Services List */}
         <div className="max-w-6xl mx-auto">
-          <div className={`bg-white/80 backdrop-blur-sm rounded-2xl shadow-sm border border-white/20 p-6 hover:shadow-md transition-all duration-200 ${
-            !isLoggedIn ? 'opacity-60' : ''
-          }`}>
+          <div className={`bg-white/80 backdrop-blur-sm rounded-2xl shadow-sm border border-white/20 p-6 hover:shadow-md transition-all duration-200 ${!isLoggedIn ? 'opacity-60' : ''
+            }`}>
             <div className="flex items-center mb-4">
               <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center mr-3 p-1">
                 <img src="/bioengine-icon.svg" alt="BioEngine" className="w-8 h-8" />
@@ -327,7 +353,7 @@ const BioEngineHome: React.FC = () => {
                 <p className="text-sm text-gray-600">Enter a service ID to connect to an existing BioEngine worker</p>
               </div>
             </div>
-            
+
             {!isLoggedIn && (
               <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
                 <p className="text-amber-600 text-sm flex items-center">
@@ -347,12 +373,11 @@ const BioEngineHome: React.FC = () => {
                   value={customServiceId}
                   onChange={(e) => setCustomServiceId(e.target.value)}
                   disabled={connectionLoading || !isLoggedIn}
-                  className={`w-full px-4 py-3 border-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 ${
-                    connectionError ? 'border-red-300 bg-red-50' : 'border-gray-200 bg-white'
-                  } ${connectionLoading || !isLoggedIn ? 'bg-gray-100' : ''}`}
+                  className={`w-full px-4 py-3 border-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 ${connectionError ? 'border-red-300 bg-red-50' : 'border-gray-200 bg-white'
+                    } ${connectionLoading || !isLoggedIn ? 'bg-gray-100' : ''}`}
                 />
-                <button 
-                  type="submit" 
+                <button
+                  type="submit"
                   disabled={!customServiceId.trim() || connectionLoading || !isLoggedIn}
                   className="absolute right-2 px-6 py-2 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-lg hover:from-blue-700 hover:to-blue-800 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed flex items-center justify-center min-w-[100px] shadow-sm hover:shadow-md transition-all duration-200"
                 >
@@ -382,7 +407,7 @@ const BioEngineHome: React.FC = () => {
           </div>
         </div>
       </div>
-      
+
       {/* Token Dialog */}
       {tokenDialogOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 animate-fadeIn">
@@ -409,25 +434,24 @@ const BioEngineHome: React.FC = () => {
                   onChange={(e) => setCustomToken(e.target.value)}
                   disabled={connectionLoading}
                   autoFocus
-                  className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                    connectionError ? 'border-red-500' : 'border-gray-300'
-                  } ${connectionLoading ? 'bg-gray-100' : 'bg-white'}`}
+                  className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${connectionError ? 'border-red-500' : 'border-gray-300'
+                    } ${connectionLoading ? 'bg-gray-100' : 'bg-white'}`}
                 />
                 {connectionError && (
                   <p className="text-red-500 text-sm mt-2">{connectionError}</p>
                 )}
               </div>
               <div className="p-6 pt-0 border-t border-gray-200/50 flex justify-end space-x-3">
-                <button 
+                <button
                   type="button"
-                  onClick={handleTokenDialogClose} 
+                  onClick={handleTokenDialogClose}
                   disabled={connectionLoading}
                   className="px-6 py-3 text-gray-600 bg-white border-2 border-gray-200 rounded-xl hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 shadow-sm hover:shadow-md transition-all duration-200"
                 >
                   Cancel
                 </button>
-                <button 
-                  type="submit" 
+                <button
+                  type="submit"
                   disabled={!customToken.trim() || connectionLoading}
                   className="px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-xl hover:from-blue-700 hover:to-blue-800 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed flex items-center shadow-sm hover:shadow-md transition-all duration-200"
                 >
