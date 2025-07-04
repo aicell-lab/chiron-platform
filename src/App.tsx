@@ -18,6 +18,7 @@ import ModelTrainer from './components/ModelTrainer';
 import ManageWorker from './components/ManageWorker';
 import BioEngineHome from './components/BioEngine/BioEngineHome';
 import BioEngineWorker from './components/BioEngine/BioEngineWorker';
+import Orchestrator from './components/BioEngine/Orchestrator';
 import AgentLab from './pages/AgentLab';
 
 // Create a wrapper component that uses Router hooks
@@ -90,6 +91,7 @@ const AppContent: React.FC = () => {
           <Route path="/manage-worker/:artifactId" element={<ManageWorker />} />
           <Route path="/bioengine" element={<BioEngineHome />} />
           <Route path="/bioengine/worker" element={<BioEngineWorker />} />
+          <Route path="/orchestrator" element={<Orchestrator />} />
         </Routes>
       </main>
       <Footer />
