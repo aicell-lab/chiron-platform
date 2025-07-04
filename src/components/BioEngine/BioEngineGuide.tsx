@@ -8,7 +8,7 @@ const BioEngineGuide: React.FC = () => {
   const [os, setOS] = useState<OSType>('macos');
   const [mode, setMode] = useState<ModeType>('single-machine');
   const [containerRuntime, setContainerRuntime] = useState<ContainerRuntimeType>('docker');
-  const [cpus, setCpus] = useState(2);
+  const [cpus, setCpus] = useState(4);
   const [hasGpu, setHasGpu] = useState(false);
   const [gpus, setGpus] = useState(1);
   const [runAsRoot, setRunAsRoot] = useState(false);
