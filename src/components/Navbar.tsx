@@ -8,6 +8,7 @@ import { IoDocumentTextOutline, IoCloudUploadOutline } from 'react-icons/io5';
 import { TbEngine } from 'react-icons/tb';
 import { RiTestTubeLine } from 'react-icons/ri';
 import { RiLoginBoxLine } from 'react-icons/ri';
+import { FaGraduationCap } from 'react-icons/fa';
 import { useHyphaStore } from '../store/hyphaStore';
 
 const Navbar: React.FC = () => {
@@ -63,6 +64,10 @@ const Navbar: React.FC = () => {
             <Link to="/bioengine" className={navLinkClasses("/bioengine")}>
               <TbEngine className="mr-2" size={20} />
               BioEngine
+            </Link>
+            <Link to="/training" className={navLinkClasses("/training")}>
+              <FaGraduationCap className="mr-2" size={20} />
+              Training
             </Link>
             <Link to="/lab" className={navLinkClasses("/lab")}>
               <RiTestTubeLine className="mr-2" size={20} />
@@ -151,6 +156,13 @@ const Navbar: React.FC = () => {
             >
               <TbEngine className="mr-2" size={20} />
               BioEngine
+            </Link>
+            <Link 
+              to="/training" 
+              className={mobileNavLinkClasses("/training")}
+            >
+              <FaGraduationCap className="mr-2" size={20} />
+              Training
             </Link>
             <Link 
               to="/lab" 
