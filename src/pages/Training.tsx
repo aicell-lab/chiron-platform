@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useHyphaStore } from '../store/hyphaStore';
 import { hyphaWebsocketClient } from 'hypha-rpc';
-import { FaNetworkWired, FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock } from 'react-icons/fa';
+import { FaNetworkWired, FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
 
 interface ManagerConnection {
@@ -32,17 +32,19 @@ interface TrainerApp {
 interface TrainingStatus {
   is_running: boolean;
   current_training_round: number;
-  total_training_rounds: number;
-  stage: string;
+  target_round: number;
+  stage: string | null;
   trainers_progress: Record<string, {
     current_batch: number;
     total_batches: number;
+    progress: number;
+    error?: string;
   }>;
 }
 
 interface TrainingHistory {
-  losses: [number, number][];  // Array of [epoch, value] pairs
-  accuracies: [number, number][];  // Array of [epoch, value] pairs
+  training_losses: [number, number][];  // Array of [round, loss] pairs
+  validation_losses: [number, number][];  // Array of [round, loss] pairs
 }
 
 interface ClusterStatus {
@@ -115,8 +117,21 @@ const Training: React.FC = () => {
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
   const [trainingHistory, setTrainingHistory] = useState<TrainingHistory | null>(null);
   const [numRounds, setNumRounds] = useState(5);
+  const [limitTrainBatches, setLimitTrainBatches] = useState<number | null>(null);
+  const [limitEvalBatches, setLimitEvalBatches] = useState<number | null>(null);
   const [addedTrainers, setAddedTrainers] = useState<string[]>([]);
   const [isPreparingTraining, setIsPreparingTraining] = useState(false);
+  
+  // Error modal state
+  const [showErrorDetailModal, setShowErrorDetailModal] = useState(false);
+  const [errorDetailTrainerId, setErrorDetailTrainerId] = useState<string>('');
+  const [errorDetailMessage, setErrorDetailMessage] = useState<string>('');
+
+  // Confirmation modal state
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [confirmModalTitle, setConfirmModalTitle] = useState<string>('');
+  const [confirmModalMessage, setConfirmModalMessage] = useState<string>('');
+  const [confirmModalAction, setConfirmModalAction] = useState<(() => void) | null>(null);
 
   // Info modal state
   const [showInfoModal, setShowInfoModal] = useState(false);
@@ -238,6 +253,71 @@ const Training: React.FC = () => {
 
   // Remove manager connection
   const removeManager = (workspace: string) => {
+    // Check if this worker has the selected orchestrator
+    const hasSelectedOrchestrator = selectedOrchestrator && 
+      orchestrators.some(o => o.managerId === workspace && `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    
+    // Check if we have selected trainers from this worker
+    const workersTrainers = trainers.filter(t => t.managerId === workspace);
+    const hasSelectedTrainers = workersTrainers.some(t => selectedTrainers.has(`${t.managerId}::${t.appId}`));
+
+    // Build warning message
+    let warningMessage = `Disconnecting from worker "${workspace}" will:\n\n`;
+    warningMessage += '• Remove this worker from your connections\n';
+    warningMessage += '• Keep the orchestrator and trainer applications running on the worker\n';
+    
+    if (hasSelectedOrchestrator) {
+      warningMessage += '• Deselect the currently selected orchestrator\n';
+    }
+    
+    if (hasSelectedTrainers) {
+      warningMessage += '• Deselect the trainers from this worker\n';
+      if (isTraining) {
+        warningMessage += '• Selected trainers will finish the current round but won\'t participate in future rounds\n';
+      }
+    }
+
+    warningMessage += '\nAre you sure you want to disconnect?';
+
+    // Show confirmation modal
+    setConfirmModalTitle('Disconnect Worker');
+    setConfirmModalMessage(warningMessage);
+    setConfirmModalAction(() => () => {
+      performRemoveManager(workspace);
+    });
+    setShowConfirmModal(true);
+  };
+
+  // Perform the actual manager removal
+  const performRemoveManager = async (workspace: string) => {
+    // Unregister and deselect trainers from this worker
+    const workersTrainers = trainers.filter(t => t.managerId === workspace);
+    if (workersTrainers.length > 0) {
+      // Unregister each selected trainer
+      for (const trainer of workersTrainers) {
+        const trainerId = `${trainer.managerId}::${trainer.appId}`;
+        if (selectedTrainers.has(trainerId)) {
+          await unregisterTrainer(trainerId);
+        }
+      }
+      
+      // Deselect trainers
+      setSelectedTrainers(prev => {
+        const newSet = new Set(prev);
+        workersTrainers.forEach(t => {
+          newSet.delete(`${t.managerId}::${t.appId}`);
+        });
+        return newSet;
+      });
+    }
+
+    // Deselect orchestrator if it belongs to this worker
+    if (selectedOrchestrator && 
+        orchestrators.some(o => o.managerId === workspace && `${o.managerId}::${o.appId}` === selectedOrchestrator)) {
+      setSelectedOrchestrator(null);
+      setTrainingHistory(null);
+    }
+
     setManagers(prev => prev.filter(m => m.workspace !== workspace));
     // Clear timer for this worker
     if (workerTimers[workspace]) {
@@ -428,6 +508,33 @@ const Training: React.FC = () => {
     const manager = managers.find(m => m.workspace === managerId);
     if (!manager) return;
 
+    // Check if this orchestrator has training history
+    const orchestratorId = `${managerId}::chiron-orchestrator`;
+    if (orchestratorId === selectedOrchestrator && trainingHistory && 
+        ((trainingHistory.training_losses && trainingHistory.training_losses.length > 0) || 
+         (trainingHistory.validation_losses && trainingHistory.validation_losses.length > 0))) {
+      // Show confirmation modal
+      setConfirmModalTitle('Delete Orchestrator with Training History');
+      setConfirmModalMessage(
+        'This orchestrator has training history that will be permanently lost. ' +
+        'Are you sure you want to delete it?'
+      );
+      setConfirmModalAction(() => async () => {
+        await performRemoveOrchestrator(managerId);
+      });
+      setShowConfirmModal(true);
+      return;
+    }
+
+    // No history, proceed directly
+    await performRemoveOrchestrator(managerId);
+  };
+
+  // Perform the actual orchestrator removal
+  const performRemoveOrchestrator = async (managerId: string) => {
+    const manager = managers.find(m => m.workspace === managerId);
+    if (!manager) return;
+
     // Immediately mark as deleting in UI
     setOrchestrators(prev => prev.map(o =>
       o.managerId === managerId ? { ...o, status: 'DELETING' } : o
@@ -452,6 +559,26 @@ const Training: React.FC = () => {
 
   // Remove trainer
   const removeTrainer = async (managerId: string, appId: string) => {
+    // Prevent trainer deletion during training
+    if (isTraining) {
+      setErrorPopupMessage('Cannot Delete Trainer');
+      setErrorPopupDetails('You cannot delete a trainer while training is in progress. Please stop the training first.');
+      setShowErrorPopup(true);
+      return;
+    }
+
+    const trainerId = `${managerId}::${appId}`;
+    
+    // Unregister if selected
+    if (selectedTrainers.has(trainerId)) {
+      await unregisterTrainer(trainerId);
+      setSelectedTrainers(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(trainerId);
+        return newSet;
+      });
+    }
+
     const manager = managers.find(m => m.workspace === managerId);
     if (!manager) return;
 
@@ -521,6 +648,51 @@ const Training: React.FC = () => {
     }
   };
 
+  // Register a trainer with the orchestrator
+  const registerTrainer = async (trainerId: string) => {
+    if (!selectedOrchestrator) return;
+
+    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+
+    const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
+    if (!trainer || trainer.status !== 'RUNNING') return;
+
+    try {
+      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+      const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
+      await orchestratorService.add_trainer(trainerServiceId);
+      console.log(`Registered trainer ${trainer.appId} with orchestrator`);
+    } catch (error) {
+      console.error('Failed to register trainer:', error);
+      setErrorPopupMessage('Failed to Register Trainer');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while registering the trainer');
+      setShowErrorPopup(true);
+    }
+  };
+
+  // Unregister a trainer from the orchestrator
+  const unregisterTrainer = async (trainerId: string) => {
+    if (!selectedOrchestrator) return;
+
+    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+
+    const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
+    if (!trainer || trainer.status !== 'RUNNING') return;
+
+    try {
+      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+      const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
+      await orchestratorService.remove_trainer(trainerServiceId);
+      console.log(`Unregistered trainer ${trainer.appId} from orchestrator`);
+    } catch (error) {
+      console.error('Failed to unregister trainer:', error);
+      // Don't show error popup for unregister as it might happen during cleanup
+      console.warn('Continuing despite unregister error');
+    }
+  };
+
   // Sync trainers with orchestrator
   const syncTrainersWithOrchestrator = useCallback(async () => {
     if (!selectedOrchestrator) return;
@@ -573,12 +745,26 @@ const Training: React.FC = () => {
     }
   }, [selectedOrchestrator, selectedTrainers, orchestrators, trainers, server]);
 
-  // Automatically sync trainers when selection changes
+  // Register selected trainers when orchestrator is first selected
   useEffect(() => {
-    if (selectedOrchestrator && selectedTrainers.size > 0) {
-      syncTrainersWithOrchestrator();
-    }
-  }, [selectedOrchestrator, selectedTrainers, syncTrainersWithOrchestrator]);
+    const registerExistingTrainers = async () => {
+      if (!selectedOrchestrator || selectedTrainers.size === 0) return;
+
+      const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+      if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+
+      // Register all currently selected trainers
+      for (const trainerId of Array.from(selectedTrainers)) {
+        const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
+        if (trainer && trainer.status === 'RUNNING') {
+          await registerTrainer(trainerId);
+        }
+      }
+    };
+
+    registerExistingTrainers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedOrchestrator]); // Only run when orchestrator changes
 
   // Fetch training history when orchestrator is selected
   useEffect(() => {
@@ -596,7 +782,8 @@ const Training: React.FC = () => {
         const history = await orchestratorService.get_training_history();
         
         // Only set if we have valid data
-        if (history && history.losses && history.losses.length > 0) {
+        if (history && ((history.training_losses && history.training_losses.length > 0) || 
+                        (history.validation_losses && history.validation_losses.length > 0))) {
           setTrainingHistory(history);
         }
       } catch (error) {
@@ -626,10 +813,24 @@ const Training: React.FC = () => {
 
       setIsPreparingTraining(false);
       setIsTraining(true);
-      setTrainingHistory(null);
+
+      // Prepare training parameters
+      const trainingParams: any = { 
+        num_rounds: numRounds, 
+        timeout: 600,
+        _rkwargs: true 
+      };
+      
+      // Add optional parameters if set
+      if (limitTrainBatches !== null) {
+        trainingParams.limit_train_batches = limitTrainBatches;
+      }
+      if (limitEvalBatches !== null) {
+        trainingParams.limit_eval_batches = limitEvalBatches;
+      }
 
       // Start training in background
-      orchestratorService.start_training({ num_rounds: numRounds, timeout: 600, _rkwargs: true }).catch((error: Error) => {
+      orchestratorService.start_training(trainingParams).catch((error: Error) => {
         console.error('Training failed:', error);
         setErrorPopupMessage('Training Failed');
         setErrorPopupDetails(error.message);
@@ -683,6 +884,58 @@ const Training: React.FC = () => {
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while stopping the training');
       setShowErrorPopup(true);
     }
+  };
+
+  // Reset training state
+  const resetTrainingState = async () => {
+    if (!selectedOrchestrator) return;
+
+    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+
+    try {
+      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+      await orchestratorService.reset_training_state();
+      setTrainingHistory(null);
+      setTrainingStatus(null);
+    } catch (error) {
+      console.error('Failed to reset training state:', error);
+      setErrorPopupMessage('Failed to Reset Training State');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while resetting the training state');
+      setShowErrorPopup(true);
+    }
+  };
+
+  // Handle orchestrator selection change with confirmation
+  const handleOrchestratorSelectionChange = (newOrchestratorId: string) => {
+    // Prevent orchestrator changes during training
+    if (isTraining) {
+      setErrorPopupMessage('Cannot Change Orchestrator');
+      setErrorPopupDetails('You cannot change the orchestrator while training is in progress. Please stop the training first.');
+      setShowErrorPopup(true);
+      return;
+    }
+
+    // Check if currently selected orchestrator has training history
+    if (selectedOrchestrator && selectedOrchestrator !== newOrchestratorId && 
+        trainingHistory && 
+        ((trainingHistory.training_losses && trainingHistory.training_losses.length > 0) || 
+         (trainingHistory.validation_losses && trainingHistory.validation_losses.length > 0))) {
+      // Show confirmation modal
+      setConfirmModalTitle('Switch Orchestrator');
+      setConfirmModalMessage(
+        'The currently selected orchestrator has training history. ' +
+        'Switching will clear the displayed history. Do you want to continue?'
+      );
+      setConfirmModalAction(() => () => {
+        setSelectedOrchestrator(newOrchestratorId);
+      });
+      setShowConfirmModal(true);
+      return;
+    }
+
+    // No history or same orchestrator, proceed directly
+    setSelectedOrchestrator(newOrchestratorId);
   };
 
   // Check if user has access to a dataset
@@ -807,10 +1060,10 @@ const Training: React.FC = () => {
                 </button>
                 <button
                   onClick={() => removeManager(manager.workspace)}
-                  className="p-2 text-red-600 hover:bg-red-50 rounded"
-                  title="Remove manager"
+                  className="p-2 text-orange-600 hover:bg-orange-50 rounded"
+                  title="Disconnect from worker"
                 >
-                  <FaTrash />
+                  <FaUnlink />
                 </button>
               </div>
             </div>
@@ -935,15 +1188,20 @@ const Training: React.FC = () => {
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Orchestrator (select one)
+                  {isTraining && <span className="text-xs text-orange-600 ml-2">(Cannot change during training)</span>}
                 </label>
                 <div className="space-y-2">
                   {orchestrators.filter(o => o.status === 'RUNNING').map((orch) => (
-                    <label key={`${orch.managerId}::${orch.appId}`} className="flex items-center p-3 bg-gray-50 rounded cursor-pointer hover:bg-gray-100">
+                    <label 
+                      key={`${orch.managerId}::${orch.appId}`} 
+                      className={`flex items-center p-3 bg-gray-50 rounded ${isTraining ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:bg-gray-100'}`}
+                    >
                       <input
                         type="radio"
                         name="orchestrator"
                         checked={selectedOrchestrator === `${orch.managerId}::${orch.appId}`}
-                        onChange={() => setSelectedOrchestrator(`${orch.managerId}::${orch.appId}`)}
+                        onChange={() => handleOrchestratorSelectionChange(`${orch.managerId}::${orch.appId}`)}
+                        disabled={isTraining}
                         className="mr-3"
                       />
                       <div>
@@ -962,6 +1220,7 @@ const Training: React.FC = () => {
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Trainers (select multiple)
+                  {isTraining && <span className="text-xs text-blue-600 ml-2">(Deselecting removes from next round)</span>}
                 </label>
                 <div className="space-y-2">
                   {trainers.filter(t => t.status === 'RUNNING').map((trainer) => (
@@ -969,17 +1228,27 @@ const Training: React.FC = () => {
                       <input
                         type="checkbox"
                         checked={selectedTrainers.has(`${trainer.managerId}::${trainer.appId}`)}
-                        onChange={(e) => {
+                        onChange={async (e) => {
                           const id = `${trainer.managerId}::${trainer.appId}`;
+                          const isChecked = e.target.checked;
+                          
+                          // Update state
                           setSelectedTrainers(prev => {
                             const newSet = new Set(prev);
-                            if (e.target.checked) {
+                            if (isChecked) {
                               newSet.add(id);
                             } else {
                               newSet.delete(id);
                             }
                             return newSet;
                           });
+
+                          // Immediately register or unregister
+                          if (isChecked) {
+                            await registerTrainer(id);
+                          } else {
+                            await unregisterTrainer(id);
+                          }
                         }}
                         className="mr-3"
                       />
@@ -1000,57 +1269,100 @@ const Training: React.FC = () => {
       )}
 
       {/* Step 3: Start Training */}
-      {selectedOrchestrator && selectedTrainers.size > 0 && (
+      {selectedOrchestrator && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-4">
             Step 3: Start Federated Training
           </h2>
 
           {/* Training controls */}
-          <div className="flex items-center gap-4 mb-6">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Number of Rounds
-              </label>
-              <input
-                type="number"
-                value={numRounds}
-                onChange={(e) => setNumRounds(parseInt(e.target.value) || 1)}
-                min="1"
-                className="px-4 py-2 border border-gray-300 rounded-lg w-32"
-                disabled={isTraining}
-              />
+          <div className="mb-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Number of Rounds
+                </label>
+                <input
+                  type="number"
+                  value={numRounds}
+                  onChange={(e) => setNumRounds(parseInt(e.target.value) || 1)}
+                  min="1"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                  disabled={isTraining}
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Limit Train Batches (optional)
+                </label>
+                <input
+                  type="number"
+                  value={limitTrainBatches === null ? '' : limitTrainBatches}
+                  onChange={(e) => setLimitTrainBatches(e.target.value === '' ? null : parseInt(e.target.value))}
+                  min="1"
+                  placeholder="All batches"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                  disabled={isTraining}
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Limit Eval Batches (optional)
+                </label>
+                <input
+                  type="number"
+                  value={limitEvalBatches === null ? '' : limitEvalBatches}
+                  onChange={(e) => setLimitEvalBatches(e.target.value === '' ? null : parseInt(e.target.value))}
+                  min="1"
+                  placeholder="All batches"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                  disabled={isTraining}
+                />
+              </div>
             </div>
 
-            <div className="flex-1"></div>
+            <div className="flex items-center gap-3">
+              {!isTraining ? (
+                <button
+                  onClick={startTraining}
+                  disabled={isPreparingTraining || selectedTrainers.size === 0}
+                  className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed flex items-center font-medium"
+                  title={selectedTrainers.size === 0 ? "Please select at least one trainer to start training" : ""}
+                >
+                  {isPreparingTraining ? (
+                    <>
+                      <BiLoaderAlt className="mr-2 animate-spin" />
+                      Preparing...
+                    </>
+                  ) : (
+                    <>
+                      <FaPlay className="mr-2" />
+                      Start Training
+                    </>
+                  )}
+                </button>
+              ) : (
+                <button
+                  onClick={stopTraining}
+                  className="px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center font-medium"
+                >
+                  <FaStop className="mr-2" />
+                  Stop Training
+                </button>
+              )}
 
-            {!isTraining ? (
               <button
-                onClick={startTraining}
-                disabled={isPreparingTraining}
-                className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed flex items-center font-medium"
+                onClick={resetTrainingState}
+                disabled={isTraining}
+                className="px-6 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center font-medium"
+                title="Reset training state (clears history and parameters)"
               >
-                {isPreparingTraining ? (
-                  <>
-                    <BiLoaderAlt className="mr-2 animate-spin" />
-                    Preparing...
-                  </>
-                ) : (
-                  <>
-                    <FaPlay className="mr-2" />
-                    Start Training
-                  </>
-                )}
+                <FaTrash className="mr-2" />
+                Reset State
               </button>
-            ) : (
-              <button
-                onClick={stopTraining}
-                className="px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center font-medium"
-              >
-                <FaStop className="mr-2" />
-                Stop Training
-              </button>
-            )}
+            </div>
           </div>
 
           {/* Training status - only show when actively training */}
@@ -1058,60 +1370,84 @@ const Training: React.FC = () => {
             <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-medium text-blue-900">
-                  Training Round {trainingStatus.current_training_round} / {trainingStatus.total_training_rounds}
+                  Training Round {trainingStatus.current_training_round} / {trainingStatus.target_round}
                 </h3>
                 <span className="text-sm font-medium text-blue-700 uppercase">
-                  {trainingStatus.stage}
+                  {trainingStatus.stage || 'Idle'}
                 </span>
               </div>
 
               <div className="space-y-2">
-                {Object.entries(trainingStatus.trainers_progress).map(([trainerId, progress]) => (
-                  <div key={trainerId}>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-gray-700">Trainer {getTrainerAppId(trainerId)}</span>
-                      <span className="text-gray-600">
-                        {progress.current_batch} / {progress.total_batches} batches
-                      </span>
-                    </div>
-                    <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
-                      <div
-                        className="bg-blue-600 h-2 rounded-full transition-all duration-300 relative"
-                        style={{ width: `${(progress.current_batch / progress.total_batches) * 100}%` }}
-                      >
-                        {/* Animated shimmer effect */}
-                        <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer"></div>
+                {Object.entries(trainingStatus.trainers_progress).map(([trainerId, progress]) => {
+                  const hasError = !!progress.error;
+                  const stageColor = trainingStatus.stage === 'fit' ? 'bg-blue-600' : 'bg-green-600';
+                  
+                  return (
+                    <div key={trainerId}>
+                      <div className="flex justify-between text-sm mb-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-gray-700">Trainer {getTrainerAppId(trainerId)}</span>
+                          {hasError && (
+                            <button
+                              onClick={() => {
+                                setErrorDetailTrainerId(getTrainerAppId(trainerId));
+                                setErrorDetailMessage(progress.error || 'Unknown error');
+                                setShowErrorDetailModal(true);
+                              }}
+                              className="text-red-600 hover:text-red-800"
+                              title="View error details"
+                            >
+                              <FaTimesCircle />
+                            </button>
+                          )}
+                        </div>
+                        <span className="text-gray-600">
+                          {progress.current_batch} / {progress.total_batches} batches
+                        </span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                        <div
+                          className={`${hasError ? 'bg-red-600' : stageColor} h-2 rounded-full transition-all duration-300 relative`}
+                          style={{ width: `${progress.progress * 100}%` }}
+                        >
+                          {/* Animated shimmer effect */}
+                          {!hasError && (
+                            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer"></div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
 
           {/* Training history */}
-          {trainingHistory && trainingHistory.losses && trainingHistory.losses.length > 0 && (
+          {trainingHistory && ((trainingHistory.training_losses && trainingHistory.training_losses.length > 0) || 
+                                (trainingHistory.validation_losses && trainingHistory.validation_losses.length > 0)) && (
             <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
               <h3 className="font-medium text-gray-900 mb-4">Training History</h3>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Loss chart */}
-                <div>
-                  <h4 className="text-sm font-medium text-gray-700 mb-2">Loss</h4>
-                  <div className="relative h-64 bg-white border border-gray-200 rounded p-4">
-                    <svg className="w-full h-full" viewBox="0 0 450 200">
-                      {(() => {
-                        // Extract values from [[epoch, value], [epoch, value], ...]
-                        const lossData = trainingHistory.losses.map(item => ({
-                          epoch: item[0],
-                          value: item[1]
-                        }));
-                        
-                        const lossValues = lossData.map(d => d.value);
-                        const maxLoss = Math.max(...lossValues);
-                        const minLoss = Math.min(...lossValues);
-                        const range = maxLoss - minLoss || 1;
-                        const numYTicks = 5;
+                {/* Training Loss chart */}
+                {trainingHistory.training_losses && trainingHistory.training_losses.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-700 mb-2">Training Loss</h4>
+                    <div className="relative h-64 bg-white border border-gray-200 rounded p-4">
+                      <svg className="w-full h-full" viewBox="0 0 450 200">
+                        {(() => {
+                          // Extract values from [[round, loss], [round, loss], ...]
+                          const lossData = trainingHistory.training_losses.map((item: [number, number]) => ({
+                            round: item[0],
+                            value: item[1]
+                          }));
+                          
+                          const lossValues = lossData.map((d: {round: number, value: number}) => d.value);
+                          const maxLoss = Math.max(...lossValues);
+                          const minLoss = Math.min(...lossValues);
+                          const range = maxLoss - minLoss || 1;
+                          const numYTicks = 5;
                         
                         return (
                           <>
@@ -1123,51 +1459,48 @@ const Training: React.FC = () => {
                                 <g key={i}>
                                   <line x1="50" y1={y} x2="420" y2={y} stroke="#e5e7eb" strokeWidth="1" />
                                   <text x="45" y={y + 4} textAnchor="end" fontSize="10" fill="#6b7280">
-                                    {value.toFixed(2)}
+                                    {value.toFixed(3)}
                                   </text>
                                 </g>
                               );
                             })}
                             
-                            {/* X-axis labels - show epoch numbers */}
-                            {lossData.map((d, i) => {
+                            {/* X-axis labels - show round numbers */}
+                            {lossData.map((d: {round: number, value: number}, i: number) => {
                               const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
                               return (
                                 <text key={i} x={x} y="180" textAnchor="middle" fontSize="10" fill="#6b7280">
-                                  {d.epoch}
+                                  {d.round}
                                 </text>
                               );
                             })}
                             
                             {/* X-axis label */}
                             <text x="235" y="195" textAnchor="middle" fontSize="11" fill="#374151" fontWeight="500">
-                              Epoch
+                              Round
                             </text>
                             
                             {/* Plot line */}
                             <polyline
-                              points={lossData.map((d, i) => {
+                              points={lossData.map((d: {round: number, value: number}, i: number) => {
                                 const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
                                 const y = 20 + ((maxLoss - d.value) / range) * 140;
                                 return `${x},${y}`;
                               }).join(' ')}
                               fill="none"
-                              stroke="#ef4444"
+                              stroke="#2563eb"
                               strokeWidth="2"
                             />
                             
                             {/* Plot points */}
-                            {lossData.map((d, i) => {
+                            {lossData.map((d: {round: number, value: number}, i: number) => {
                               const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
                               const y = 20 + ((maxLoss - d.value) / range) * 140;
                               return (
-                                <circle
-                                  key={i}
-                                  cx={x}
-                                  cy={y}
-                                  r="4"
-                                  fill="#ef4444"
-                                />
+                                <g key={i}>
+                                  <circle cx={x} cy={y} r="4" fill="#2563eb" />
+                                  <title>{`Round ${d.round}: ${d.value.toFixed(4)}`}</title>
+                                </g>
                               );
                             })}
                           </>
@@ -1176,57 +1509,63 @@ const Training: React.FC = () => {
                     </svg>
                   </div>
                 </div>
+                )}
 
-                {/* Accuracy chart */}
-                <div>
-                  <h4 className="text-sm font-medium text-gray-700 mb-2">Accuracy</h4>
-                  <div className="relative h-64 bg-white border border-gray-200 rounded p-4">
-                    <svg className="w-full h-full" viewBox="0 0 450 200">
-                      {(() => {
-                        // Extract values from [[epoch, value], [epoch, value], ...]
-                        const accData = trainingHistory.accuracies.map(item => ({
-                          epoch: item[0],
-                          value: item[1]
-                        }));
-                        
-                        const numYTicks = 5;
+                {/* Validation Loss chart */}
+                {trainingHistory.validation_losses && trainingHistory.validation_losses.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-700 mb-2">Validation Loss</h4>
+                    <div className="relative h-64 bg-white border border-gray-200 rounded p-4">
+                      <svg className="w-full h-full" viewBox="0 0 450 200">
+                        {(() => {
+                          // Extract values from [[round, loss], [round, loss], ...]
+                          const lossData = trainingHistory.validation_losses.map((item: [number, number]) => ({
+                            round: item[0],
+                            value: item[1]
+                          }));
+                          
+                          const lossValues = lossData.map((d: {round: number, value: number}) => d.value);
+                          const maxLoss = Math.max(...lossValues);
+                          const minLoss = Math.min(...lossValues);
+                          const range = maxLoss - minLoss || 1;
+                          const numYTicks = 5;
                         
                         return (
                           <>
                             {/* Grid lines and Y-axis labels */}
                             {Array.from({ length: numYTicks }).map((_, i) => {
-                              const value = 1 - (i * 1 / (numYTicks - 1));
+                              const value = maxLoss - (i * range / (numYTicks - 1));
                               const y = 20 + (i * 140 / (numYTicks - 1));
                               return (
                                 <g key={i}>
                                   <line x1="50" y1={y} x2="420" y2={y} stroke="#e5e7eb" strokeWidth="1" />
                                   <text x="45" y={y + 4} textAnchor="end" fontSize="10" fill="#6b7280">
-                                    {value.toFixed(2)}
+                                    {value.toFixed(3)}
                                   </text>
                                 </g>
                               );
                             })}
                             
-                            {/* X-axis labels - show epoch numbers */}
-                            {accData.map((d, i) => {
-                              const x = 50 + (i / Math.max(accData.length - 1, 1)) * 370;
+                            {/* X-axis labels - show round numbers */}
+                            {lossData.map((d: {round: number, value: number}, i: number) => {
+                              const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
                               return (
                                 <text key={i} x={x} y="180" textAnchor="middle" fontSize="10" fill="#6b7280">
-                                  {d.epoch}
+                                  {d.round}
                                 </text>
                               );
                             })}
                             
                             {/* X-axis label */}
                             <text x="235" y="195" textAnchor="middle" fontSize="11" fill="#374151" fontWeight="500">
-                              Epoch
+                              Round
                             </text>
                             
                             {/* Plot line */}
                             <polyline
-                              points={accData.map((d, i) => {
-                                const x = 50 + (i / Math.max(accData.length - 1, 1)) * 370;
-                                const y = 20 + ((1 - d.value) * 140);
+                              points={lossData.map((d: {round: number, value: number}, i: number) => {
+                                const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
+                                const y = 20 + ((maxLoss - d.value) / range) * 140;
                                 return `${x},${y}`;
                               }).join(' ')}
                               fill="none"
@@ -1235,17 +1574,14 @@ const Training: React.FC = () => {
                             />
                             
                             {/* Plot points */}
-                            {accData.map((d, i) => {
-                              const x = 50 + (i / Math.max(accData.length - 1, 1)) * 370;
-                              const y = 20 + ((1 - d.value) * 140);
+                            {lossData.map((d: {round: number, value: number}, i: number) => {
+                              const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
+                              const y = 20 + ((maxLoss - d.value) / range) * 140;
                               return (
-                                <circle
-                                  key={i}
-                                  cx={x}
-                                  cy={y}
-                                  r="4"
-                                  fill="#10b981"
-                                />
+                                <g key={i}>
+                                  <circle cx={x} cy={y} r="4" fill="#10b981" />
+                                  <title>{`Round ${d.round}: ${d.value.toFixed(4)}`}</title>
+                                </g>
                               );
                             })}
                           </>
@@ -1254,6 +1590,7 @@ const Training: React.FC = () => {
                     </svg>
                   </div>
                 </div>
+                )}
               </div>
             </div>
           )}
@@ -1599,6 +1936,85 @@ const Training: React.FC = () => {
             >
               Close
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Trainer Error Detail Modal */}
+      {showErrorDetailModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl p-6 max-w-2xl w-full max-h-[80vh] flex flex-col">
+            <div className="flex items-start mb-4">
+              <div className="flex-shrink-0">
+                <FaTimesCircle className="text-red-600 text-3xl" />
+              </div>
+              <div className="ml-4 flex-1 min-w-0">
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                  Error in Trainer {errorDetailTrainerId}
+                </h3>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto mb-4 px-1 bg-gray-50 rounded p-4 border border-gray-200">
+              <pre className="text-sm text-gray-700 whitespace-pre-wrap break-words font-mono">
+                {errorDetailMessage}
+              </pre>
+            </div>
+            <button
+              onClick={() => {
+                setShowErrorDetailModal(false);
+                setErrorDetailTrainerId('');
+                setErrorDetailMessage('');
+              }}
+              className="w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal */}
+      {showConfirmModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full">
+            <div className="flex items-start mb-4">
+              <div className="flex-shrink-0">
+                <svg className="w-8 h-8 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div className="ml-4 flex-1">
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                  {confirmModalTitle}
+                </h3>
+                <p className="text-sm text-gray-700 whitespace-pre-wrap">
+                  {confirmModalMessage}
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => {
+                  setShowConfirmModal(false);
+                  setConfirmModalAction(null);
+                }}
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700 font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (confirmModalAction) {
+                    confirmModalAction();
+                  }
+                  setShowConfirmModal(false);
+                  setConfirmModalAction(null);
+                }}
+                className="flex-1 px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 font-medium"
+              >
+                Continue
+              </button>
+            </div>
           </div>
         </div>
       )}
