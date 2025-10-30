@@ -1046,7 +1046,7 @@ const Training: React.FC = () => {
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center">
           <FaNetworkWired className="mr-2 text-blue-600" />
-          Step 1: Connect to BioEngine Workers
+          Connect to BioEngine Workers
         </h2>
 
         <div className="mb-4">
@@ -1118,7 +1118,7 @@ const Training: React.FC = () => {
       {managers.length > 0 && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-4">
-            Step 2: Start Orchestrators and Trainers
+            Start Orchestrators and Trainers
           </h2>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1312,7 +1312,7 @@ const Training: React.FC = () => {
       {selectedOrchestrator && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
           <h2 className="text-xl font-semibold text-gray-900 mb-4">
-            Step 3: Start Federated Training
+            Start Federated Training
           </h2>
 
           {/* Training controls */}
