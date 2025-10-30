@@ -766,7 +766,7 @@ const Training: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedOrchestrator]); // Only run when orchestrator changes
 
-  // Fetch training history when orchestrator is selected
+  // Fetch training history when orchestrator is selected or on stage changes
   useEffect(() => {
     const fetchTrainingHistory = async () => {
       if (!selectedOrchestrator) {
@@ -781,9 +781,8 @@ const Training: React.FC = () => {
         const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
         const history = await orchestratorService.get_training_history();
         
-        // Only set if we have valid data
-        if (history && ((history.training_losses && history.training_losses.length > 0) || 
-                        (history.validation_losses && history.validation_losses.length > 0))) {
+        // Set history regardless of whether it has data (allows showing empty charts)
+        if (history) {
           setTrainingHistory(history);
         }
       } catch (error) {
@@ -794,6 +793,47 @@ const Training: React.FC = () => {
 
     fetchTrainingHistory();
   }, [selectedOrchestrator, orchestrators, server]);
+
+  // Fetch training history regularly while training is active or on stage changes
+  useEffect(() => {
+    if (!selectedOrchestrator || !isTraining) return;
+
+    let previousStage: string | null = trainingStatus?.stage ?? null;
+
+    const fetchHistoryPeriodically = async () => {
+      const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+      if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+
+      try {
+        const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+        
+        // Fetch history
+        const history = await orchestratorService.get_training_history();
+        if (history) {
+          setTrainingHistory(history);
+        }
+
+        // Check for stage changes
+        const status = await orchestratorService.get_training_status();
+        if (status) {
+          setTrainingStatus(status);
+          
+          // If stage changed, fetch history immediately
+          if (previousStage !== status.stage) {
+            previousStage = status.stage;
+          }
+        }
+      } catch (error) {
+        console.debug('Failed to fetch training history during training:', error);
+      }
+    };
+
+    // Poll for history every 2 seconds while training
+    const historyInterval = setInterval(fetchHistoryPeriodically, 2000);
+    
+    return () => clearInterval(historyInterval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTraining, selectedOrchestrator]);
 
   // Start training
   const startTraining = async () => {
