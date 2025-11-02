@@ -4,12 +4,28 @@ import { hyphaWebsocketClient } from 'hypha-rpc';
 import { FaNetworkWired, FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
 
+interface WorkerInfo {
+  cluster_status?: ClusterStatus;
+  datasets?: Record<string, any>;
+  orchestrator_status?: {
+    status: string;
+    service_ids: any[];
+    artifact_id: string;
+  };
+  trainers_status?: Record<string, {
+    status: string;
+    service_ids: any[];
+    datasets: Record<string, any>;
+    artifact_id: string;
+  }>;
+}
+
 interface ManagerConnection {
   workspace: string;
   serviceId: string;
   service: any;
   isConnected: boolean;
-  datasets?: Record<string, any>;
+  workerInfo?: WorkerInfo;
 }
 
 interface OrchestratorApp {
@@ -65,15 +81,15 @@ interface ManagerInfoModalData {
 }
 
 interface OrchestratorInfoModalData {
-  status: string;
-  artifactId: string;
+  status?: string;
+  artifactId?: string;
 }
 
 interface TrainerInfoModalData {
   appId: string;
-  status: string;
+  status?: string;
   datasets: Record<string, any>;
-  artifactId: string;
+  artifactId?: string;
 }
 
 type InfoModalData = ManagerInfoModalData | OrchestratorInfoModalData | TrainerInfoModalData;
@@ -137,6 +153,13 @@ const Training: React.FC = () => {
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [infoModalData, setInfoModalData] = useState<InfoModalData | null>(null);
   const [infoModalType, setInfoModalType] = useState<'manager' | 'orchestrator' | 'trainer'>('manager');
+  const [isInfoModalLoading, setIsInfoModalLoading] = useState(false);
+
+  // Service selection modal state
+  const [showServiceSelectionModal, setShowServiceSelectionModal] = useState(false);
+  const [availableServices, setAvailableServices] = useState<string[]>([]);
+  const [selectedServices, setSelectedServices] = useState<Set<string>>(new Set());
+  const [pendingWorkspace, setPendingWorkspace] = useState<string>('');
 
   // Set default workspace when server is available
   useEffect(() => {
@@ -149,20 +172,15 @@ const Training: React.FC = () => {
   const addManager = async () => {
     if (!newWorkspace.trim()) return;
 
-    // Check if worker already exists
-    if (managers.find(m => m.workspace === newWorkspace)) {
-      setErrorPopupMessage('Worker Already Added');
-      setErrorPopupDetails(`A worker from workspace "${newWorkspace}" is already connected. Each worker can only be added once.`);
-      setShowErrorPopup(true);
-      return;
-    }
+    // No pre-check needed here - we'll check for duplicate serviceIds after fetching them
+    // A workspace can have multiple workers, each with their own unique serviceId
 
     setConnectingWorkspace(newWorkspace);
     setConnectError(null);
 
     try {
-      // Get manager service ID from the workspace
-      const url = `https://hypha.aicell.io/${newWorkspace}/services/chiron-manager?_mode=last`;
+      // Get manager service ID from the workspace (without _mode=last)
+      const url = `https://hypha.aicell.io/${newWorkspace}/services/chiron-manager`;
       let response;
       let data;
 
@@ -173,72 +191,51 @@ const Training: React.FC = () => {
         throw new Error(`Failed to fetch manager service information. The workspace may not exist or the service may not be available. Error: ${fetchError instanceof Error ? fetchError.message : 'Network error'}`);
       }
 
-      if (!data.id) {
-        throw new Error('Manager service not found in workspace. Please ensure the chiron-manager service is running in this workspace.');
+      // Check if we have a single service (success case)
+      if (data.id) {
+        // Single service found
+        await connectToManagerService(newWorkspace, [data.id]);
+        return;
       }
 
-      const serviceId = data.id;
-
-      // Connect to the manager service
-      let managerService;
-      try {
-        managerService = await server.getService(serviceId);
-      } catch (serviceError) {
-        throw new Error(`Failed to connect to manager service (${serviceId}). The service may not be reachable. Error: ${serviceError instanceof Error ? serviceError.message : 'Connection error'}`);
-      }
-
-      // Get worker info to fetch datasets
-      let workerInfo;
-      try {
-        workerInfo = await managerService.get_worker_info();
-      } catch (workerInfoError) {
-        throw new Error(`Failed to retrieve worker information. The manager service may be unhealthy or not responding. Error: ${workerInfoError instanceof Error ? workerInfoError.message : 'Communication error'}`);
-      }
-
-      setManagers(prev => [...prev, {
-        workspace: newWorkspace,
-        serviceId: serviceId,
-        service: managerService,
-        isConnected: true,
-        datasets: workerInfo.datasets || {}
-      }]);
-
-      // Check for existing orchestrator
-      if (workerInfo.orchestrator_status && Object.keys(workerInfo.orchestrator_status).length > 0) {
-        const orchStatus = workerInfo.orchestrator_status;
-        setOrchestrators(prev => [...prev, {
-          managerId: newWorkspace,
-          appId: 'chiron-orchestrator',
-          status: orchStatus.status,
-          serviceIds: orchStatus.service_ids || [],
-          artifactId: orchStatus.artifact_id || 'chiron-platform/tabula-trainer'
-        }]);
-      }
-
-      // Check for existing trainers
-      if (workerInfo.trainers_status) {
-        const newTrainers: TrainerApp[] = [];
-        for (const [appId, trainerStatus] of Object.entries(workerInfo.trainers_status)) {
-          newTrainers.push({
-            managerId: newWorkspace,
-            appId: appId,
-            status: (trainerStatus as any).status,
-            serviceIds: (trainerStatus as any).service_ids || [],
-            datasets: (trainerStatus as any).datasets || {},
-            artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer'
-          });
+      // Check for error response
+      if (!data.success && data.detail) {
+        const detail = data.detail;
+        
+        // Check if it's a "multiple services" error
+        if (detail.includes('Multiple services found')) {
+          // Extract service IDs from the error message
+          // Pattern: b'services:public|bioengine-apps:ws-user-github|49943582/ID:chiron-manager@*'
+          // We need to extract: ws-user-github|49943582/ID:chiron-manager
+          const servicePattern = /b'services:[^:]+:([^@]+):chiron-manager@\*'/g;
+          const matches = [...detail.matchAll(servicePattern)];
+          const serviceIds = matches.map(match => `${match[1]}:chiron-manager`);
+          
+          if (serviceIds.length > 0) {
+            // Remove duplicates by converting to Set and back to array
+            const uniqueServiceIds = Array.from(new Set(serviceIds));
+            
+            // Show service selection modal
+            setAvailableServices(uniqueServiceIds);
+            setSelectedServices(new Set(uniqueServiceIds)); // Default to all selected
+            setPendingWorkspace(newWorkspace);
+            setShowServiceSelectionModal(true);
+            setConnectingWorkspace(null);
+            return;
+          }
         }
-        setTrainers(prev => [...prev, ...newTrainers]);
+        
+        // Check if it's a "service not found" error
+        if (detail.includes('Service not found')) {
+          throw new Error('Manager service not found in workspace. Please ensure the chiron-manager service is running in this workspace.');
+        }
+        
+        // Unknown error format
+        throw new Error(`Failed to fetch manager service: ${detail}`);
       }
 
-      // Start timer for periodic updates
-      const workspace = newWorkspace;
-      setNewWorkspace('');
-
-      // Use setTimeout to ensure state is updated before starting the refresh cycle
-      setTimeout(() => {
-        scheduleWorkerRefresh(workspace);
-      }, 0);
+      // Unexpected response format
+      throw new Error('Unexpected response format from service endpoint.');
     } catch (error) {
       console.error('Failed to connect to manager:', error);
       const errorMessage = error instanceof Error ? error.message : 'Failed to connect to manager';
@@ -246,24 +243,170 @@ const Training: React.FC = () => {
       setErrorPopupDetails(errorMessage);
       setShowErrorPopup(true);
       setConnectError(errorMessage);
-    } finally {
       setConnectingWorkspace(null);
     }
   };
 
-  // Remove manager connection
-  const removeManager = (workspace: string) => {
-    // Check if this worker has the selected orchestrator
-    const hasSelectedOrchestrator = selectedOrchestrator && 
-      orchestrators.some(o => o.managerId === workspace && `${o.managerId}::${o.appId}` === selectedOrchestrator);
+  // Connect to one or more manager services
+  const connectToManagerService = async (workspace: string, serviceIds: string[]) => {
+    try {
+      // Check for duplicate serviceIds before connecting
+      for (const serviceId of serviceIds) {
+        if (managers.find(m => m.serviceId === serviceId)) {
+          throw new Error(`This worker (${serviceId}) is already connected. Each worker can only be added once.`);
+        }
+      }
+
+      // Accumulate all changes before setting state
+      const newManagers: ManagerConnection[] = [];
+      const newOrchestrators: OrchestratorApp[] = [];
+      const newTrainers: TrainerApp[] = [];
+
+      for (const serviceId of serviceIds) {
+        // Connect to the manager service
+        let managerService;
+        try {
+          managerService = await server.getService(serviceId);
+        } catch (serviceError) {
+          throw new Error(`Failed to connect to manager service (${serviceId}). The service may not be reachable. Error: ${serviceError instanceof Error ? serviceError.message : 'Connection error'}`);
+        }
+
+        // Get worker info to fetch datasets - retry if not fully initialized
+        let workerInfo;
+        let retryCount = 0;
+        const maxRetries = 12; // 12 retries * 2.5 seconds = 30 seconds max wait
+        const retryDelay = 2500; // 2.5 seconds between retries
+
+        while (retryCount < maxRetries) {
+          try {
+            workerInfo = await managerService.get_worker_info();
+            break; // Success, exit retry loop
+          } catch (workerInfoError) {
+            const errorMessage = workerInfoError instanceof Error ? workerInfoError.message : '';
+            
+            // Check if this is the known initialization error
+            if (errorMessage.includes("'NoneType' object has no attribute 'get_status'")) {
+              retryCount++;
+              if (retryCount < maxRetries) {
+                console.log(`Manager ${serviceId} not fully initialized yet. Retrying in ${retryDelay / 1000}s... (${retryCount}/${maxRetries})`);
+                // Wait before retrying
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+                continue;
+              } else {
+                throw new Error(`Failed to retrieve worker information after ${maxRetries} retries. The manager service may still be initializing. Error: ${errorMessage}`);
+              }
+            } else {
+              // Different error, don't retry
+              throw new Error(`Failed to retrieve worker information. The manager service may be unhealthy or not responding. Error: ${errorMessage}`);
+            }
+          }
+        }
+
+        // Add manager - serviceId is the unique identifier (already contains workspace)
+        newManagers.push({
+          workspace: workspace,
+          serviceId: serviceId,
+          service: managerService,
+          isConnected: true,
+          workerInfo
+        });
+
+        // Use serviceId as managerId - it's already unique (format: workspace/client-id:chiron-manager)
+        const managerId = serviceId;
+
+        // Check for existing orchestrator - only add if it has a valid status
+        if (workerInfo!.orchestrator_status && workerInfo!.orchestrator_status.status) {
+          const orchStatus = workerInfo!.orchestrator_status;
+          newOrchestrators.push({
+            managerId: managerId,
+            appId: 'chiron-orchestrator',
+            status: orchStatus.status,
+            serviceIds: orchStatus.service_ids || [],
+            artifactId: orchStatus.artifact_id || 'chiron-platform/tabula-trainer'
+          });
+        }
+
+        // Check for existing trainers
+        if (workerInfo!.trainers_status) {
+          for (const [appId, trainerStatus] of Object.entries(workerInfo!.trainers_status)) {
+            newTrainers.push({
+              managerId: managerId,
+              appId: appId,
+              status: (trainerStatus as any).status,
+              serviceIds: (trainerStatus as any).service_ids || [],
+              datasets: (trainerStatus as any).datasets || {},
+              artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer'
+            });
+          }
+        }
+
+        // Start timer for periodic updates - immediately after connection
+        scheduleWorkerRefresh(serviceId);
+      }
+
+      // Now set all the state at once
+      setManagers(prev => [...prev, ...newManagers]);
+      setOrchestrators(prev => [...prev, ...newOrchestrators]);
+      setTrainers(prev => [...prev, ...newTrainers]);
+
+      // Log successful connections
+      console.log(`✓ Connected to ${serviceIds.length} worker(s) in workspace "${workspace}":`, serviceIds.map(id => id.split('/')[1]));
+
+      setNewWorkspace('');
+      setConnectingWorkspace(null);
+    } catch (error) {
+      console.error('Failed to connect to manager service:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to connect to manager';
+      setErrorPopupMessage('Failed to Add Worker');
+      setErrorPopupDetails(errorMessage);
+      setShowErrorPopup(true);
+      setConnectError(errorMessage);
+      setConnectingWorkspace(null);
+      throw error;
+    }
+  };
+
+  // Handle service selection confirmation
+  const handleServiceSelectionConfirm = async () => {
+    if (selectedServices.size === 0) {
+      setErrorPopupMessage('No Services Selected');
+      setErrorPopupDetails('Please select at least one manager service to connect.');
+      setShowErrorPopup(true);
+      return;
+    }
+
+    setShowServiceSelectionModal(false);
+    setConnectingWorkspace(pendingWorkspace);
     
-    // Check if we have selected trainers from this worker
-    const workersTrainers = trainers.filter(t => t.managerId === workspace);
-    const hasSelectedTrainers = workersTrainers.some(t => selectedTrainers.has(`${t.managerId}::${t.appId}`));
+    try {
+      await connectToManagerService(pendingWorkspace, Array.from(selectedServices));
+    } catch (error) {
+      // Error already handled in connectToManagerService
+    } finally {
+      setPendingWorkspace('');
+      setAvailableServices([]);
+      setSelectedServices(new Set());
+    }
+  };
+
+  // Remove manager connection
+  const removeManager = (serviceId: string) => {
+    // serviceId is the unique identifier (format: workspace/client-id:chiron-manager)
+    const managerId = serviceId;
+    const manager = managers.find(m => m.serviceId === serviceId);
+    const workspace = manager?.workspace || 'Unknown';
+
+    // Check if this manager has the selected orchestrator
+    const hasSelectedOrchestrator = selectedOrchestrator && 
+      orchestrators.some(o => o.managerId === managerId && `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    
+    // Check if we have selected trainers from this manager
+    const managersTrainers = trainers.filter(t => t.managerId === managerId);
+    const hasSelectedTrainers = managersTrainers.some(t => selectedTrainers.has(`${t.managerId}::${t.appId}`));
 
     // Build warning message
-    let warningMessage = `Disconnecting from worker "${workspace}" will:\n\n`;
-    warningMessage += '• Remove this worker from your connections\n';
+    let warningMessage = `Disconnecting from BioEngine Worker "${workspace}" (Manager: ${serviceId.substring(0, 12)}...) will:\n\n`;
+    warningMessage += '• Remove this worker connection from your interface\n';
     warningMessage += '• Keep the orchestrator and trainer applications running on the worker\n';
     
     if (hasSelectedOrchestrator) {
@@ -283,18 +426,21 @@ const Training: React.FC = () => {
     setConfirmModalTitle('Disconnect Worker');
     setConfirmModalMessage(warningMessage);
     setConfirmModalAction(() => () => {
-      performRemoveManager(workspace);
+      performRemoveManager(serviceId);
     });
     setShowConfirmModal(true);
   };
 
   // Perform the actual manager removal
-  const performRemoveManager = async (workspace: string) => {
-    // Unregister and deselect trainers from this worker
-    const workersTrainers = trainers.filter(t => t.managerId === workspace);
-    if (workersTrainers.length > 0) {
+  const performRemoveManager = async (serviceId: string) => {
+    // serviceId is the unique identifier
+    const managerId = serviceId;
+
+    // Unregister and deselect trainers from this manager
+    const managersTrainers = trainers.filter(t => t.managerId === managerId);
+    if (managersTrainers.length > 0) {
       // Unregister each selected trainer
-      for (const trainer of workersTrainers) {
+      for (const trainer of managersTrainers) {
         const trainerId = `${trainer.managerId}::${trainer.appId}`;
         if (selectedTrainers.has(trainerId)) {
           await unregisterTrainer(trainerId);
@@ -304,74 +450,126 @@ const Training: React.FC = () => {
       // Deselect trainers
       setSelectedTrainers(prev => {
         const newSet = new Set(prev);
-        workersTrainers.forEach(t => {
+        managersTrainers.forEach(t => {
           newSet.delete(`${t.managerId}::${t.appId}`);
         });
         return newSet;
       });
     }
 
-    // Deselect orchestrator if it belongs to this worker
+    // Deselect orchestrator if it belongs to this manager
     if (selectedOrchestrator && 
-        orchestrators.some(o => o.managerId === workspace && `${o.managerId}::${o.appId}` === selectedOrchestrator)) {
+        orchestrators.some(o => o.managerId === managerId && `${o.managerId}::${o.appId}` === selectedOrchestrator)) {
       setSelectedOrchestrator(null);
       setTrainingHistory(null);
     }
 
-    setManagers(prev => prev.filter(m => m.workspace !== workspace));
-    // Clear timer for this worker
-    if (workerTimers[workspace]) {
-      clearTimeout(workerTimers[workspace]);
-      setWorkerTimers(prev => {
+    // Remove only this specific manager (by serviceId)
+    setManagers(prev => prev.filter(m => m.serviceId !== serviceId));
+    
+    // Clear timer for this specific manager
+    setWorkerTimers(prev => {
+      const timer = prev[managerId];
+      if (timer) {
+        clearTimeout(timer);
         const newTimers = { ...prev };
-        delete newTimers[workspace];
+        delete newTimers[managerId];
         return newTimers;
-      });
-    }
-    // Also remove any orchestrators/trainers from this manager
-    setOrchestrators(prev => prev.filter(o => o.managerId !== workspace));
-    setTrainers(prev => prev.filter(t => t.managerId !== workspace));
+      }
+      return prev;
+    });
+    
+    // Remove orchestrators/trainers only from this specific manager
+    setOrchestrators(prev => prev.filter(o => o.managerId !== managerId));
+    setTrainers(prev => prev.filter(t => t.managerId !== managerId));
   };
 
   // Refresh a specific manager's worker info
-  const refreshWorkerInfo = useCallback(async (workspace: string) => {
-    const manager = managers.find(m => m.workspace === workspace);
-    if (!manager) return;
+  const refreshWorkerInfo = useCallback(async (serviceId: string) => {
+    const managerId = serviceId;
+    
+    // Get current manager from state
+    const manager = managers.find(m => m.serviceId === serviceId);
+    
+    if (!manager) {
+      console.warn(`[${serviceId}] Manager not found, skipping refresh`);
+      return;
+    }
+
+    console.log(`[${serviceId}] Starting refreshWorkerInfo...`);
 
     try {
-      const workerInfo = await manager.service.get_worker_info();
+      // Try to verify service is still available by getting worker info
+      // Retry once if we get the initialization error
+      let workerInfo;
+      let retryOnce = true;
 
-      // Update datasets
+      try {
+        // Set up a 10-second timeout for the worker info request
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Worker info request timeout (10s)')), 10000)
+        );
+        workerInfo = await Promise.race([manager.service.get_worker_info(), timeoutPromise]);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : '';
+        
+        // Check if this is a timeout
+        if (errorMessage.includes('timeout')) {
+          throw new Error('Worker is not responding (timeout after 10s)');
+        }
+        
+        // Check if this is the known initialization error and we haven't retried yet
+        if (retryOnce && errorMessage.includes("'NoneType' object has no attribute 'get_status'")) {
+          console.debug(`[${serviceId}] Temporary initialization issue, retrying in 2s...`);
+          retryOnce = false;
+          
+          // Wait 2 seconds and retry once (with new timeout)
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          const retryTimeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Worker info request timeout (10s)')), 10000)
+          );
+          workerInfo = await Promise.race([manager.service.get_worker_info(), retryTimeoutPromise]);
+        } else {
+          throw error;
+        }
+      }
+
+      console.log(`[${serviceId}] refreshWorkerInfo - orchestrator_status:`, workerInfo.orchestrator_status);
+
+      // Mark as connected and update worker info
       setManagers(prev => prev.map(m =>
-        m.workspace === workspace
-          ? { ...m, datasets: workerInfo.datasets || {} }
+        m.serviceId === serviceId
+          ? { ...m, isConnected: true, workerInfo }
           : m
       ));
 
       // Update orchestrator
       setOrchestrators(prev => {
-        const filtered = prev.filter(o => o.managerId !== workspace);
-        if (workerInfo.orchestrator_status && Object.keys(workerInfo.orchestrator_status).length > 0) {
+        const filtered = prev.filter(o => o.managerId !== managerId);
+        // Only add orchestrator if it has a valid status (not empty string or undefined)
+        if (workerInfo.orchestrator_status && workerInfo.orchestrator_status.status) {
           const orchStatus = workerInfo.orchestrator_status;
+          console.log(`[${serviceId}] Updating orchestrator in state with status: ${orchStatus.status}`);
           return [...filtered, {
-            managerId: workspace,
+            managerId: managerId,
             appId: 'chiron-orchestrator',
             status: orchStatus.status,
             serviceIds: orchStatus.service_ids || [],
             artifactId: orchStatus.artifact_id || 'chiron-platform/tabula-trainer'
           }];
         }
+        console.log(`[${serviceId}] No valid orchestrator status found, not adding to state`);
         return filtered;
       });
 
       // Update trainers
       setTrainers(prev => {
-        const filtered = prev.filter(t => t.managerId !== workspace);
+        const filtered = prev.filter(t => t.managerId !== managerId);
         const newTrainers: TrainerApp[] = [];
         if (workerInfo.trainers_status) {
           for (const [appId, trainerStatus] of Object.entries(workerInfo.trainers_status)) {
             newTrainers.push({
-              managerId: workspace,
+              managerId: managerId,
               appId: appId,
               status: (trainerStatus as any).status,
               serviceIds: (trainerStatus as any).service_ids || [],
@@ -383,34 +581,80 @@ const Training: React.FC = () => {
         return [...filtered, ...newTrainers];
       });
     } catch (error) {
-      console.error(`Failed to refresh worker ${workspace}:`, error);
+      console.error(`Failed to refresh worker (${serviceId}):`, error);
+      // Mark manager as disconnected - service is no longer available or not responding
+      setManagers(prev => prev.map(m =>
+        m.serviceId === serviceId
+          ? { ...m, isConnected: false }
+          : m
+      ));
+      // Stop refreshing this manager since it's unavailable
+      setWorkerTimers(prev => {
+        const timer = prev[managerId];
+        if (timer) {
+          clearTimeout(timer);
+          const newTimers = { ...prev };
+          delete newTimers[managerId];
+          return newTimers;
+        }
+        return prev;
+      });
     }
-  }, [managers]);
+  }, [managers]); // Need managers to find the manager connection
 
   // Schedule next refresh for a worker (5 seconds)
-  const scheduleWorkerRefresh = useCallback((workspace: string) => {
-    // Clear existing timer
-    if (workerTimers[workspace]) {
-      clearTimeout(workerTimers[workspace]);
-    }
-
+  const scheduleWorkerRefresh = useCallback((serviceId: string) => {
+    const managerId = serviceId;
+    
     // Set new timer
     const timer = setTimeout(() => {
-      refreshWorkerInfo(workspace).then(() => {
-        scheduleWorkerRefresh(workspace);
+      refreshWorkerInfo(serviceId).then(() => {
+        scheduleWorkerRefresh(serviceId);
+      }).catch((error) => {
+        console.error(`[${serviceId}] Refresh failed:`, error);
       });
     }, 5000);
 
-    setWorkerTimers(prev => ({ ...prev, [workspace]: timer }));
-  }, [workerTimers, refreshWorkerInfo]);
+    setWorkerTimers(prev => {
+      // Clear existing timer if any
+      if (prev[managerId]) {
+        clearTimeout(prev[managerId]);
+      }
+      return { ...prev, [managerId]: timer };
+    });
+  }, [refreshWorkerInfo]);
 
   // Refresh all managers (initial load and when managers change)
   const refreshAllManagers = useCallback(async () => {
-    for (const manager of managers) {
-      await refreshWorkerInfo(manager.workspace);
-      scheduleWorkerRefresh(manager.workspace);
+    // Use functional update to get current managers
+    let currentManagers: ManagerConnection[] = [];
+    setManagers(prev => {
+      currentManagers = prev;
+      return prev; // No change, just reading
+    });
+    
+    for (const manager of currentManagers) {
+      const managerId = manager.serviceId;
+      await refreshWorkerInfo(managerId);
+      scheduleWorkerRefresh(managerId);
     }
-  }, [managers, refreshWorkerInfo, scheduleWorkerRefresh]);
+  }, [refreshWorkerInfo, scheduleWorkerRefresh]);
+
+  // Refresh all managers for a specific workspace
+  const refreshWorkspace = useCallback(async (workspace: string) => {
+    // Use functional update to get current managers
+    let currentManagers: ManagerConnection[] = [];
+    setManagers(prev => {
+      currentManagers = prev.filter(m => m.workspace === workspace);
+      return prev; // No change, just reading
+    });
+    
+    for (const manager of currentManagers) {
+      const managerId = manager.serviceId;
+      await refreshWorkerInfo(managerId);
+      scheduleWorkerRefresh(managerId);
+    }
+  }, [refreshWorkerInfo, scheduleWorkerRefresh]);
 
   // Clean up timers on unmount
   useEffect(() => {
@@ -421,7 +665,8 @@ const Training: React.FC = () => {
 
   // Create orchestrator
   const createOrchestrator = async (managerId: string) => {
-    const manager = managers.find(m => m.workspace === managerId);
+    // managerId is the serviceId (format: workspace/client-id:chiron-manager)
+    const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
 
     setIsCreatingOrchestrator(true);
@@ -440,12 +685,46 @@ const Training: React.FC = () => {
         _rkwargs: true
       });
 
-      // Fetch updated worker info
+      console.log(`[${managerId.split('/')[1]}] Orchestrator creation initiated, waiting for orchestrator to appear...`);
+
+      // Wait for orchestrator to appear in worker info (retry up to 40 times with 500ms delay = 20 seconds)
+      let retries = 40;
+      let orchestratorFound = false;
+      
+      while (retries > 0 && !orchestratorFound) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        try {
+          const workerInfo = await manager.service.get_worker_info();
+          
+          // Check if orchestrator appears with any status
+          if (workerInfo.orchestrator_status && workerInfo.orchestrator_status.status) {
+            orchestratorFound = true;
+            console.log(`✓ Orchestrator found on worker ${managerId.split('/')[1]} with status: ${workerInfo.orchestrator_status.status}`);
+          } else {
+            retries--;
+            if (retries % 5 === 0) { // Log every 2.5 seconds
+              console.log(`[${managerId.split('/')[1]}] Waiting for orchestrator to appear... (${retries * 0.5}s remaining)`);
+            }
+          }
+        } catch (error) {
+          console.warn(`[${managerId.split('/')[1]}] Failed to poll worker info:`, error);
+          retries--;
+        }
+      }
+
+      if (!orchestratorFound) {
+        throw new Error('Orchestrator deployment timed out. The orchestrator may still be starting in the background.');
+      }
+
+      console.log(`[${managerId.split('/')[1]}] Calling refreshWorkerInfo after orchestrator creation...`);
+      
+      // Refresh worker info immediately to update state and reset timer
       await refreshWorkerInfo(managerId);
-
-      // Reset the timer for this worker
       scheduleWorkerRefresh(managerId);
-
+      
+      console.log(`[${managerId.split('/')[1]}] Refresh complete, closing modal`);
+      
       // Close the modal
       setShowCreateOrchestrator(false);
       setCreatingFor(null);
@@ -461,7 +740,8 @@ const Training: React.FC = () => {
 
   // Create trainer
   const createTrainer = async (managerId: string) => {
-    const manager = managers.find(m => m.workspace === managerId);
+    // managerId is the serviceId (format: workspace/client-id:chiron-manager)
+    const manager = managers.find(m => m.serviceId === managerId);
     if (!manager || newTrainerDatasets.length === 0) return;
 
     setIsCreatingTrainer(true);
@@ -474,7 +754,7 @@ const Training: React.FC = () => {
         expires_in: 3600 * 24 * 30
       });
 
-      await manager.service.create_trainer({
+      const createdTrainerId = await manager.service.create_trainer({
         token: applicationToken,
         datasets: newTrainerDatasets,
         trainer_artifact_id: newTrainerArtifactId,
@@ -482,13 +762,48 @@ const Training: React.FC = () => {
         _rkwargs: true
       });
 
-      // Fetch updated worker info
+      console.log(`[${managerId.split('/')[1]}] Trainer creation initiated (ID: ${createdTrainerId}), waiting for trainer to appear...`);
+
+      // Wait for the specific trainer to appear in worker info (retry up to 40 times with 500ms delay = 20 seconds)
+      let retries = 40;
+      let trainerFound = false;
+      
+      while (retries > 0 && !trainerFound) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        try {
+          const workerInfo = await manager.service.get_worker_info();
+          
+          // Check if the created trainer appears in trainers_status
+          if (workerInfo.trainers_status && workerInfo.trainers_status[createdTrainerId]) {
+            const status = workerInfo.trainers_status[createdTrainerId].status;
+            trainerFound = true;
+            console.log(`✓ Trainer ${createdTrainerId} found on worker ${managerId.split('/')[1]} with status: ${status}`);
+          } else {
+            retries--;
+            if (retries % 5 === 0) { // Log every 2.5 seconds
+              console.log(`[${managerId.split('/')[1]}] Waiting for trainer ${createdTrainerId} to appear... (${retries * 0.5}s remaining)`);
+            }
+          }
+        } catch (error) {
+          console.warn(`[${managerId.split('/')[1]}] Failed to poll worker info:`, error);
+          retries--;
+        }
+      }
+
+      if (!trainerFound) {
+        throw new Error('Trainer deployment timed out. The trainer may still be starting in the background.');
+      }
+
+      console.log(`[${managerId.split('/')[1]}] Calling refreshWorkerInfo after trainer creation...`);
+      
+      // Refresh worker info immediately to update state and reset timer
       await refreshWorkerInfo(managerId);
-
-      // Reset the timer for this worker
       scheduleWorkerRefresh(managerId);
-
-      // Close the modal and reset state
+      
+      console.log(`[${managerId.split('/')[1]}] Refresh complete, closing modal`);
+      
+      // Close the modal
       setShowCreateTrainer(false);
       setCreatingFor(null);
       setNewTrainerDatasets([]);
@@ -505,15 +820,18 @@ const Training: React.FC = () => {
 
   // Remove orchestrator
   const removeOrchestrator = async (managerId: string) => {
-    const manager = managers.find(m => m.workspace === managerId);
+    // managerId is the serviceId
+    const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
 
-    // Check if this orchestrator has training history
+    // Check if this orchestrator has training history (only if it's selected, since we only load history for selected orchestrator)
     const orchestratorId = `${managerId}::chiron-orchestrator`;
-    if (orchestratorId === selectedOrchestrator && trainingHistory && 
+    const isSelected = orchestratorId === selectedOrchestrator;
+    
+    if (isSelected && trainingHistory && 
         ((trainingHistory.training_losses && trainingHistory.training_losses.length > 0) || 
          (trainingHistory.validation_losses && trainingHistory.validation_losses.length > 0))) {
-      // Show confirmation modal
+      // Show confirmation modal for orchestrator with known training history
       setConfirmModalTitle('Delete Orchestrator with Training History');
       setConfirmModalMessage(
         'This orchestrator has training history that will be permanently lost. ' +
@@ -526,13 +844,29 @@ const Training: React.FC = () => {
       return;
     }
 
-    // No history, proceed directly
+    // If orchestrator is selected but we're unsure about history, or if it's not selected, show generic warning
+    const orchestrator = orchestrators.find(o => o.managerId === managerId);
+    if (orchestrator && orchestrator.status === 'RUNNING') {
+      setConfirmModalTitle('Delete Orchestrator');
+      setConfirmModalMessage(
+        'Are you sure you want to delete this orchestrator? ' +
+        (isSelected ? 'Any training history will be permanently lost.' : 'Any training history on this orchestrator will be permanently lost.')
+      );
+      setConfirmModalAction(() => async () => {
+        await performRemoveOrchestrator(managerId);
+      });
+      setShowConfirmModal(true);
+      return;
+    }
+
+    // Not running, proceed directly
     await performRemoveOrchestrator(managerId);
   };
 
   // Perform the actual orchestrator removal
   const performRemoveOrchestrator = async (managerId: string) => {
-    const manager = managers.find(m => m.workspace === managerId);
+    // managerId is the serviceId
+    const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
 
     // Immediately mark as deleting in UI
@@ -543,7 +877,7 @@ const Training: React.FC = () => {
     try {
       await manager.service.remove_orchestrator();
 
-      // Immediately refresh worker info and reset timer
+      // Immediately refresh worker info and reset the timer
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
     } catch (error) {
@@ -579,7 +913,8 @@ const Training: React.FC = () => {
       });
     }
 
-    const manager = managers.find(m => m.workspace === managerId);
+    // managerId is the serviceId
+    const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
 
     // Immediately mark as deleting in UI
@@ -590,7 +925,7 @@ const Training: React.FC = () => {
     try {
       await manager.service.remove_trainer(appId);
 
-      // Immediately refresh worker info and reset timer
+      // Immediately refresh worker info and reset the timer
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
     } catch (error) {
@@ -606,15 +941,58 @@ const Training: React.FC = () => {
 
   // Show info modal
   const showInfo = async (type: 'manager' | 'orchestrator' | 'trainer', id: string) => {
-    const manager = managers.find(m => m.workspace === id.split('::')[0]);
+    // Extract serviceId from the id
+    // For manager: format is "workspace::serviceId"
+    // For orchestrator: format is "managerId::appId" where managerId is the serviceId
+    // For trainer: format is "workspace::appId" - this needs to be fixed too!
+    
+    let manager: ManagerConnection | undefined;
+    
+    if (type === 'manager') {
+      // id format: "workspace::serviceId"
+      const serviceId = id.split('::')[1];
+      manager = managers.find(m => m.serviceId === serviceId);
+    } else if (type === 'orchestrator') {
+      // id format: "managerId::appId" where managerId is the serviceId
+      const managerId = id.split('::')[0];
+      manager = managers.find(m => m.serviceId === managerId);
+    } else if (type === 'trainer') {
+      // id format should be "managerId::appId" not "workspace::appId"
+      // But let's handle both cases for backward compatibility
+      const parts = id.split('::');
+      if (parts.length === 2) {
+        // Try to find by serviceId first (correct format)
+        manager = managers.find(m => m.serviceId === parts[0]);
+        // If not found, try by workspace (old format)
+        if (!manager) {
+          manager = managers.find(m => m.workspace === parts[0]);
+        }
+      }
+    }
+    
     if (!manager) return;
 
-    try {
-      // Fetch fresh worker info and reset timer
-      await refreshWorkerInfo(manager.workspace);
-      scheduleWorkerRefresh(manager.workspace);
+    // Show modal immediately with loading state
+    setInfoModalType(type);
+    setInfoModalData(null);
+    setIsInfoModalLoading(true);
+    setShowInfoModal(true);
 
-      const workerInfo = await manager.service.get_worker_info();
+    try {
+      // Use cached worker info if available, otherwise fetch fresh
+      let workerInfo = manager.workerInfo;
+      
+      if (!workerInfo) {
+        // If no cached info, try to fetch with timeout
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Timeout')), 10000)
+        );
+        workerInfo = await Promise.race([manager.service.get_worker_info(), timeoutPromise]);
+      }
+
+      if (!workerInfo) {
+        throw new Error('Could not retrieve worker information');
+      }
 
       if (type === 'manager') {
         setInfoModalData({
@@ -638,13 +1016,14 @@ const Training: React.FC = () => {
         });
       }
 
-      setInfoModalType(type);
-      setShowInfoModal(true);
+      setIsInfoModalLoading(false);
     } catch (error) {
       console.error('Failed to get info:', error);
+      setIsInfoModalLoading(false);
       setErrorPopupMessage('Failed to Get Information');
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while retrieving information');
       setShowErrorPopup(true);
+      setShowInfoModal(false);
     }
   };
 
@@ -662,7 +1041,6 @@ const Training: React.FC = () => {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
       await orchestratorService.add_trainer(trainerServiceId);
-      console.log(`Registered trainer ${trainer.appId} with orchestrator`);
     } catch (error) {
       console.error('Failed to register trainer:', error);
       setErrorPopupMessage('Failed to Register Trainer');
@@ -685,7 +1063,6 @@ const Training: React.FC = () => {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
       await orchestratorService.remove_trainer(trainerServiceId);
-      console.log(`Unregistered trainer ${trainer.appId} from orchestrator`);
     } catch (error) {
       console.error('Failed to unregister trainer:', error);
       // Don't show error popup for unregister as it might happen during cleanup
@@ -849,7 +1226,10 @@ const Training: React.FC = () => {
 
       // Ensure correct trainers are added before starting
       const currentTrainers = await orchestratorService.list_trainers();
-      console.log('Trainers ready for training:', currentTrainers);
+      
+      if (currentTrainers.length === 0) {
+        throw new Error('No trainers available for training. Please select at least one trainer.');
+      }
 
       setIsPreparingTraining(false);
       setIsTraining(true);
@@ -869,6 +1249,8 @@ const Training: React.FC = () => {
         trainingParams.limit_eval_batches = limitEvalBatches;
       }
 
+      console.log(`✓ Starting federated training with ${currentTrainers.length} trainer(s) for ${numRounds} rounds`);
+
       // Start training in background
       orchestratorService.start_training(trainingParams).catch((error: Error) => {
         console.error('Training failed:', error);
@@ -887,6 +1269,8 @@ const Training: React.FC = () => {
           if (!status.is_running) {
             setIsTraining(false);
             clearInterval(statusInterval);
+
+            console.log(`✓ Federated training completed (${status.current_training_round}/${status.target_round} rounds)`);
 
             // Get training history
             const history = await orchestratorService.get_training_history();
@@ -918,6 +1302,7 @@ const Training: React.FC = () => {
       await orchestratorService.stop_training();
       setIsTraining(false);
       setTrainingStatus(null);
+      console.log('✓ Training stopped successfully');
     } catch (error) {
       console.error('Failed to stop training:', error);
       setErrorPopupMessage('Failed to Stop Training');
@@ -998,7 +1383,8 @@ const Training: React.FC = () => {
   };
 
   // Get status badge
-  const getStatusBadge = (status: string) => {
+  const getStatusBadge = (status?: string) => {
+    const displayStatus = status || 'NOT_STARTED';
     const statusConfig: Record<string, { color: string; icon: any }> = {
       'NOT_STARTED': { color: 'bg-gray-100 text-gray-800', icon: FaClock },
       'DEPLOYING': { color: 'bg-blue-100 text-blue-800', icon: BiLoaderAlt },
@@ -1008,13 +1394,13 @@ const Training: React.FC = () => {
       'DELETING': { color: 'bg-orange-100 text-orange-800', icon: BiLoaderAlt }
     };
 
-    const config = statusConfig[status] || statusConfig['NOT_STARTED'];
+    const config = statusConfig[displayStatus] || statusConfig['NOT_STARTED'];
     const Icon = config.icon;
 
     return (
       <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${config.color}`}>
-        <Icon className={`mr-1 ${status === 'DEPLOYING' || status === 'DELETING' ? 'animate-spin' : ''}`} />
-        {status}
+        <Icon className={`mr-1 ${displayStatus === 'DEPLOYING' || displayStatus === 'DELETING' ? 'animate-spin' : ''}`} />
+        {displayStatus}
       </span>
     );
   };
@@ -1081,33 +1467,47 @@ const Training: React.FC = () => {
 
         {/* Managers list */}
         <div className="space-y-2">
-          {managers.map((manager) => (
-            <div key={manager.workspace} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
-              <div className="flex items-center">
-                <FaCheckCircle className="text-green-500 mr-3" />
-                <div>
-                  <p className="font-medium text-gray-900">{manager.workspace}</p>
-                  <p className="text-sm text-gray-500">Service ID: {manager.serviceId}</p>
+          {managers.map((manager) => {
+            const workerId = `${manager.workspace}::${manager.serviceId}`;
+            return (
+              <div key={workerId} className={`flex items-center justify-between p-4 rounded-lg ${manager.isConnected ? 'bg-gray-50' : 'bg-red-50 border border-red-200'}`}>
+                <div className="flex items-center">
+                  {manager.isConnected ? (
+                    <FaCheckCircle className="text-green-500 mr-3" />
+                  ) : (
+                    <FaTimesCircle className="text-red-500 mr-3" />
+                  )}
+                    <div>
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium text-gray-900">{manager.workspace}</p>
+                      {!manager.isConnected && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
+                          Disconnected
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-500 break-all">Manager ID: {manager.serviceId}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => showInfo('manager', `${manager.workspace}::${manager.serviceId}`)}
+                    className="p-2 text-blue-600 hover:bg-blue-50 rounded"
+                    title="Show info"
+                  >
+                    <FaInfo />
+                  </button>
+                  <button
+                    onClick={() => removeManager(manager.serviceId)}
+                    className="p-2 text-orange-600 hover:bg-orange-50 rounded"
+                    title="Disconnect from worker"
+                  >
+                    <FaUnlink />
+                  </button>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => showInfo('manager', manager.workspace)}
-                  className="p-2 text-blue-600 hover:bg-blue-50 rounded"
-                  title="Show info"
-                >
-                  <FaInfo />
-                </button>
-                <button
-                  onClick={() => removeManager(manager.workspace)}
-                  className="p-2 text-orange-600 hover:bg-orange-50 rounded"
-                  title="Disconnect from worker"
-                >
-                  <FaUnlink />
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
           {managers.length === 0 && (
             <p className="text-gray-500 text-center py-4">No managers connected yet</p>
           )}
@@ -1122,101 +1522,127 @@ const Training: React.FC = () => {
           </h2>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {managers.map((manager) => (
-              <div key={manager.workspace} className="border border-gray-200 rounded-lg p-4">
-                <h3 className="font-medium text-gray-900 mb-3">{manager.workspace}</h3>
-
-                {/* Orchestrator section */}
-                <div className="mb-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-gray-700">Orchestrator</span>
-                    {!orchestrators.find(o => o.managerId === manager.workspace) && (
-                      <button
-                        onClick={() => {
-                          setCreatingFor(manager.workspace);
-                          setShowCreateOrchestrator(true);
-                        }}
-                        className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-50 rounded"
-                      >
-                        Create
-                      </button>
+            {managers.map((manager) => {
+              const workerId = `${manager.workspace}::${manager.serviceId}`;
+              const managerId = manager.serviceId;
+              const isDisconnected = !manager.isConnected;
+              
+              return (
+                <div 
+                  key={workerId} 
+                  className={`border rounded-lg p-4 ${isDisconnected ? 'border-red-300 bg-red-50 opacity-75' : 'border-gray-200'}`}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <h3 className="font-medium text-gray-900">{manager.workspace}</h3>
+                      <p className="text-xs text-gray-500 break-all">Manager: {manager.serviceId}</p>
+                    </div>
+                    {isDisconnected && (
+                      <span className="text-xs px-2 py-1 bg-red-200 text-red-800 rounded font-medium">
+                        DISCONNECTED
+                      </span>
                     )}
                   </div>
 
-                  {orchestrators.filter(o => o.managerId === manager.workspace).map((orch) => (
-                    <div key={orch.appId} className="bg-gray-50 p-3 rounded flex items-center justify-between">
-                      <div className="flex-1">
-                        <p className="text-sm font-medium">{orch.appId}</p>
-                        <p className="text-xs text-gray-500">{orch.artifactId}</p>
-                        <div className="mt-1">{getStatusBadge(orch.status)}</div>
-                      </div>
-                      <div className="flex items-center gap-2">
+                  {/* Orchestrator section */}
+                  <div className="mb-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-medium text-gray-700">Orchestrator</span>
+                      {!orchestrators.find(o => o.managerId === managerId) && (
                         <button
-                          onClick={() => showInfo('orchestrator', `${manager.workspace}::${orch.appId}`)}
-                          className="p-2 text-blue-600 hover:bg-blue-100 rounded"
+                          onClick={() => {
+                            setCreatingFor(managerId);
+                            setShowCreateOrchestrator(true);
+                          }}
+                          disabled={isDisconnected}
+                          className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-50 rounded disabled:text-gray-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                          title={isDisconnected ? "Cannot create while disconnected" : "Create orchestrator"}
                         >
-                          <FaInfo />
+                          Create
                         </button>
-                        <button
-                          onClick={() => removeOrchestrator(manager.workspace)}
-                          className="p-2 text-red-600 hover:bg-red-50 rounded"
-                          title="Remove orchestrator"
-                        >
-                          <FaTrash />
-                        </button>
-                      </div>
+                      )}
                     </div>
-                  ))}
-                </div>
 
-                {/* Trainers section */}
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-gray-700">Trainers</span>
-                    <button
-                      onClick={() => {
-                        setCreatingFor(manager.workspace);
-                        setShowCreateTrainer(true);
-                      }}
-                      className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-50 rounded"
-                    >
-                      Create
-                    </button>
-                  </div>
-
-                  <div className="space-y-2">
-                    {trainers.filter(t => t.managerId === manager.workspace).map((trainer) => (
-                      <div key={trainer.appId} className="bg-gray-50 p-3 rounded">
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex-1">
-                            <p className="text-sm font-medium">{trainer.appId}</p>
-                            <p className="text-xs text-gray-500">{Object.keys(trainer.datasets).join(', ')}</p>
-                            <div className="mt-1">{getStatusBadge(trainer.status)}</div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => showInfo('trainer', `${manager.workspace}::${trainer.appId}`)}
-                              className="p-2 text-blue-600 hover:bg-blue-100 rounded"
-                            >
-                              <FaInfo />
-                            </button>
-                            <button
-                              onClick={() => removeTrainer(manager.workspace, trainer.appId)}
-                              className="p-2 text-red-600 hover:bg-red-50 rounded"
-                            >
-                              <FaTrash />
-                            </button>
-                          </div>
+                    {orchestrators.filter(o => o.managerId === managerId).map((orch) => (
+                      <div key={orch.appId} className="bg-gray-50 p-3 rounded flex items-center justify-between">
+                        <div className="flex-1">
+                          <p className="text-sm font-medium">{orch.appId}</p>
+                          <p className="text-xs text-gray-500">{orch.artifactId}</p>
+                          <div className="mt-1">{getStatusBadge(orch.status)}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => showInfo('orchestrator', `${managerId}::${orch.appId}`)}
+                            className="p-2 text-blue-600 hover:bg-blue-100 rounded"
+                          >
+                            <FaInfo />
+                          </button>
+                          <button
+                            onClick={() => removeOrchestrator(managerId)}
+                            disabled={isDisconnected}
+                            className="p-2 text-red-600 hover:bg-red-50 rounded disabled:text-gray-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                            title={isDisconnected ? "Cannot remove while disconnected" : "Remove orchestrator"}
+                          >
+                            <FaTrash />
+                          </button>
                         </div>
                       </div>
                     ))}
-                    {trainers.filter(t => t.managerId === manager.workspace).length === 0 && (
-                      <p className="text-xs text-gray-500 text-center py-2">No trainers</p>
-                    )}
+                  </div>
+
+                  {/* Trainers section */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-medium text-gray-700">Trainers</span>
+                      <button
+                        onClick={() => {
+                          setCreatingFor(managerId);
+                          setShowCreateTrainer(true);
+                        }}
+                        disabled={isDisconnected}
+                        className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-50 rounded disabled:text-gray-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                        title={isDisconnected ? "Cannot create while disconnected" : "Create trainer"}
+                      >
+                        Create
+                      </button>
+                    </div>
+
+                    <div className="space-y-2">
+                      {trainers.filter(t => t.managerId === managerId).map((trainer) => (
+                        <div key={trainer.appId} className="bg-gray-50 p-3 rounded">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex-1">
+                              <p className="text-sm font-medium">{trainer.appId}</p>
+                              <p className="text-xs text-gray-500">{Object.keys(trainer.datasets).join(', ')}</p>
+                              <div className="mt-1">{getStatusBadge(trainer.status)}</div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => showInfo('trainer', `${managerId}::${trainer.appId}`)}
+                                className="p-2 text-blue-600 hover:bg-blue-100 rounded"
+                              >
+                                <FaInfo />
+                              </button>
+                              <button
+                                onClick={() => removeTrainer(managerId, trainer.appId)}
+                                disabled={isDisconnected}
+                                className="p-2 text-red-600 hover:bg-red-50 rounded disabled:text-gray-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+                                title={isDisconnected ? "Cannot remove while disconnected" : "Remove trainer"}
+                              >
+                                <FaTrash />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      {trainers.filter(t => t.managerId === managerId).length === 0 && (
+                        <p className="text-xs text-gray-500 text-center py-2">No trainers</p>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Selection section */}
@@ -1696,8 +2122,8 @@ const Training: React.FC = () => {
                 Datasets (select at least one)
               </label>
               <div className="max-h-48 overflow-y-auto border border-gray-300 rounded-lg p-2">
-                {creatingFor && managers.find(m => m.workspace === creatingFor)?.datasets &&
-                  Object.entries(managers.find(m => m.workspace === creatingFor)!.datasets!).map(([datasetId, manifest]: [string, any]) => {
+                {creatingFor && managers.find(m => m.serviceId === creatingFor)?.workerInfo?.datasets &&
+                  Object.entries(managers.find(m => m.serviceId === creatingFor)!.workerInfo!.datasets!).map(([datasetId, manifest]: [string, any]) => {
                     const hasAccess = hasDatasetAccess(manifest);
                     return (
                       <label
@@ -1790,22 +2216,36 @@ const Training: React.FC = () => {
       {showInfoModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
-            <h3 className="text-lg font-semibold mb-4">
-              {infoModalType === 'manager' && 'Manager Information'}
-              {infoModalType === 'orchestrator' && 'Orchestrator Information'}
-              {infoModalType === 'trainer' && 'Trainer Information'}
-            </h3>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">
+                {infoModalType === 'manager' && 'Worker Information'}
+                {infoModalType === 'orchestrator' && 'Orchestrator Information'}
+                {infoModalType === 'trainer' && 'Trainer Information'}
+              </h3>
+              <button
+                onClick={() => setShowInfoModal(false)}
+                className="text-gray-400 hover:text-gray-600 text-xl"
+              >
+                ✕
+              </button>
+            </div>
 
-            {infoModalType === 'manager' && infoModalData && 'workspace' in infoModalData && (
-              <div>
-                <h4 className="font-medium text-gray-900 mb-2">Workspace: {infoModalData.workspace}</h4>
+            {isInfoModalLoading ? (
+              <div className="flex items-center justify-center py-12">
+                <FaSpinner className="animate-spin text-blue-600 text-4xl" />
+              </div>
+            ) : (
+              <>
+                {infoModalType === 'manager' && infoModalData && 'workspace' in infoModalData && (
+                  <div>
+                    <h4 className="font-medium text-gray-900 mb-2">Workspace: {infoModalData.workspace}</h4>
 
-                {/* Cluster Status */}
-                {infoModalData.clusterStatus && (
-                  <div className="mb-4">
-                    <h5 className="font-medium text-gray-700 mb-2">Cluster Status:</h5>
-                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                      <div className="grid grid-cols-2 gap-4">
+                    {/* Cluster Status */}
+                    {infoModalData.clusterStatus && (
+                      <div className="mb-4">
+                        <h5 className="font-medium text-gray-700 mb-2">Cluster Status:</h5>
+                        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                          <div className="grid grid-cols-2 gap-4">
                         {/* CPU */}
                         <div>
                           <p className="text-xs font-medium text-gray-600 mb-1">CPU</p>
@@ -1947,6 +2387,8 @@ const Training: React.FC = () => {
             >
               Close
             </button>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -2053,6 +2495,72 @@ const Training: React.FC = () => {
                 className="flex-1 px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 font-medium"
               >
                 Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Service Selection Modal */}
+      {showServiceSelectionModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl p-6 max-w-2xl w-full max-h-[80vh] flex flex-col">
+            <div className="mb-4">
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                Multiple Manager Services Found
+              </h3>
+              <p className="text-sm text-gray-600 mb-4">
+                Multiple chiron-manager services were found in workspace <strong>{pendingWorkspace}</strong>. 
+                Please select which services you want to connect to:
+              </p>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto mb-4 space-y-2">
+              {availableServices.map((serviceId) => (
+                <label 
+                  key={serviceId}
+                  className="flex items-center p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedServices.has(serviceId)}
+                    onChange={(e) => {
+                      const newSelected = new Set(selectedServices);
+                      if (e.target.checked) {
+                        newSelected.add(serviceId);
+                      } else {
+                        newSelected.delete(serviceId);
+                      }
+                      setSelectedServices(newSelected);
+                    }}
+                    className="mr-3"
+                  />
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-gray-900 break-all">{serviceId}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+            
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowServiceSelectionModal(false);
+                  setPendingWorkspace('');
+                  setAvailableServices([]);
+                  setSelectedServices(new Set());
+                  setConnectingWorkspace(null);
+                }}
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700 font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleServiceSelectionConfirm}
+                disabled={selectedServices.size === 0}
+                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed font-medium"
+              >
+                Connect ({selectedServices.size} selected)
               </button>
             </div>
           </div>
