@@ -190,12 +190,16 @@ services:
   };
 
   const getEnvFileContent = () => {
+    const cacheDirPath = cacheDir || '~/.bioengine';
     return `# Get your user and group IDs
 UID=$(id -u)
 GID=$(id -g)
 
 # Your Hypha authentication token
 HYPHA_TOKEN=${token || '<set_token_here>'}
+
+# Create cache directory if it doesn't exist
+mkdir -p ${cacheDirPath}
 `;
   };
 
@@ -733,7 +737,7 @@ Please help me troubleshoot this BioEngine Worker setup. Provide step-by-step gu
           </div>
 
           {/* Docker Compose Preview and Download */}
-          <div className="bg-gray-900 rounded-xl p-4 relative">
+          <div className={`bg-gray-900 rounded-xl p-4 relative transition-opacity duration-200 ${!dataDir.trim() ? 'opacity-50 pointer-events-none' : ''}`}>
             <div className="flex justify-between items-start mb-4">
               <h4 className="text-lg font-medium text-gray-300 flex items-center">
                 <svg className="w-5 h-5 mr-2 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -779,7 +783,7 @@ Please help me troubleshoot this BioEngine Worker setup. Provide step-by-step gu
           </div>
 
           {/* Environment Variables */}
-          <div className="bg-amber-50 rounded-xl p-4 border border-amber-200">
+          <div className={`bg-amber-50 rounded-xl p-4 border border-amber-200 transition-opacity duration-200 ${!dataDir.trim() ? 'opacity-50 pointer-events-none' : ''}`}>
             <h4 className="text-lg font-medium text-amber-800 mb-3 flex items-center">
               <svg className="w-5 h-5 mr-2 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
@@ -803,7 +807,7 @@ Please help me troubleshoot this BioEngine Worker setup. Provide step-by-step gu
           </div>
 
           {/* Run Command */}
-          <div className="bg-gradient-to-r from-purple-50 to-pink-50 rounded-xl p-4 border border-purple-200">
+          <div className={`bg-gradient-to-r from-purple-50 to-pink-50 rounded-xl p-4 border border-purple-200 transition-opacity duration-200 ${!dataDir.trim() ? 'opacity-50 pointer-events-none' : ''}`}>
             <h4 className="text-lg font-medium text-purple-800 mb-3 flex items-center">
               <svg className="w-5 h-5 mr-2 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
