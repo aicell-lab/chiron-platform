@@ -20,7 +20,8 @@ const arraysEqual = (a: string[], b: string[]): boolean => {
 const ServiceCard: React.FC<{
   service: BioEngineService;
   onNavigate: (serviceId: string) => void;
-}> = ({ service, onNavigate }) => {
+  onNavigateToTraining: () => void;
+}> = ({ service, onNavigate, onNavigateToTraining }) => {
   const [copied, setCopied] = useState(false);
 
   const copyServiceId = async () => {
@@ -73,12 +74,18 @@ const ServiceCard: React.FC<{
         </div>
       </div>
 
-      <div className="p-6 pt-0">
+      <div className="p-6 pt-0 space-y-2">
         <button
           onClick={() => onNavigate(service.id)}
           className="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-xl hover:from-blue-700 hover:to-blue-800 shadow-sm hover:shadow-md transition-all duration-200 font-medium"
         >
           View Dashboard
+        </button>
+        <button
+          onClick={() => onNavigateToTraining()}
+          className="w-full px-6 py-3 bg-gradient-to-r from-purple-600 to-purple-700 text-white rounded-xl hover:from-purple-700 hover:to-purple-800 shadow-sm hover:shadow-md transition-all duration-200 font-medium"
+        >
+          Start Training
         </button>
       </div>
     </div>
@@ -289,7 +296,7 @@ const BioEngineHome: React.FC = () => {
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {bioEngineServices.map((service) => (
-          <ServiceCard key={service.id} service={service} onNavigate={navigateToDashboard} />
+          <ServiceCard key={service.id} service={service} onNavigate={navigateToDashboard} onNavigateToTraining={() => navigate('/training')} />
         ))}
       </div>
     );

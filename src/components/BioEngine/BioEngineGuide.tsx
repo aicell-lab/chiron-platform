@@ -23,6 +23,7 @@ const BioEngineGuide: React.FC = () => {
   const [gpuIndices, setGpuIndices] = useState('');
   const [showTroubleshooting, setShowTroubleshooting] = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
+  const [showDataExample, setShowDataExample] = useState(false);
 
   // Token generation
   const [token, setToken] = useState('');
@@ -493,6 +494,67 @@ Please help me troubleshoot this BioEngine Worker setup. Provide step-by-step gu
 
       {isExpanded && (
         <div className="mt-4 space-y-6">
+          {/* Data Structure Section */}
+          <div className="bg-gradient-to-r from-green-50 to-teal-50 p-6 rounded-xl border border-green-200">
+            <h4 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
+              <svg className="w-5 h-5 mr-2 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              </svg>
+              Prepare Your Data Directory
+            </h4>
+            
+            <p className="text-sm text-gray-700 mb-4">
+              Before configuring your worker, organize your single-cell datasets in the following structure. Each dataset folder must contain a <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">manifest.yaml</code> file and either <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.h5ad</code> (AnnData) or <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> files. Both formats are supported, and a mix is also fine. If the same file exists in both formats, <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> is used. If no zarr file is provided, one will be generated automatically when starting the data server.
+            </p>
+
+            {/* Collapsible Example Section */}
+            <button
+              onClick={() => setShowDataExample(!showDataExample)}
+              className="flex items-center text-sm text-green-700 hover:text-green-900 transition-colors duration-200 mb-3"
+            >
+              <svg
+                className={`w-4 h-4 mr-2 transition-transform duration-200 ${showDataExample ? 'rotate-90' : ''}`}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+              {showDataExample ? 'Hide' : 'Show'} example data structure
+            </button>
+
+            {showDataExample && (
+              <div className="space-y-4">
+                <div className="bg-gray-900 rounded-lg p-4">
+                  <pre className="text-green-400 text-sm font-mono overflow-x-auto whitespace-pre">{`/path/to/data/
+├── dataset1/                    
+│   ├── anndata1.h5ad        
+│   ├── anndata2.h5ad
+│   ├── ...      
+│   └── manifest.yaml         # Required: Dataset configuration
+└── dataset2/
+    ├── data1.zarr/
+    ├── data2.zarr/
+    ├── ...
+    └── manifest.yaml         # Required: Dataset configuration`}</pre>
+                </div>
+
+                <div className="bg-white rounded-lg p-4 border border-green-100">
+                  <h5 className="text-sm font-semibold text-gray-800 mb-2">Example manifest.yaml</h5>
+                  <pre className="text-gray-700 text-xs font-mono overflow-x-auto whitespace-pre bg-gray-50 p-3 rounded">{`id: blood-perturb-rna
+name: Blood-Perturb-RNA
+description: CRISPR perturbation screen in human HSPCs with scRNA-seq.
+authorized_users:
+  - user@example.com
+  - "*"  # Use "*" for public access`}</pre>
+                  <p className="text-xs text-gray-500 mt-2">
+                    See the <a href="https://github.com/aicell-lab/bioengine-worker/blob/main/bioengine/datasets/README.md" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Datasets Documentation</a> for full manifest options including authors, license, and tags.
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Configuration Section */}
           <div className="bg-gradient-to-r from-blue-50 to-purple-50 p-6 rounded-xl border border-blue-200">
             <h4 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
