@@ -24,13 +24,15 @@ const BioEngineGuide: React.FC = () => {
   const [showTroubleshooting, setShowTroubleshooting] = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
   const [showDataExample, setShowDataExample] = useState(false);
+  const [timezone, setTimezone] = useState('');
 
   // Token generation
   const [token, setToken] = useState('');
   const [isGeneratingToken, setIsGeneratingToken] = useState(false);
   const [tokenError, setTokenError] = useState('');
+  const [tokenFlash, setTokenFlash] = useState(false);
   const [workspace, setWorkspace] = useState('');
-  const [cacheDir, setCacheDir] = useState('');
+  const [workspaceDir, setWorkspaceDir] = useState('');
 
   // Ref for the troubleshooting dialog
   const troubleshootingDialogRef = useRef<HTMLDivElement>(null);
@@ -47,6 +49,17 @@ const BioEngineGuide: React.FC = () => {
       }, 100);
     }
   }, [showTroubleshooting]);
+
+  // Detect timezone from browser
+  useEffect(() => {
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      setTimezone(tz);
+    } catch (error) {
+      console.error('Failed to detect timezone:', error);
+      setTimezone('UTC');
+    }
+  }, []);
 
   // Auto-generate token on component mount when user is logged in
   useEffect(() => {
@@ -71,6 +84,9 @@ const BioEngineGuide: React.FC = () => {
         expires_in: 3600 * 24 * 30, // 30 days
       });
       setToken(newToken);
+      // Trigger flash animation
+      setTokenFlash(true);
+      setTimeout(() => setTokenFlash(false), 1000);
     } catch (error) {
       console.error('Failed to generate token:', error);
       setTokenError('Failed to generate token. Please try again.');
@@ -80,7 +96,7 @@ const BioEngineGuide: React.FC = () => {
   };
 
   const getDockerComposeContent = () => {
-    const imageToUse = customImage || 'ghcr.io/aicell-lab/tabula:0.2.2';
+    const imageToUse = customImage || 'ghcr.io/aicell-lab/tabula:0.2.3';
     
     // Build admin users string
     let adminUsersStr = '';
@@ -88,7 +104,7 @@ const BioEngineGuide: React.FC = () => {
       if (adminUsers === '*') {
         adminUsersStr = '"*"';
       } else {
-        adminUsersStr = `"${adminUsers.split(',').map(u => u.trim()).join(' ')}"`;
+        adminUsersStr = adminUsers.split(',').map(u => `"${u.trim()}"`).join(' ');
       }
     }
 
@@ -119,21 +135,23 @@ const BioEngineGuide: React.FC = () => {
       }
     }
 
-    // Cache directory - use custom if set, otherwise ${HOME}/.bioengine
-    const cacheDirPath = cacheDir || '${HOME}/.bioengine';
+    // Workspace directory - use custom if set, otherwise ${HOME}/.bioengine
+    const workspaceDirPath = workspaceDir || '${HOME}/.bioengine';
 
-    // Data directory - must be absolute path
-    const dataDirPath = dataDir || '/path/to/your/data';
+    // Data import directory - optional
+    const dataImportVolume = dataDir ? `\n      - ${dataDir}:/data` : '';
+    const dataImportCommand = dataDir ? '\n      --data-import-dir /data' : '';
 
     // Worker command arguments
     const workerArgs = [
       '--mode single-machine',
-      `--head_num_cpus ${cpus}`,
-      hasGpu ? `--head_num_gpus ${gpus}` : '',
-      `--head_memory_in_gb ${memory}`,
-      '--startup_applications "{\\"artifact_id\\": \\"chiron-platform/chiron-manager\\", \\"application_id\\": \\"chiron-manager\\"}"',
-      adminUsersStr ? `--admin_users ${adminUsersStr}` : '',
-      '--dashboard_url https://chiron.aicell.io/#/bioengine'
+      `--head-num-cpus ${cpus}`,
+      hasGpu ? `--head-num-gpus ${gpus}` : '',
+      `--head-memory-in-gb ${memory}`,
+      '--startup-applications "{\\"artifact_id\\": \\"chiron-platform/chiron-manager\\", \\"application_id\\": \\"chiron-manager\\"}"',
+      adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
+      workspace ? `--workspace ${workspace}` : '',
+      '--dashboard-url https://chiron.aicell.io/#/bioengine'
     ].filter(Boolean).join('\n      ');
 
     return `version: "3.8"
@@ -144,14 +162,13 @@ services:
     container_name: bioengine-data-server
     user: "\${UID}:\${GID}"
     volumes:
-      - ${cacheDirPath}:/home/.bioengine
-      - ${dataDirPath}:/data
+      - ${workspaceDirPath}:/home/.bioengine${dataImportVolume}
     environment:
       - HOME=/home
+      - TZ=${timezone || 'UTC'}
     command: >
-      python -m tabula.datasets
-      --data-dir /data
-      --cache-dir /home/.bioengine
+      python -m tabula.datasets${dataImportCommand}
+      --workspace-dir /home/.bioengine
       --server-port 9527
     restart: unless-stopped
     healthcheck:
@@ -168,10 +185,11 @@ services:
     user: "\${UID}:\${GID}"
     shm_size: ${shmSize}g
     volumes:
-      - ${cacheDirPath}:/home/.bioengine
+      - ${workspaceDirPath}:/home/.bioengine
     environment:
       - HOME=/home
       - HYPHA_TOKEN=\${HYPHA_TOKEN}
+      - TZ=${timezone || 'UTC'}
     command: >
       python -m bioengine.worker
       ${workerArgs}
@@ -191,7 +209,7 @@ services:
   };
 
   const getEnvFileContent = () => {
-    const cacheDirPath = cacheDir || '~/.bioengine';
+    const workspaceDirPath = workspaceDir || '~/.bioengine';
     return `# Get your user and group IDs
 UID=$(id -u)
 GID=$(id -g)
@@ -199,8 +217,8 @@ GID=$(id -g)
 # Your Hypha authentication token
 HYPHA_TOKEN=${token || '<set_token_here>'}
 
-# Create cache directory if it doesn't exist
-mkdir -p ${cacheDirPath}
+# Create workspace directory if it doesn't exist
+mkdir -p ${workspaceDirPath}
 `;
   };
 
@@ -500,11 +518,11 @@ Please help me troubleshoot this BioEngine Worker setup. Provide step-by-step gu
               <svg className="w-5 h-5 mr-2 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
               </svg>
-              Prepare Your Data Directory
+              Prepare Your Data Import Directory (Optional)
             </h4>
             
             <p className="text-sm text-gray-700 mb-4">
-              Before configuring your worker, organize your single-cell datasets in the following structure. Each dataset folder must contain a <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">manifest.yaml</code> file and either <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.h5ad</code> (AnnData) or <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> files. Both formats are supported, and a mix is also fine. If the same file exists in both formats, <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> is used. If no zarr file is provided, one will be generated automatically when starting the data server.
+              Optionally, you can organize your single-cell datasets in a data import directory. Data from this directory will be automatically copied to the workspace directory where a local S3-compatible storage is hosted. Each dataset folder must contain a <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">manifest.yaml</code> file and either <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.h5ad</code> (AnnData) or <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> files. Both formats are supported. If the same file exists in both formats, <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> is used. If no zarr file is provided, one will be generated automatically when starting the data server.
             </p>
 
             {/* Collapsible Example Section */}
@@ -566,18 +584,18 @@ authorized_users:
             </h4>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {/* Data Directory */}
+              {/* Data Import Directory */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Data Directory <span className="text-red-500">*</span></label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Data Import Directory (Optional)</label>
                 <input
                   type="text"
                   value={dataDir}
                   onChange={(e) => setDataDir(e.target.value)}
-                  placeholder="/path/to/data"
+                  placeholder="/path/to/your/data"
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  Must be an absolute path
+                  Data will be imported to workspace directory
                 </p>
               </div>
 
@@ -704,7 +722,9 @@ authorized_users:
                       onChange={(e) => setToken(e.target.value)}
                       placeholder={isGeneratingToken ? 'Generating...' : 'Token will be generated automatically'}
                       aria-label="Authentication Token"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-xs"
+                      className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-xs transition-all duration-300 ${
+                        tokenFlash ? 'ring-2 ring-green-500 bg-green-50' : ''
+                      }`}
                     />
                     <button
                       onClick={generateToken}
@@ -724,7 +744,7 @@ authorized_users:
                       )}
                     </button>
                   </div>
-                  <p className="text-xs text-gray-500 mt-1">Auto-generated 30-day admin token</p>
+                  <p className="text-xs text-gray-500 mt-1">Auto-generated 30-day token (Permission Level: Admin)</p>
                   {tokenError && <p className="text-xs text-red-600 mt-1">{tokenError}</p>}
                 </div>
 
@@ -741,17 +761,17 @@ authorized_users:
                   <p className="text-xs text-gray-500 mt-1">Hypha workspace name</p>
                 </div>
 
-                {/* BioEngine Cache Directory */}
+                {/* Workspace Directory */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">BioEngine Cache Directory</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Workspace Directory</label>
                   <input
                     type="text"
-                    value={cacheDir}
-                    onChange={(e) => setCacheDir(e.target.value)}
+                    value={workspaceDir}
+                    onChange={(e) => setWorkspaceDir(e.target.value)}
                     placeholder="~/.bioengine"
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
-                  <p className="text-xs text-gray-500 mt-1">Leave empty for default</p>
+                  <p className="text-xs text-gray-500 mt-1">Leave empty for default (~/.bioengine)</p>
                 </div>
 
                 {/* Admin Users */}
@@ -774,7 +794,7 @@ authorized_users:
                     type="text"
                     value={customImage}
                     onChange={(e) => setCustomImage(e.target.value)}
-                    placeholder="ghcr.io/aicell-lab/tabula:0.2.2"
+                    placeholder="ghcr.io/aicell-lab/tabula:0.2.3"
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                   <p className="text-xs text-gray-500 mt-1">Leave empty for default image</p>
@@ -799,7 +819,7 @@ authorized_users:
           </div>
 
           {/* Docker Compose Preview and Download */}
-          <div className={`bg-gray-900 rounded-xl p-4 relative transition-opacity duration-200 ${!dataDir.trim() ? 'opacity-50 pointer-events-none' : ''}`}>
+          <div className="bg-gray-900 rounded-xl p-4 relative">
             <div className="flex justify-between items-start mb-4">
               <h4 className="text-lg font-medium text-gray-300 flex items-center">
                 <svg className="w-5 h-5 mr-2 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -845,7 +865,7 @@ authorized_users:
           </div>
 
           {/* Environment Variables */}
-          <div className={`bg-amber-50 rounded-xl p-4 border border-amber-200 transition-opacity duration-200 ${!dataDir.trim() ? 'opacity-50 pointer-events-none' : ''}`}>
+          <div className="bg-amber-50 rounded-xl p-4 border border-amber-200">
             <h4 className="text-lg font-medium text-amber-800 mb-3 flex items-center">
               <svg className="w-5 h-5 mr-2 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
@@ -869,7 +889,7 @@ authorized_users:
           </div>
 
           {/* Run Command */}
-          <div className={`bg-gradient-to-r from-purple-50 to-pink-50 rounded-xl p-4 border border-purple-200 transition-opacity duration-200 ${!dataDir.trim() ? 'opacity-50 pointer-events-none' : ''}`}>
+          <div className="bg-gradient-to-r from-purple-50 to-pink-50 rounded-xl p-4 border border-purple-200">
             <h4 className="text-lg font-medium text-purple-800 mb-3 flex items-center">
               <svg className="w-5 h-5 mr-2 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
@@ -903,9 +923,10 @@ authorized_users:
                 <p className="font-medium mb-1">Prerequisites & Notes:</p>
                 <ul className="list-disc list-inside space-y-1 text-blue-700">
                   <li>{containerRuntime.charAt(0).toUpperCase() + containerRuntime.slice(1)} and {containerRuntime === 'docker' ? 'Docker Compose' : 'podman-compose'} must be installed</li>
-                  {hasGpu && <li>NVIDIA {containerRuntime === 'docker' ? 'Docker runtime (nvidia-docker2)' : 'container toolkit'} required for GPU support</li>}
+                  {hasGpu && <li>NVIDIA container toolkit required for GPU support</li>}
                   <li>The token expires after 30 days - generate a new one when needed</li>
-                  <li>A ~/.bioengine directory will be created for cache storage</li>
+                  <li>A ~/.bioengine workspace directory will be created for storage and S3-compatible data hosting</li>
+                  {dataDir && <li>Data from the import directory will be automatically copied to the workspace directory at startup</li>}
                   <li>After starting, the worker will connect to the Chiron platform automatically</li>
                 </ul>
               </div>

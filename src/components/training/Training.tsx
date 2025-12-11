@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { useHyphaStore } from '../store/hyphaStore';
+import { useHyphaStore } from '../../store/hyphaStore';
 import { hyphaWebsocketClient } from 'hypha-rpc';
 import { FaNetworkWired, FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
