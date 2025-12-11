@@ -583,6 +583,19 @@ authorized_users:
               Step 1: Configure Your Worker
             </h4>
 
+            {/* Warning for not logged in users */}
+            {!user && (
+              <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start">
+                <svg className="w-5 h-5 text-amber-600 mr-2 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-1.963-1.333-2.732 0L3.268 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <div className="text-sm text-amber-800">
+                  <p className="font-medium">Not logged in</p>
+                  <p>Without logging in, you'll need to manually set a Hypha Authentication Token in the Advanced Options below.</p>
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {/* Data Import Directory */}
               <div>
@@ -744,7 +757,7 @@ authorized_users:
                       )}
                     </button>
                   </div>
-                  <p className="text-xs text-gray-500 mt-1">Auto-generated 30-day token (Permission Level: Admin)</p>
+                  <p className="text-xs text-gray-500 mt-1">Auto-generated 30-day Hypha token (Permission Level: Admin)</p>
                   {tokenError && <p className="text-xs text-red-600 mt-1">{tokenError}</p>}
                 </div>
 
