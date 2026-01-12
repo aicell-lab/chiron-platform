@@ -96,7 +96,7 @@ const BioEngineGuide: React.FC = () => {
   };
 
   const getDockerComposeContent = () => {
-    const imageToUse = customImage || 'ghcr.io/aicell-lab/tabula:0.2.3';
+    const imageToUse = customImage || 'ghcr.io/aicell-lab/tabula:0.2.4';
     
     // Build admin users string
     let adminUsersStr = '';
@@ -807,7 +807,7 @@ authorized_users:
                     type="text"
                     value={customImage}
                     onChange={(e) => setCustomImage(e.target.value)}
-                    placeholder="ghcr.io/aicell-lab/tabula:0.2.3"
+                    placeholder="ghcr.io/aicell-lab/tabula:0.2.4"
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                   <p className="text-xs text-gray-500 mt-1">Leave empty for default image</p>

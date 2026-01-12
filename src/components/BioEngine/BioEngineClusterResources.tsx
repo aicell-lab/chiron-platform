@@ -114,7 +114,7 @@ const BioEngineClusterResources: React.FC<BioEngineClusterResourcesProps> = ({ r
   }> = ({ title, available, total, color, bgColor, unit = "" }) => {
     const used = total - available;
     const percentage = total > 0 ? Math.round((used / total) * 100) : 0;
-    const displayAvailable = unit === "GB" ? formatBytes(available) : formatNumber(available);
+    const displayUsed = unit === "GB" ? formatBytes(used) : formatNumber(used);
     const displayTotal = unit === "GB" ? formatBytes(total) : formatNumber(total);
 
     return (
@@ -126,7 +126,7 @@ const BioEngineClusterResources: React.FC<BioEngineClusterResourcesProps> = ({ r
           </span>
         </div>
         <div className={`text-lg font-bold ${color.replace('bg-', 'text-').replace('600', '800')} mb-2`}>
-          {displayAvailable}{unit} / {displayTotal}{unit} available
+          {displayUsed}{unit} / {displayTotal}{unit}
         </div>
         <div className={`w-full ${color.replace('bg-', 'bg-').replace('600', '200')} rounded-full h-2`}>
           <div

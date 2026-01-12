@@ -3,6 +3,7 @@ import { useHyphaStore } from '../../store/hyphaStore';
 import { hyphaWebsocketClient } from 'hypha-rpc';
 import { FaNetworkWired, FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
+import TrainingConfigPanel from './TrainingConfigPanel';
 
 interface WorkerInfo {
   cluster_status?: ClusterStatus;
@@ -34,6 +35,8 @@ interface OrchestratorApp {
   status: string;
   serviceIds: any[];
   artifactId: string;
+  displayName?: string;
+  applicationId?: string;
 }
 
 interface TrainerApp {
@@ -43,6 +46,8 @@ interface TrainerApp {
   serviceIds: any[];
   datasets: Record<string, any>;
   artifactId: string;
+  displayName?: string;
+  applicationId?: string;
 }
 
 interface TrainingStatus {
@@ -112,7 +117,6 @@ const Training: React.FC = () => {
   const [orchestrators, setOrchestrators] = useState<OrchestratorApp[]>([]);
   const [trainers, setTrainers] = useState<TrainerApp[]>([]);
   const [selectedOrchestrator, setSelectedOrchestrator] = useState<string | null>(null);
-  const [selectedTrainers, setSelectedTrainers] = useState<Set<string>>(new Set());
 
   // Create app state
   const [showCreateOrchestrator, setShowCreateOrchestrator] = useState(false);
@@ -132,11 +136,15 @@ const Training: React.FC = () => {
   const [isTraining, setIsTraining] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
   const [trainingHistory, setTrainingHistory] = useState<TrainingHistory | null>(null);
-  const [numRounds, setNumRounds] = useState(5);
-  const [limitTrainBatches, setLimitTrainBatches] = useState<number | null>(null);
-  const [limitEvalBatches, setLimitEvalBatches] = useState<number | null>(null);
-  const [addedTrainers, setAddedTrainers] = useState<string[]>([]);
+  const [registeredTrainers, setRegisteredTrainers] = useState<string[]>([]);
+  const [isLoadingRegisteredTrainers, setIsLoadingRegisteredTrainers] = useState(false);
   const [isPreparingTraining, setIsPreparingTraining] = useState(false);
+  const [isStoppingTraining, setIsStoppingTraining] = useState(false);
+  
+  // Trainer params state
+  const [trainerParams, setTrainerParams] = useState<any>(null);
+  const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
+  const [trainerParamsError, setTrainerParamsError] = useState<string | null>(null);
   
   // Error modal state
   const [showErrorDetailModal, setShowErrorDetailModal] = useState(false);
@@ -322,7 +330,9 @@ const Training: React.FC = () => {
             appId: 'chiron-orchestrator',
             status: orchStatus.status,
             serviceIds: orchStatus.service_ids || [],
-            artifactId: orchStatus.artifact_id || 'chiron-platform/tabula-trainer'
+            artifactId: orchStatus.artifact_id || 'chiron-platform/tabula-trainer',
+            displayName: orchStatus.display_name,
+            applicationId: orchStatus.application_id
           });
         }
 
@@ -335,7 +345,9 @@ const Training: React.FC = () => {
               status: (trainerStatus as any).status,
               serviceIds: (trainerStatus as any).service_ids || [],
               datasets: (trainerStatus as any).datasets || {},
-              artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer'
+              artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer',
+              displayName: (trainerStatus as any).display_name,
+              applicationId: appId
             });
           }
         }
@@ -400,9 +412,12 @@ const Training: React.FC = () => {
     const hasSelectedOrchestrator = selectedOrchestrator && 
       orchestrators.some(o => o.managerId === managerId && `${o.managerId}::${o.appId}` === selectedOrchestrator);
     
-    // Check if we have selected trainers from this manager
+    // Check if we have registered trainers from this manager
     const managersTrainers = trainers.filter(t => t.managerId === managerId);
-    const hasSelectedTrainers = managersTrainers.some(t => selectedTrainers.has(`${t.managerId}::${t.appId}`));
+    const hasRegisteredTrainers = managersTrainers.some(t => {
+      const trainerServiceId = t.serviceIds[0]?.websocket_service_id;
+      return registeredTrainers.includes(trainerServiceId);
+    });
 
     // Build warning message
     let warningMessage = `Disconnecting from BioEngine Worker "${workspace}" (Manager: ${serviceId.substring(0, 12)}...) will:\n\n`;
@@ -413,7 +428,7 @@ const Training: React.FC = () => {
       warningMessage += '• Deselect the currently selected orchestrator\n';
     }
     
-    if (hasSelectedTrainers) {
+    if (hasRegisteredTrainers) {
       warningMessage += '• Deselect the trainers from this worker\n';
       if (isTraining) {
         warningMessage += '• Selected trainers will finish the current round but won\'t participate in future rounds\n';
@@ -436,25 +451,17 @@ const Training: React.FC = () => {
     // serviceId is the unique identifier
     const managerId = serviceId;
 
-    // Unregister and deselect trainers from this manager
+    // Unregister trainers from this manager
     const managersTrainers = trainers.filter(t => t.managerId === managerId);
     if (managersTrainers.length > 0) {
-      // Unregister each selected trainer
+      // Unregister each registered trainer
       for (const trainer of managersTrainers) {
         const trainerId = `${trainer.managerId}::${trainer.appId}`;
-        if (selectedTrainers.has(trainerId)) {
+        const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
+        if (registeredTrainers.includes(trainerServiceId)) {
           await unregisterTrainer(trainerId);
         }
       }
-      
-      // Deselect trainers
-      setSelectedTrainers(prev => {
-        const newSet = new Set(prev);
-        managersTrainers.forEach(t => {
-          newSet.delete(`${t.managerId}::${t.appId}`);
-        });
-        return newSet;
-      });
     }
 
     // Deselect orchestrator if it belongs to this manager
@@ -555,7 +562,9 @@ const Training: React.FC = () => {
             appId: 'chiron-orchestrator',
             status: orchStatus.status,
             serviceIds: orchStatus.service_ids || [],
-            artifactId: orchStatus.artifact_id || 'chiron-platform/tabula-trainer'
+            artifactId: orchStatus.artifact_id || 'chiron-platform/tabula-trainer',
+            displayName: orchStatus.display_name,
+            applicationId: orchStatus.application_id
           }];
         }
         console.log(`[${serviceId}] No valid orchestrator status found, not adding to state`);
@@ -574,7 +583,9 @@ const Training: React.FC = () => {
               status: (trainerStatus as any).status,
               serviceIds: (trainerStatus as any).service_ids || [],
               datasets: (trainerStatus as any).datasets || {},
-              artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer'
+              artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer',
+              displayName: (trainerStatus as any).display_name,
+              applicationId: appId
             });
           }
         }
@@ -902,15 +913,14 @@ const Training: React.FC = () => {
     }
 
     const trainerId = `${managerId}::${appId}`;
+    const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
     
-    // Unregister if selected
-    if (selectedTrainers.has(trainerId)) {
-      await unregisterTrainer(trainerId);
-      setSelectedTrainers(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(trainerId);
-        return newSet;
-      });
+    // Unregister if registered
+    if (trainer) {
+      const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
+      if (registeredTrainers.includes(trainerServiceId)) {
+        await unregisterTrainer(trainerId);
+      }
     }
 
     // managerId is the serviceId
@@ -1038,14 +1048,21 @@ const Training: React.FC = () => {
     if (!trainer || trainer.status !== 'RUNNING') return;
 
     try {
+      setIsLoadingRegisteredTrainers(true);
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
       await orchestratorService.add_trainer(trainerServiceId);
+      
+      // Refresh registered trainers list
+      const registeredServiceIds = await orchestratorService.list_trainers();
+      setRegisteredTrainers(registeredServiceIds);
     } catch (error) {
       console.error('Failed to register trainer:', error);
       setErrorPopupMessage('Failed to Register Trainer');
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while registering the trainer');
       setShowErrorPopup(true);
+    } finally {
+      setIsLoadingRegisteredTrainers(false);
     }
   };
 
@@ -1060,88 +1077,98 @@ const Training: React.FC = () => {
     if (!trainer || trainer.status !== 'RUNNING') return;
 
     try {
+      setIsLoadingRegisteredTrainers(true);
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
       await orchestratorService.remove_trainer(trainerServiceId);
+      
+      // Refresh registered trainers list
+      const registeredServiceIds = await orchestratorService.list_trainers();
+      setRegisteredTrainers(registeredServiceIds);
     } catch (error) {
       console.error('Failed to unregister trainer:', error);
       // Don't show error popup for unregister as it might happen during cleanup
       console.warn('Continuing despite unregister error');
+    } finally {
+      setIsLoadingRegisteredTrainers(false);
     }
   };
 
   // Sync trainers with orchestrator
-  const syncTrainersWithOrchestrator = useCallback(async () => {
-    if (!selectedOrchestrator) return;
 
-    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
-    if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-
-    try {
-      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-
-      // Get currently added trainers
-      const currentTrainers = await orchestratorService.list_trainers();
-
-      // Get selected trainer service IDs
-      const selectedTrainerServiceIds = new Set<string>();
-      const selectedTrainersArray = Array.from(selectedTrainers);
-      for (const trainerId of selectedTrainersArray) {
-        const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
-        if (trainer && trainer.status === 'RUNNING') {
-          selectedTrainerServiceIds.add(trainer.serviceIds[0].websocket_service_id);
-        }
-      }
-
-      // Remove trainers that are not selected
-      for (const trainerServiceId of currentTrainers) {
-        if (!selectedTrainerServiceIds.has(trainerServiceId)) {
-          await orchestratorService.remove_trainer(trainerServiceId);
-        }
-      }
-
-      // Add trainers that are selected but not yet added
-      for (const trainerId of selectedTrainersArray) {
-        const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
-        if (trainer && trainer.status === 'RUNNING') {
-          const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
-          if (!currentTrainers.includes(trainerServiceId)) {
-            await orchestratorService.add_trainer(trainerServiceId);
-          }
-        }
-      }
-
-      // Get updated list of trainers
-      const updatedTrainers = await orchestratorService.list_trainers();
-      setAddedTrainers(updatedTrainers);
-    } catch (error) {
-      console.error('Failed to sync trainers:', error);
-      setErrorPopupMessage('Failed to Sync Trainers');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while syncing trainers with the orchestrator');
-      setShowErrorPopup(true);
-    }
-  }, [selectedOrchestrator, selectedTrainers, orchestrators, trainers, server]);
-
-  // Register selected trainers when orchestrator is first selected
+  // Fetch registered trainers when orchestrator is selected
   useEffect(() => {
-    const registerExistingTrainers = async () => {
-      if (!selectedOrchestrator || selectedTrainers.size === 0) return;
+    const fetchRegisteredTrainers = async () => {
+      if (!selectedOrchestrator) {
+        setRegisteredTrainers([]);
+        return;
+      }
 
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
-      if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+      if (!orchestrator || orchestrator.status !== 'RUNNING') {
+        setRegisteredTrainers([]);
+        return;
+      }
 
-      // Register all currently selected trainers
-      for (const trainerId of Array.from(selectedTrainers)) {
-        const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
-        if (trainer && trainer.status === 'RUNNING') {
-          await registerTrainer(trainerId);
-        }
+      try {
+        setIsLoadingRegisteredTrainers(true);
+        const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+        const registeredServiceIds = await orchestratorService.list_trainers();
+        setRegisteredTrainers(registeredServiceIds);
+      } catch (error) {
+        console.error('Failed to fetch registered trainers:', error);
+        setRegisteredTrainers([]);
+      } finally {
+        setIsLoadingRegisteredTrainers(false);
       }
     };
 
-    registerExistingTrainers();
+    fetchRegisteredTrainers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedOrchestrator]); // Only run when orchestrator changes
+  }, [selectedOrchestrator, server]);
+
+  // Fetch trainer params when orchestrator and at least one trainer are selected
+  useEffect(() => {
+    const fetchTrainerParams = async () => {
+      if (!selectedOrchestrator) {
+        setTrainerParams(null);
+        setTrainerParamsLoading(false);
+        setTrainerParamsError(null);
+        return;
+      }
+
+      const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+      if (!orchestrator || orchestrator.status !== 'RUNNING') {
+        setTrainerParams(null);
+        setTrainerParamsLoading(false);
+        setTrainerParamsError('Orchestrator not running');
+        return;
+      }
+
+      // Only fetch params if at least one trainer is registered
+      if (registeredTrainers.length === 0) {
+        setTrainerParams(null);
+        setTrainerParamsLoading(false);
+        setTrainerParamsError(null);
+        return;
+      }
+
+      try {
+        setTrainerParamsLoading(true);
+        setTrainerParamsError(null);
+        const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+        const params = await orchestratorService.get_trainer_params();
+        setTrainerParams(params);
+      } catch (error) {
+        console.error('Failed to fetch trainer params:', error);
+        setTrainerParamsError(error instanceof Error ? error.message : 'Failed to fetch parameters');
+      } finally {
+        setTrainerParamsLoading(false);
+      }
+    };
+
+    fetchTrainerParams();
+  }, [selectedOrchestrator, registeredTrainers, server]);
 
   // Fetch training history when orchestrator is selected or on stage changes
   useEffect(() => {
@@ -1169,7 +1196,7 @@ const Training: React.FC = () => {
     };
 
     fetchTrainingHistory();
-  }, [selectedOrchestrator, orchestrators, server]);
+  }, [selectedOrchestrator, server]);
 
   // Fetch training history regularly while training is active or on stage changes
   useEffect(() => {
@@ -1213,7 +1240,12 @@ const Training: React.FC = () => {
   }, [isTraining, selectedOrchestrator]);
 
   // Start training
-  const startTraining = async () => {
+  const startTraining = async (config: {
+    num_rounds: number;
+    fit_config: Record<string, any>;
+    eval_config: Record<string, any>;
+    per_round_timeout: number;
+  }) => {
     if (!selectedOrchestrator) return;
 
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
@@ -1234,22 +1266,17 @@ const Training: React.FC = () => {
       setIsPreparingTraining(false);
       setIsTraining(true);
 
-      // Prepare training parameters
+      // Prepare training parameters from config
       const trainingParams: any = { 
-        num_rounds: numRounds, 
-        timeout: 600,
+        num_rounds: config.num_rounds,
+        fit_config: config.fit_config,
+        eval_config: config.eval_config,
+        per_round_timeout: config.per_round_timeout,
         _rkwargs: true 
       };
-      
-      // Add optional parameters if set
-      if (limitTrainBatches !== null) {
-        trainingParams.limit_train_batches = limitTrainBatches;
-      }
-      if (limitEvalBatches !== null) {
-        trainingParams.limit_eval_batches = limitEvalBatches;
-      }
 
-      console.log(`✓ Starting federated training with ${currentTrainers.length} trainer(s) for ${numRounds} rounds`);
+      console.log(`✓ Starting federated training with ${currentTrainers.length} trainer(s) for ${config.num_rounds} rounds`);
+      console.log('Training parameters:', JSON.stringify(trainingParams, null, 2));
 
       // Start training in background
       orchestratorService.start_training(trainingParams).catch((error: Error) => {
@@ -1297,6 +1324,7 @@ const Training: React.FC = () => {
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
 
+    setIsStoppingTraining(true);
     try {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       await orchestratorService.stop_training();
@@ -1308,6 +1336,8 @@ const Training: React.FC = () => {
       setErrorPopupMessage('Failed to Stop Training');
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while stopping the training');
       setShowErrorPopup(true);
+    } finally {
+      setIsStoppingTraining(false);
     }
   };
 
@@ -1566,8 +1596,9 @@ const Training: React.FC = () => {
                     {orchestrators.filter(o => o.managerId === managerId).map((orch) => (
                       <div key={orch.appId} className="bg-gray-50 p-3 rounded flex items-center justify-between">
                         <div className="flex-1">
-                          <p className="text-sm font-medium">{orch.appId}</p>
-                          <p className="text-xs text-gray-500">{orch.artifactId}</p>
+                          <p className="text-sm font-medium">{orch.displayName || 'Chiron Orchestrator'}</p>
+                          <p className="text-xs text-gray-600 mt-0.5">Application ID: {orch.applicationId || orch.appId}</p>
+                          <p className="text-xs text-gray-500">Artifact: {orch.artifactId}</p>
                           <div className="mt-1">{getStatusBadge(orch.status)}</div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -1612,8 +1643,10 @@ const Training: React.FC = () => {
                         <div key={trainer.appId} className="bg-gray-50 p-3 rounded">
                           <div className="flex items-center justify-between mb-2">
                             <div className="flex-1">
-                              <p className="text-sm font-medium">{trainer.appId}</p>
-                              <p className="text-xs text-gray-500">{Object.keys(trainer.datasets).join(', ')}</p>
+                              <p className="text-sm font-medium">{trainer.displayName || 'Trainer'}</p>
+                              <p className="text-xs text-gray-600 mt-0.5">Application ID: {trainer.applicationId || trainer.appId}</p>
+                              <p className="text-xs text-gray-500">Artifact: {trainer.artifactId}</p>
+                              <p className="text-xs text-gray-500 mt-1">Datasets: {Object.keys(trainer.datasets).join(', ') || 'None'}</p>
                               <div className="mt-1">{getStatusBadge(trainer.status)}</div>
                             </div>
                             <div className="flex items-center gap-2">
@@ -1671,8 +1704,9 @@ const Training: React.FC = () => {
                         className="mr-3"
                       />
                       <div>
-                        <p className="text-sm font-medium">{orch.appId}</p>
-                        <p className="text-xs text-gray-500">{orch.managerId}</p>
+                        <p className="text-sm font-medium">{orch.displayName || 'Chiron Orchestrator'}</p>
+                        <p className="text-xs text-gray-600">App ID: {orch.applicationId || orch.appId}</p>
+                        <p className="text-xs text-gray-500">Worker: {orch.managerId.split('/')[1]?.split(':')[0] || orch.managerId}</p>
                       </div>
                     </label>
                   ))}
@@ -1687,43 +1721,49 @@ const Training: React.FC = () => {
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Trainers (select multiple)
                   {isTraining && <span className="text-xs text-blue-600 ml-2">(Deselecting removes from next round)</span>}
+                  {!selectedOrchestrator && <span className="text-xs text-orange-600 ml-2">(Select orchestrator first)</span>}
+                  {isLoadingRegisteredTrainers && <BiLoaderAlt className="inline ml-2 animate-spin" />}
                 </label>
                 <div className="space-y-2">
-                  {trainers.filter(t => t.status === 'RUNNING').map((trainer) => (
-                    <label key={`${trainer.managerId}::${trainer.appId}`} className="flex items-center p-3 bg-gray-50 rounded cursor-pointer hover:bg-gray-100">
-                      <input
-                        type="checkbox"
-                        checked={selectedTrainers.has(`${trainer.managerId}::${trainer.appId}`)}
-                        onChange={async (e) => {
-                          const id = `${trainer.managerId}::${trainer.appId}`;
-                          const isChecked = e.target.checked;
-                          
-                          // Update state
-                          setSelectedTrainers(prev => {
-                            const newSet = new Set(prev);
+                  {trainers.filter(t => t.status === 'RUNNING').map((trainer) => {
+                    const trainerId = `${trainer.managerId}::${trainer.appId}`;
+                    const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
+                    const isRegistered = registeredTrainers.includes(trainerServiceId);
+                    
+                    return (
+                      <label 
+                        key={trainerId} 
+                        className={`flex items-center p-3 rounded ${
+                          !selectedOrchestrator 
+                            ? 'bg-gray-100 cursor-not-allowed opacity-60' 
+                            : 'bg-gray-50 cursor-pointer hover:bg-gray-100'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isRegistered}
+                          disabled={!selectedOrchestrator || isLoadingRegisteredTrainers}
+                          onChange={async (e) => {
+                            const isChecked = e.target.checked;
+                            
+                            // Register or unregister with orchestrator
                             if (isChecked) {
-                              newSet.add(id);
+                              await registerTrainer(trainerId);
                             } else {
-                              newSet.delete(id);
+                              await unregisterTrainer(trainerId);
                             }
-                            return newSet;
-                          });
-
-                          // Immediately register or unregister
-                          if (isChecked) {
-                            await registerTrainer(id);
-                          } else {
-                            await unregisterTrainer(id);
-                          }
-                        }}
-                        className="mr-3"
-                      />
-                      <div>
-                        <p className="text-sm font-medium">{trainer.appId}</p>
-                        <p className="text-xs text-gray-500">{trainer.managerId} - {Object.keys(trainer.datasets).join(', ')}</p>
-                      </div>
-                    </label>
-                  ))}
+                          }}
+                          className="mr-3"
+                        />
+                        <div className="flex-1">
+                          <p className="text-sm font-medium">{trainer.displayName || 'Trainer'}</p>
+                          <p className="text-xs text-gray-600">App ID: {trainer.applicationId || trainer.appId}</p>
+                          <p className="text-xs text-gray-500">Worker: {trainer.managerId.split('/')[1]?.split(':')[0] || trainer.managerId}</p>
+                          <p className="text-xs text-gray-500">Datasets: {Object.keys(trainer.datasets).join(', ') || 'None'}</p>
+                        </div>
+                      </label>
+                    );
+                  })}
                   {trainers.filter(t => t.status === 'RUNNING').length === 0 && (
                     <p className="text-sm text-gray-500">No running trainers available</p>
                   )}
@@ -1737,85 +1777,36 @@ const Training: React.FC = () => {
       {/* Step 3: Start Training */}
       {selectedOrchestrator && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-          <h2 className="text-xl font-semibold text-gray-900 mb-4">
-            Start Federated Training
-          </h2>
+          {/* Training Configuration Panel */}
+          <TrainingConfigPanel
+            params={trainerParams}
+            loading={trainerParamsLoading}
+            error={trainerParamsError}
+            onStart={startTraining}
+            isPreparingTraining={isPreparingTraining}
+            isTraining={isTraining}
+          />
 
           {/* Training controls */}
-          <div className="mb-6">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Number of Rounds
-                </label>
-                <input
-                  type="number"
-                  value={numRounds}
-                  onChange={(e) => setNumRounds(parseInt(e.target.value) || 1)}
-                  min="1"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                  disabled={isTraining}
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Limit Train Batches (optional)
-                </label>
-                <input
-                  type="number"
-                  value={limitTrainBatches === null ? '' : limitTrainBatches}
-                  onChange={(e) => setLimitTrainBatches(e.target.value === '' ? null : parseInt(e.target.value))}
-                  min="1"
-                  placeholder="All batches"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                  disabled={isTraining}
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Limit Eval Batches (optional)
-                </label>
-                <input
-                  type="number"
-                  value={limitEvalBatches === null ? '' : limitEvalBatches}
-                  onChange={(e) => setLimitEvalBatches(e.target.value === '' ? null : parseInt(e.target.value))}
-                  min="1"
-                  placeholder="All batches"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                  disabled={isTraining}
-                />
-              </div>
-            </div>
-
+          <div className="mb-6 mt-6">
             <div className="flex items-center gap-3">
-              {!isTraining ? (
+              {isTraining && (
                 <button
-                  onClick={startTraining}
-                  disabled={isPreparingTraining || selectedTrainers.size === 0}
-                  className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed flex items-center font-medium"
-                  title={selectedTrainers.size === 0 ? "Please select at least one trainer to start training" : ""}
+                  onClick={stopTraining}
+                  disabled={isStoppingTraining}
+                  className="px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:bg-red-400 disabled:cursor-not-allowed flex items-center font-medium"
                 >
-                  {isPreparingTraining ? (
+                  {isStoppingTraining ? (
                     <>
                       <BiLoaderAlt className="mr-2 animate-spin" />
-                      Preparing...
+                      Stopping...
                     </>
                   ) : (
                     <>
-                      <FaPlay className="mr-2" />
-                      Start Training
+                      <FaStop className="mr-2" />
+                      Stop Training
                     </>
                   )}
-                </button>
-              ) : (
-                <button
-                  onClick={stopTraining}
-                  className="px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center font-medium"
-                >
-                  <FaStop className="mr-2" />
-                  Stop Training
                 </button>
               )}
 
