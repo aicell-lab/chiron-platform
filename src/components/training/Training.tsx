@@ -4,21 +4,57 @@ import { hyphaWebsocketClient } from 'hypha-rpc';
 import { FaNetworkWired, FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
+import WorkerMap from './WorkerMap';
+
+interface WorkerStatus {
+  service_start_time: number;
+  service_uptime: number;
+  worker_mode: string;
+  workspace: string;
+  client_id: string;
+  admin_users: string[];
+  country: string;
+  region: string;
+  is_ready: boolean;
+}
+
+interface ApplicationInfo {
+  display_name?: string;
+  description?: string;
+  artifact_id?: string;
+  version?: string;
+  status?: string;
+  message?: string;
+  deployments?: any[];
+  application_kwargs?: any;
+  application_env_vars?: any;
+  gpu_enabled?: boolean;
+  application_resources?: any;
+  authorized_users?: string[];
+  available_methods?: string[];
+  max_ongoing_requests?: number;
+  service_ids?: any[];
+  start_time?: number;
+  last_updated_by?: string;
+  last_updated_at?: number;
+  auto_redeploy?: boolean;
+}
+
+interface OrchestratorStatus extends ApplicationInfo {
+  application_id?: string;
+}
+
+interface TrainerStatus extends ApplicationInfo {
+  datasets?: Record<string, any>;
+  initial_weights?: any;
+}
 
 interface WorkerInfo {
+  worker_info?: WorkerStatus;
   cluster_status?: ClusterStatus;
   datasets?: Record<string, any>;
-  orchestrator_status?: {
-    status: string;
-    service_ids: any[];
-    artifact_id: string;
-  };
-  trainers_status?: Record<string, {
-    status: string;
-    service_ids: any[];
-    datasets: Record<string, any>;
-    artifact_id: string;
-  }>;
+  orchestrator_status?: OrchestratorStatus;
+  trainers_status?: Record<string, TrainerStatus>;
 }
 
 interface ManagerConnection {
@@ -83,6 +119,10 @@ interface ManagerInfoModalData {
   workspace: string;
   clusterStatus: ClusterStatus | null;
   datasets: Record<string, any>;
+  location?: {
+    country: string;
+    region: string;
+  };
 }
 
 interface OrchestratorInfoModalData {
@@ -1008,7 +1048,11 @@ const Training: React.FC = () => {
         setInfoModalData({
           workspace: manager.workspace,
           clusterStatus: workerInfo.cluster_status || null,
-          datasets: workerInfo.datasets || {}
+          datasets: workerInfo.datasets || {},
+          location: workerInfo.worker_info ? {
+            country: workerInfo.worker_info.country,
+            region: workerInfo.worker_info.region
+          } : undefined
         });
       } else if (type === 'orchestrator') {
         setInfoModalData({
@@ -2230,6 +2274,17 @@ const Training: React.FC = () => {
                 {infoModalType === 'manager' && infoModalData && 'workspace' in infoModalData && (
                   <div>
                     <h4 className="font-medium text-gray-900 mb-2">Workspace: {infoModalData.workspace}</h4>
+
+                    {/* Worker Location Map */}
+                    {infoModalData.location && (
+                      <div className="mb-4">
+                        <h5 className="font-medium text-gray-700 mb-2">Worker Location:</h5>
+                        <WorkerMap 
+                          country={infoModalData.location.country} 
+                          region={infoModalData.location.region} 
+                        />
+                      </div>
+                    )}
 
                     {/* Cluster Status */}
                     {infoModalData.clusterStatus && (
