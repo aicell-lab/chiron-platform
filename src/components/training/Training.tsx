@@ -6,6 +6,46 @@ import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
 import WorkerMap from './WorkerMap';
 
+const CountryFlag: React.FC<{ countryName?: string; className?: string }> = ({ countryName, className }) => {
+  const [flagUrl, setFlagUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!countryName) return;
+    
+    // Check if we have cached this country's flag in session storage to avoid rate limiting
+    const cacheKey = `country_flag_${countryName}`;
+    const cached = sessionStorage.getItem(cacheKey);
+    if (cached) {
+      setFlagUrl(cached);
+      return;
+    }
+
+    fetch(`https://restcountries.com/v3.1/name/${encodeURIComponent(countryName)}?fields=flags`)
+      .then(res => res.json())
+      .then(data => {
+        if (Array.isArray(data) && data.length > 0 && data[0].flags) {
+           const url = data[0].flags.png || data[0].flags.svg;
+           setFlagUrl(url);
+           sessionStorage.setItem(cacheKey, url);
+        }
+      })
+      .catch(err => console.error(`Failed to fetch flag for ${countryName}`, err));
+  }, [countryName]);
+
+  if (!flagUrl) return null;
+  return <img src={flagUrl} alt={`${countryName} flag`} className={className || "w-5 h-auto inline-block"} />;
+};
+
+interface GeoLocation {
+  region: string;
+  country_name: string;
+  country_code: string;
+  continent_code: string;
+  timezone: string;
+  latitude: number;
+  longitude: number;
+}
+
 interface WorkerStatus {
   service_start_time: number;
   service_uptime: number;
@@ -13,8 +53,7 @@ interface WorkerStatus {
   workspace: string;
   client_id: string;
   admin_users: string[];
-  country: string;
-  region: string;
+  geo_location: GeoLocation;
   is_ready: boolean;
 }
 
@@ -120,8 +159,12 @@ interface ManagerInfoModalData {
   clusterStatus: ClusterStatus | null;
   datasets: Record<string, any>;
   location?: {
-    country: string;
     region: string;
+    country_name: string;
+    country_code: string;
+    continent_code: string;
+    latitude: number;
+    longitude: number;
   };
 }
 
@@ -1049,9 +1092,13 @@ const Training: React.FC = () => {
           workspace: manager.workspace,
           clusterStatus: workerInfo.cluster_status || null,
           datasets: workerInfo.datasets || {},
-          location: workerInfo.worker_info ? {
-            country: workerInfo.worker_info.country,
-            region: workerInfo.worker_info.region
+          location: workerInfo.worker_info?.geo_location ? {
+            region: workerInfo.worker_info.geo_location.region,
+            country_name: workerInfo.worker_info.geo_location.country_name,
+            country_code: workerInfo.worker_info.geo_location.country_code,
+            continent_code: workerInfo.worker_info.geo_location.continent_code,
+            latitude: workerInfo.worker_info.geo_location.latitude,
+            longitude: workerInfo.worker_info.geo_location.longitude
           } : undefined
         });
       } else if (type === 'orchestrator') {
@@ -1561,6 +1608,14 @@ const Training: React.FC = () => {
                       )}
                     </div>
                     <p className="text-xs text-gray-500 break-all">Manager ID: {manager.serviceId}</p>
+                    {manager.workerInfo?.worker_info?.geo_location && (
+                      <div className="flex items-center mt-1 text-xs text-gray-500 gap-2">
+                        <CountryFlag countryName={manager.workerInfo.worker_info.geo_location.country_name} className="w-5 h-3 object-cover shadow-sm" />
+                        <span>
+                          {manager.workerInfo.worker_info.geo_location.country_code}, {manager.workerInfo.worker_info.geo_location.continent_code}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -2278,10 +2333,13 @@ const Training: React.FC = () => {
                     {/* Worker Location Map */}
                     {infoModalData.location && (
                       <div className="mb-4">
-                        <h5 className="font-medium text-gray-700 mb-2">Worker Location:</h5>
+                        <h5 className="font-medium text-gray-700 mb-2">Approximate Location:</h5>
                         <WorkerMap 
-                          country={infoModalData.location.country} 
-                          region={infoModalData.location.region} 
+                          country={infoModalData.location.country_name} 
+                          region={infoModalData.location.region}
+                          continent={infoModalData.location.continent_code}
+                          latitude={infoModalData.location.latitude}
+                          longitude={infoModalData.location.longitude}
                         />
                       </div>
                     )}
