@@ -483,15 +483,8 @@ authorized_users:
             </div>
           )}
 
-          {/* ── Step 1: Configure Worker (Container & Compute) ── */}
-          <div className="bg-gradient-to-r from-blue-50 to-purple-50 p-6 rounded-xl border border-blue-200">
-            <h4 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
-              <svg className="w-5 h-5 mr-2 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-              Step 1: Configure Your Worker
-            </h4>
+          {/* ── Configure Worker (Container & Compute) ── */}
+          <div>
 
             {/* Container & Compute */}
             <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
@@ -723,30 +716,21 @@ authorized_users:
             </div>
           </div>
 
-          {/* ── Steps 1–4 ── */}
+          {/* ── Steps 1–3 ── */}
           <div className="space-y-3">
 
-            {/* Step 1: Configure */}
-            <div>
-              <p className="text-sm text-gray-700 font-medium mb-1">1. Configure your worker above</p>
-              <p className="text-xs text-gray-500">
-                Set your OS, container runtime, compute resources, and — if running a Tabula Trainer — your data import directory.
-                Use Advanced Options to set a custom authentication token, workspace, or container image.
-              </p>
-            </div>
-
-            {/* Step 2: docker-compose.yaml */}
+            {/* Step 1: docker-compose.yaml */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <p className="text-sm text-gray-700 font-medium">2. Download docker-compose.yaml</p>
+                <p className="text-sm text-gray-700 font-medium">1. Download docker-compose.yaml</p>
                 <div className="flex items-center space-x-2">
                   <button
                     onClick={async () => {
-                      try { await navigator.clipboard.writeText(getDockerComposeContent()); setCopiedStep2(true); setTimeout(() => setCopiedStep2(false), 2000); } catch (_) {}
+                      try { await navigator.clipboard.writeText(getDockerComposeContent()); setCopiedStep1(true); setTimeout(() => setCopiedStep1(false), 2000); } catch (_) {}
                     }}
                     className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
                   >
-                    {copiedStep2 ? (
+                    {copiedStep1 ? (
                       <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
                     ) : (
                       <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
@@ -771,17 +755,17 @@ authorized_users:
               </p>
             </div>
 
-            {/* Step 3: Environment variables */}
+            {/* Step 2: Environment variables */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <p className="text-sm text-gray-700 font-medium">3. Set environment variables</p>
+                <p className="text-sm text-gray-700 font-medium">2. Set environment variables</p>
                 <button
                   onClick={async () => {
-                    try { await navigator.clipboard.writeText(getEnvSetupCommands()); setCopiedStep3(true); setTimeout(() => setCopiedStep3(false), 2000); } catch (_) {}
+                    try { await navigator.clipboard.writeText(getEnvSetupCommands()); setCopiedStep2(true); setTimeout(() => setCopiedStep2(false), 2000); } catch (_) {}
                   }}
                   className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
                 >
-                  {copiedStep3 ? (
+                  {copiedStep2 ? (
                     <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
                   ) : (
                     <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
@@ -796,17 +780,17 @@ authorized_users:
               </p>
             </div>
 
-            {/* Step 4: Start */}
+            {/* Step 3: Start */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <p className="text-sm text-gray-700 font-medium">4. Start BioEngine</p>
+                <p className="text-sm text-gray-700 font-medium">3. Start BioEngine</p>
                 <button
                   onClick={async () => {
-                    try { await navigator.clipboard.writeText(getRunCommand()); setCopiedStep4(true); setTimeout(() => setCopiedStep4(false), 2000); } catch (_) {}
+                    try { await navigator.clipboard.writeText(getRunCommand()); setCopiedStep3(true); setTimeout(() => setCopiedStep3(false), 2000); } catch (_) {}
                   }}
                   className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
                 >
-                  {copiedStep4 ? (
+                  {copiedStep3 ? (
                     <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
                   ) : (
                     <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
