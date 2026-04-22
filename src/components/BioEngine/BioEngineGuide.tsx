@@ -518,11 +518,14 @@ Please help me troubleshoot this BioEngine Worker setup. Provide step-by-step gu
               <svg className="w-5 h-5 mr-2 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
               </svg>
-              Prepare Your Data Import Directory (Optional)
+              Prepare Your Data Import Directory
             </h4>
-            
+
             <p className="text-sm text-gray-700 mb-4">
-              Optionally, you can organize your single-cell datasets in a data import directory. Data from this directory will be automatically copied to the workspace directory where a local S3-compatible storage is hosted. Each dataset folder must contain a <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">manifest.yaml</code> file and either <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.h5ad</code> (AnnData) or <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> files. Both formats are supported. If the same file exists in both formats, <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> is used. If no zarr file is provided, one will be generated automatically when starting the data server.
+              Local single-cell data is required to run a <strong>Tabula Trainer</strong> (the federated learning client). If you are only hosting an <strong>Orchestrator</strong> — which coordinates training across sites but does not train locally — you do not need any local data and can leave this empty.
+            </p>
+            <p className="text-sm text-gray-700 mb-4">
+              Organize your datasets in a data import directory. Data will be automatically copied to the workspace directory, where a local S3-compatible storage server makes it accessible to the training container. Each dataset folder must contain a <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">manifest.yaml</code> file and either <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.h5ad</code> (AnnData) or <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> files. If both formats are present, <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> takes precedence. If only <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.h5ad</code> files are provided, a Zarr conversion is generated automatically on first start.
             </p>
 
             {/* Collapsible Example Section */}
@@ -599,7 +602,7 @@ authorized_users:
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {/* Data Import Directory */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Data Import Directory (Optional)</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Data Import Directory</label>
                 <input
                   type="text"
                   value={dataDir}
@@ -608,7 +611,7 @@ authorized_users:
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
                 <p className="text-xs text-gray-500 mt-1">
-                  Data will be imported to workspace directory
+                  Path to your local single-cell datasets for model training. Leave empty if hosting an Orchestrator only.
                 </p>
               </div>
 
