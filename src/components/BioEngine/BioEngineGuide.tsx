@@ -780,6 +780,9 @@ authorized_users:
                 {getEnvSetupCommands()}
               </pre>
             </div>
+            <p className="text-xs text-amber-700 mt-2">
+              The authentication token expires after <strong>30 days</strong>. Regenerate it in Advanced Options when needed, then update <code className="bg-amber-100 px-1 rounded">HYPHA_TOKEN</code> and restart the worker.
+            </p>
           </div>
 
           {/* ── Step 4: Start BioEngine ── */}
@@ -806,56 +809,6 @@ authorized_users:
             <p className="text-xs text-purple-600 mt-2">
               To run in the background: <code className="bg-purple-100 px-1 rounded">{getRunCommand()} -d</code>. View logs: <code className="bg-purple-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose logs -f' : 'podman-compose logs -f'}</code>. Stop: <code className="bg-purple-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose down' : 'podman-compose down'}</code>.
             </p>
-          </div>
-
-          {/* ── Prerequisites & Notes ── */}
-          <div className="p-4 bg-blue-50 rounded-xl border border-blue-200">
-            <div className="flex items-start">
-              <svg className="w-5 h-5 text-blue-600 mr-2 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <div className="text-sm text-blue-800">
-                <p className="font-medium mb-2">Prerequisites &amp; Notes</p>
-                <ul className="list-disc list-inside space-y-1.5 text-blue-700 text-xs">
-                  <li>
-                    <strong>{containerRuntime.charAt(0).toUpperCase() + containerRuntime.slice(1)}</strong> and{' '}
-                    <strong>{containerRuntime === 'docker' ? 'Docker Compose' : 'podman-compose'}</strong> must be installed and running.
-                  </li>
-                  {gpus > 0 && (
-                    <li>
-                      GPU mode requires the <strong>NVIDIA Container Toolkit</strong> on the host. Install it from{' '}
-                      <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html" target="_blank" rel="noopener noreferrer" className="underline hover:text-blue-900">
-                        the NVIDIA documentation
-                      </a>.
-                    </li>
-                  )}
-                  <li>
-                    The authentication token expires after <strong>30 days</strong>. Regenerate it in Advanced Options when needed, then update the <code className="bg-blue-100 px-1 rounded">HYPHA_TOKEN</code> environment variable and restart the worker.
-                  </li>
-                  <li>
-                    The <strong>BioEngine Workspace Directory</strong> (<code className="bg-blue-100 px-1 rounded">{getWorkspaceDirPath()}</code>) is mounted into both containers. It stores app data, dataset files, and Ray cluster temporary files. Ensure it is on a disk with sufficient space.
-                  </li>
-                  {dataDir && (
-                    <li>
-                      Dataset files from <code className="bg-blue-100 px-1 rounded">{dataDir}</code> will be automatically imported into the workspace S3 storage on first startup. Large datasets may take a few minutes to copy.
-                    </li>
-                  )}
-                  <li>
-                    The <strong>data-server</strong> service provides a local S3-compatible storage layer and must pass its health check before the <strong>worker</strong> service starts. If the data-server fails to start, check its logs with{' '}
-                    <code className="bg-blue-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose logs data-server' : 'podman-compose logs data-server'}</code>.
-                  </li>
-                  <li>
-                    A <strong>Tabula Trainer</strong> requires at least <strong>1 GPU</strong> for local model training. An <strong>Orchestrator</strong> runs on CPU only (set GPUs to 0) and coordinates training across multiple Trainer sites without holding local data.
-                  </li>
-                  <li>
-                    After starting, the worker connects to the Chiron platform automatically. Manage federated training sessions at{' '}
-                    <a href="https://chiron.aicell.io/#/training" target="_blank" rel="noopener noreferrer" className="underline hover:text-blue-900">
-                      chiron.aicell.io/#/training
-                    </a>.
-                  </li>
-                </ul>
-              </div>
-            </div>
           </div>
 
           {/* ── Troubleshooting Button ── */}
