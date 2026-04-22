@@ -1,21 +1,14 @@
 import React, { useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import LoginButton from './LoginButton';
 import { BiCube } from 'react-icons/bi';
-import { BsDatabase, BsCollection } from 'react-icons/bs';
-import { HiOutlineBeaker } from 'react-icons/hi';
-import { IoDocumentTextOutline, IoCloudUploadOutline } from 'react-icons/io5';
 import { TbEngine } from 'react-icons/tb';
 import { RiTestTubeLine } from 'react-icons/ri';
-import { RiLoginBoxLine } from 'react-icons/ri';
 import { FaGraduationCap } from 'react-icons/fa';
-import { useHyphaStore } from '../store/hyphaStore';
 
 const Navbar: React.FC = () => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const location = useLocation();
-  const navigate = useNavigate();
-  const { user } = useHyphaStore();
 
   const isActivePath = (path: string): boolean => {
     return location.pathname.startsWith(path);
@@ -53,51 +46,30 @@ const Navbar: React.FC = () => {
 
           {/* Center section with navigation */}
           <div className="hidden md:flex items-center space-x-4">
-            <Link to="/models" className={navLinkClasses("/models")}>
-              <BiCube className="mr-2" size={20} />
-              Models
-            </Link>
-            <Link to="/datasets" className={navLinkClasses("/datasets")}>
-              <BsDatabase className="mr-2" size={18} />
-              Datasets
-            </Link>
-            <Link to="/bioengine" className={navLinkClasses("/bioengine")}>
-              <TbEngine className="mr-2" size={20} />
-              BioEngine
+            <Link to="/worker" className={navLinkClasses("/worker")}>
+              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+                <TbEngine size={20} />
+              </span>
+              Worker
             </Link>
             <Link to="/training" className={navLinkClasses("/training")}>
-              <FaGraduationCap className="mr-2" size={20} />
+              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+                <FaGraduationCap size={20} />
+              </span>
               Training
             </Link>
             <Link to="/lab" className={navLinkClasses("/lab")}>
-              <RiTestTubeLine className="mr-2" size={20} />
+              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+                <RiTestTubeLine size={20} />
+              </span>
               Chiron Lab
             </Link>
           </div>
 
           {/* Right section with auth buttons */}
           <div className="flex items-center space-x-4">
-            {/* Move Upload and Login buttons to desktop-only view */}
+            {/* Login button desktop-only */}
             <div className="hidden md:flex items-center space-x-4">
-              
-              {location.pathname !== '/upload' && (
-                <Link
-                  to="/upload"
-                  className="hover:bg-gray-50 px-4 py-2 rounded-md flex items-center"
-                >
-                  <IoCloudUploadOutline className="mr-2" size={18} />
-                  Upload
-                </Link>
-              )}
-              {user?.email && location.pathname !== '/my-artifacts' && (
-                <Link
-                  to="/my-artifacts"
-                  className="hover:bg-gray-50 px-4 py-2 rounded-md flex items-center"
-                >
-                  <BsCollection className="mr-2" size={18} />
-                  Artifacts
-                </Link>
-              )}
               <LoginButton />
             </div>
             
@@ -118,74 +90,38 @@ const Navbar: React.FC = () => {
         {/* Mobile menu */}
         <div className={`md:hidden ${isMobileMenuOpen ? 'block' : 'hidden'}`}>
           <div className="px-2 pt-2 pb-3 space-y-1">
-            {user?.email && (
-              <Link 
-                to="/my-artifacts" 
-                className={mobileNavLinkClasses("/my-artifacts")}
-                onClick={() => setIsMobileMenuOpen(false)}
-              >
-                <BsCollection className="mr-2" size={18} />
-                Artifacts
-              </Link>
-            )}
             <Link 
-              to="/upload" 
-              className={mobileNavLinkClasses("/upload")}
-              onClick={() => setIsMobileMenuOpen(false)}
+              to="/worker" 
+              className={mobileNavLinkClasses("/worker")}
             >
-              <IoCloudUploadOutline className="mr-2" size={18} />
-              Upload
-            </Link>
-            <Link 
-              to="/models" 
-              className={mobileNavLinkClasses("/models")}
-            >
-              <BiCube className="mr-2" size={20} />
-              Models
-            </Link>
-            <Link 
-              to="/datasets" 
-              className={mobileNavLinkClasses("/datasets")}
-            >
-              <BsDatabase className="mr-2" size={18} />
-              Datasets
-            </Link>
-            <Link 
-              to="/bioengine" 
-              className={mobileNavLinkClasses("/bioengine")}
-            >
-              <TbEngine className="mr-2" size={20} />
-              BioEngine
+              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+                <TbEngine size={20} />
+              </span>
+              Worker
             </Link>
             <Link 
               to="/training" 
               className={mobileNavLinkClasses("/training")}
             >
-              <FaGraduationCap className="mr-2" size={20} />
+              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+                <FaGraduationCap size={20} />
+              </span>
               Training
             </Link>
             <Link 
               to="/lab" 
               className={mobileNavLinkClasses("/lab")}
             >
-              <RiTestTubeLine className="mr-2" size={20} />
+              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+                <RiTestTubeLine size={20} />
+              </span>
               Chiron Lab
             </Link>
 
             {/* Add divider */}
             <div className="border-t border-gray-200 my-2"></div>
 
-            {/* Add Upload and Login buttons to mobile menu */}
-            {location.pathname !== '/upload' && (
-              <Link 
-                to="/upload" 
-                className={mobileNavLinkClasses("/upload")}
-                onClick={() => setIsMobileMenuOpen(false)}
-              >
-                <IoCloudUploadOutline className="mr-2" size={18} />
-                Upload
-              </Link>
-            )}
+            {/* Login button in mobile menu */}
             <div className="px-3 py-2">
               <LoginButton />
             </div>

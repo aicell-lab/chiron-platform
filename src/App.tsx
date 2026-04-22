@@ -7,8 +7,6 @@ import ResourceDetails from './components/ResourceDetails';
 import Snackbar from './components/Snackbar';
 import About from './components/About';
 import Footer from './components/Footer';
-import Upload from './components/Upload';
-import MyArtifacts from './components/MyArtifacts';
 import Edit from './components/Edit';
 import './index.css'
 import './github-markdown.css'
@@ -81,17 +79,15 @@ const AppContent: React.FC = () => {
           <Route path="/" element={<ResourceGrid />} />
           <Route path="/resources/:id" element={<ResourceDetails />} />
           <Route path="/about" element={<About />} />
-          <Route path="/models" element={<ResourceGrid type="model" />} />
           <Route path="/workers" element={<ResourceGrid type="worker" />} />
           <Route path="/notebooks" element={<ResourceGrid type="notebook" />} />
-          <Route path="/datasets" element={<ResourceGrid type="dataset" />} />
-          <Route path="/upload" element={<Upload />} />
-          <Route path="/my-artifacts" element={<MyArtifacts />} />
           <Route path="/edit/:artifactId" element={<Edit />} />
           <Route path="/model-trainer/:id" element={<ModelTrainer />} />
           <Route path="/manage-worker/:artifactId" element={<ManageWorker />} />
-          <Route path="/bioengine" element={<BioEngineHome />} />
-          <Route path="/bioengine/worker" element={<BioEngineWorker />} />
+          <Route path="/worker" element={<BioEngineHome />} />
+          <Route path="/worker/dashboard" element={<BioEngineWorker />} />
+          <Route path="/bioengine" element={<Navigate to="/worker" replace />} />
+          <Route path="/bioengine/worker" element={<Navigate to="/worker/dashboard" replace />} />
           <Route path="/orchestrator" element={<Orchestrator />} />
           <Route path="/training" element={<Training />} />
         </Routes>

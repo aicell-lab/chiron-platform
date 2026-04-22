@@ -204,7 +204,7 @@ const BioEngineWorker: React.FC = () => {
       }
     } else {
       // If no service ID, redirect to home
-      navigate('/bioengine');
+      navigate('/worker');
     }
   }, [serviceId, server, isLoggedIn, autoRefreshEnabled]);
 
@@ -411,7 +411,7 @@ const BioEngineWorker: React.FC = () => {
       
       if (isServiceUnavailable) {
         console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
-        navigate('/bioengine');
+        navigate('/worker');
         return;
       }
       
@@ -463,7 +463,7 @@ const BioEngineWorker: React.FC = () => {
 
       if (isServiceUnavailable) {
         console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
-        navigate('/bioengine');
+        navigate('/worker');
         return;
       }
 
@@ -545,7 +545,7 @@ const BioEngineWorker: React.FC = () => {
 
       if (isServiceUnavailable) {
         console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
-        navigate('/bioengine');
+        navigate('/worker');
         return;
       }
 
@@ -846,7 +846,7 @@ const BioEngineWorker: React.FC = () => {
           <div>
             <div className="flex items-center mb-2">
               <button
-                onClick={() => navigate('/bioengine')}
+                onClick={() => navigate('/worker')}
                 className="flex items-center text-blue-600 hover:text-blue-800 transition-colors duration-200 mr-4"
                 title="Back to BioEngine Home"
               >
@@ -855,7 +855,7 @@ const BioEngineWorker: React.FC = () => {
                 </svg>
                 <span className="text-sm font-medium">Back</span>
               </button>
-              <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent cursor-pointer" onClick={() => navigate('/bioengine')}>
+              <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent cursor-pointer" onClick={() => navigate('/worker')}>
                 BioEngine Worker Dashboard
               </h1>
             </div>

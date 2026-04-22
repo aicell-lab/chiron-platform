@@ -151,7 +151,7 @@ const BioEngineGuide: React.FC = () => {
       '--startup-applications "{\\"artifact_id\\": \\"chiron-platform/chiron-manager\\", \\"application_id\\": \\"chiron-manager\\"}"',
       adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
       workspace ? `--workspace ${workspace}` : '',
-      '--dashboard-url https://chiron.aicell.io/#/bioengine'
+      '--dashboard-url https://chiron.aicell.io/#/worker'
     ].filter(Boolean).join('\n      ');
 
     return `version: "3.8"

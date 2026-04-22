@@ -545,10 +545,10 @@ const Orchestrator: React.FC = () => {
             <p className="text-gray-600">{error}</p>
           </div>
           <button
-            onClick={() => navigate('/bioengine')}
+            onClick={() => navigate('/worker')}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
           >
-            Back to BioEngine
+            Back to Worker
           </button>
         </div>
       </div>
@@ -569,7 +569,7 @@ const Orchestrator: React.FC = () => {
             <div>
               <div className="flex items-center mb-2">
                 <button
-                  onClick={() => navigate('/bioengine')}
+                  onClick={() => navigate('/worker')}
                   className="flex items-center text-blue-600 hover:text-blue-800 transition-colors duration-200 mr-4"
                 >
                   <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">

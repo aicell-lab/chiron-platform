@@ -196,7 +196,7 @@ const BioEngineHome: React.FC = () => {
   };
 
   const navigateToDashboard = (serviceId: string) => {
-    navigate(`/bioengine/worker?service_id=${serviceId}`);
+    navigate(`/worker/dashboard?service_id=${serviceId}`);
   };
 
   const handleCustomServiceIdSubmit = async (event: React.FormEvent) => {

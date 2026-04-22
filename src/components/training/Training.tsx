@@ -85,7 +85,6 @@ interface OrchestratorStatus extends ApplicationInfo {
 
 interface TrainerStatus extends ApplicationInfo {
   datasets?: Record<string, any>;
-  initial_weights?: any;
 }
 
 interface WorkerInfo {
@@ -210,7 +209,6 @@ const Training: React.FC = () => {
   const [newOrchestratorArtifactId, setNewOrchestratorArtifactId] = useState('chiron-platform/tabula-trainer');
   const [newTrainerDatasets, setNewTrainerDatasets] = useState<string[]>([]);
   const [newTrainerArtifactId, setNewTrainerArtifactId] = useState('chiron-platform/tabula-trainer');
-  const [newTrainerInitialWeights, setNewTrainerInitialWeights] = useState('');
 
   // Per-worker timers for status updates
   const [workerTimers, setWorkerTimers] = useState<Record<string, NodeJS.Timeout>>({});
@@ -852,7 +850,6 @@ const Training: React.FC = () => {
         token: applicationToken,
         datasets: newTrainerDatasets,
         trainer_artifact_id: newTrainerArtifactId,
-        initial_weights: newTrainerInitialWeights || null,
         _rkwargs: true
       });
 
@@ -901,7 +898,6 @@ const Training: React.FC = () => {
       setShowCreateTrainer(false);
       setCreatingFor(null);
       setNewTrainerDatasets([]);
-      setNewTrainerInitialWeights('');
       setIsCreatingTrainer(false);
     } catch (error) {
       console.error('Failed to create trainer:', error);
@@ -2257,26 +2253,12 @@ const Training: React.FC = () => {
               />
             </div>
 
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Initial Weights (optional)
-              </label>
-              <input
-                type="text"
-                value={newTrainerInitialWeights}
-                onChange={(e) => setNewTrainerInitialWeights(e.target.value)}
-                placeholder="Leave empty for default"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-              />
-            </div>
-
             <div className="flex gap-2">
               <button
                 onClick={() => {
                   setShowCreateTrainer(false);
                   setCreatingFor(null);
                   setNewTrainerDatasets([]);
-                  setNewTrainerInitialWeights('');
                 }}
                 disabled={isCreatingTrainer}
                 className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:bg-gray-200 disabled:cursor-not-allowed"
