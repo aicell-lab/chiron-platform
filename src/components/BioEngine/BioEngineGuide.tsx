@@ -27,7 +27,6 @@ const BioEngineGuide: React.FC = () => {
   const [copiedStep4, setCopiedStep4] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showDataExample, setShowDataExample] = useState(false);
   const [showTroubleshooting, setShowTroubleshooting] = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
   const [timezone, setTimezone] = useState('');
@@ -365,64 +364,6 @@ ${getRunCommand()}
       {isExpanded && (
         <div className="mt-4 space-y-6">
 
-          {/* ── Prepare Your Data Import Directory ── */}
-          <div className="bg-gradient-to-r from-green-50 to-teal-50 p-6 rounded-xl border border-green-200">
-            <h4 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">
-              <svg className="w-5 h-5 mr-2 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-              </svg>
-              Prepare Your Data Import Directory
-            </h4>
-
-            <p className="text-sm text-gray-700 mb-3">
-              Local single-cell data is required to run a <strong>Tabula Trainer</strong> — the federated learning client that trains the model on your data.
-              If you are only hosting an <strong>Orchestrator</strong> — which coordinates training rounds across sites but does not train locally — you do not need local data and can leave the Data Import Directory empty.
-            </p>
-            <p className="text-sm text-gray-700 mb-4">
-              Organize datasets in a data import directory. Data is automatically copied to the workspace directory at startup, where a local S3-compatible storage server makes it accessible to the training container.
-              Each dataset folder must contain a <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">manifest.yaml</code> file and either <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.h5ad</code> (AnnData) or <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> files. If both are present, <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.zarr</code> takes precedence; if only <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">.h5ad</code> files are provided, a Zarr conversion is generated automatically on first start.
-            </p>
-
-            <button
-              onClick={() => setShowDataExample(!showDataExample)}
-              className="flex items-center text-sm text-green-700 hover:text-green-900 transition-colors duration-200 mb-3"
-            >
-              <svg className={`w-4 h-4 mr-2 transition-transform duration-200 ${showDataExample ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
-              {showDataExample ? 'Hide' : 'Show'} example data structure
-            </button>
-
-            {showDataExample && (
-              <div className="space-y-4">
-                <div className="bg-gray-900 rounded-lg p-4">
-                  <pre className="text-green-400 text-sm font-mono overflow-x-auto whitespace-pre">{`/path/to/data/
-├── dataset1/
-│   ├── anndata1.h5ad
-│   ├── anndata2.h5ad
-│   └── manifest.yaml         # Required: dataset metadata
-└── dataset2/
-    ├── data1.zarr/
-    ├── data2.zarr/
-    └── manifest.yaml         # Required: dataset metadata`}</pre>
-                </div>
-
-                <div className="bg-white rounded-lg p-4 border border-green-100">
-                  <h5 className="text-sm font-semibold text-gray-800 mb-2">Example manifest.yaml</h5>
-                  <pre className="text-gray-700 text-xs font-mono overflow-x-auto whitespace-pre bg-gray-50 p-3 rounded">{`id: blood-perturb-rna
-name: Blood-Perturb-RNA
-description: CRISPR perturbation screen in human HSPCs with scRNA-seq.
-authorized_users:
-  - user@example.com
-  - "*"  # Use "*" for public access`}</pre>
-                  <p className="text-xs text-gray-500 mt-2">
-                    See the <a href="https://github.com/aicell-lab/bioengine-worker/blob/main/bioengine/datasets/README.md" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Datasets Documentation</a> for full manifest options.
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
-
           {/* ── Container runtime required (orange info box) ── */}
           <div className="p-4 bg-orange-50 rounded-xl border border-orange-200">
             <p className="text-sm font-semibold text-orange-800 mb-1">Container runtime required</p>
@@ -437,6 +378,21 @@ authorized_users:
                 </a>.
               </p>
             )}
+          </div>
+
+          {/* ── Data Import Directory (blue info box) ── */}
+          <div className="p-4 bg-blue-50 rounded-xl border border-blue-200">
+            <div className="flex items-start">
+              <svg className="w-4 h-4 text-blue-500 mr-2 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div className="text-sm text-blue-800">
+                <span className="font-medium">Data Import Directory</span>
+                <span className="text-blue-700 text-xs block mt-1">
+                  A <strong>Tabula Trainer</strong> requires a local directory of single-cell datasets (<code className="bg-blue-100 px-1 rounded">.h5ad</code> or <code className="bg-blue-100 px-1 rounded">.zarr</code>). An <strong>Orchestrator</strong> coordinates training across sites without local data — leave the field empty. Each dataset folder must contain a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>; if only <code className="bg-blue-100 px-1 rounded">.h5ad</code> files are present, a Zarr conversion is generated automatically on first start. See the <a href="https://github.com/aicell-lab/bioengine-worker/blob/main/bioengine/datasets/README.md" target="_blank" rel="noopener noreferrer" className="underline hover:text-blue-900">Datasets Documentation</a> for manifest options.
+                </span>
+              </div>
+            </div>
           </div>
 
           {/* ── BioEngine Workspace Directory (blue info box) ── */}
