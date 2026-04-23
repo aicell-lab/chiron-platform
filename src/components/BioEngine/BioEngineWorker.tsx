@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useHyphaStore } from '../../store/hyphaStore';
 import BioEngineClusterResources from './BioEngineClusterResources';
 import BioEngineApps from './BioEngineApps';
+import DeploymentConfigModal from './DeploymentConfigModal';
 
 
 // Add custom animations
@@ -63,8 +64,8 @@ type ServiceStatus = {
     used_cpu: number;
     total_gpu: number;
     used_gpu: number;
-    total_gpu_memory: number | string;
-    used_gpu_memory: number | string;
+    total_gpu_memory: number | string;  // in bytes or "NA"
+    used_gpu_memory: number | string;   // in bytes or "NA"
     total_memory: number;
     used_memory: number;
     total_object_store_memory: number;
@@ -73,35 +74,35 @@ type ServiceStatus = {
     slurm_job_id?: string | null;
   }>;
   ray_cluster?: {
-    head_address: string;
-    start_time: number | "N/A";
+    head_address?: string;
+    start_time?: number | "N/A";
     mode?: string;  // Legacy, now use worker_mode at top level
-    cluster: {
-      total_gpu: number;
-      available_gpu: number;
-      total_cpu: number;
-      available_cpu: number;
-      total_memory: number;
-      available_memory: number;
-      total_object_store_memory: number;
-      available_object_store_memory: number;
-      pending_resources: {
+    cluster?: {
+      total_gpu?: number;
+      available_gpu?: number;
+      total_cpu?: number;
+      available_cpu?: number;
+      total_memory?: number;
+      available_memory?: number;
+      total_object_store_memory?: number;
+      available_object_store_memory?: number;
+      pending_resources?: {
         actors: any[];
         jobs: any[];
         tasks: any[];
         total: number;
       };
     };
-    nodes: Record<string, {
-      node_ip: string;
-      total_cpu: number;
-      available_cpu: number;
-      total_gpu: number;
-      available_gpu: number;
-      total_memory: number;
-      available_memory: number;
-      total_object_store_memory: number;
-      available_object_store_memory: number;
+    nodes?: Record<string, {
+      node_ip?: string;
+      total_cpu?: number;
+      available_cpu?: number;
+      total_gpu?: number;
+      available_gpu?: number;
+      total_memory?: number;
+      available_memory?: number;
+      total_object_store_memory?: number;
+      available_object_store_memory?: number;
       accelerator_type?: string;
       slurm_job_id?: string;
     }>;
@@ -120,9 +121,11 @@ type DeploymentType = {
   deployment_name: string;
   artifact_id: string;
   start_time: number;
+  last_updated_at?: number;
   status: string;
   available_methods?: string[];
   replica_states?: Record<string, number>;
+  static_site_url?: string | null;
   manifest?: {
     id_emoji?: string;
     name?: string;
@@ -173,6 +176,8 @@ const BioEngineWorker: React.FC = () => {
   const [loginErrorTimeout, setLoginErrorTimeout] = useState<NodeJS.Timeout | null>(null);
   const [currentTime, setCurrentTime] = useState(Date.now());
   const [workerMcpCopied, setWorkerMcpCopied] = useState(false);
+  const [showDeployConfig, setShowDeployConfig] = useState(false);
+  const [pendingDeployment, setPendingDeployment] = useState<{artifactId: string, mode: string | null, applicationId?: string} | null>(null);
 
   // Update current time every second for live uptime calculation
   useEffect(() => {
@@ -301,12 +306,12 @@ const BioEngineWorker: React.FC = () => {
         setLoading(true);
       }
 
-      const bioengineWorker = await server.getService(serviceId, {mode: "last"});
+      const bioengineWorker = await server.getService(serviceId, {mode: "random"});
       let statusData = await bioengineWorker.get_status();
 
-      // Fetch deployed applications using new get_application_status API
+      // Fetch deployed applications using new get_app_status API
       try {
-        const appStatus = await bioengineWorker.get_application_status({ _rkwargs: true });
+        const appStatus = await bioengineWorker.get_app_status({ _rkwargs: true });
         console.log('Application status:', appStatus);
 
         // Merge application status into statusData.bioengine_apps
@@ -331,9 +336,11 @@ const BioEngineWorker: React.FC = () => {
                 deployment_name: app.deployment_name || appId,
                 status: app.status || 'UNKNOWN',
                 start_time: app.start_time,
+                last_updated_at: app.last_updated_at,
                 service_ids: serviceIds,
                 available_methods: app.available_methods || app.methods,
                 replica_states: app.replica_states,
+                static_site_url: app.static_site_url,
                 resources: app.resources
               };
             }
@@ -454,11 +461,12 @@ const BioEngineWorker: React.FC = () => {
     }
   };
 
-  const handleDeployArtifact = async (artifactId: string, mode: string | null = null) => {
+  const executeDeployment = async (config: any) => {
     if (!serviceId || !isLoggedIn) return;
-
-    const deployMode = mode || artifactModes[artifactId] || null;
-
+    
+    // config contains artifact_id and other params
+    const artifactId = config.artifact_id;
+    
     try {
       setDeploymentError(null); // Clear any previous errors
 
@@ -466,14 +474,8 @@ const BioEngineWorker: React.FC = () => {
 
       const bioengineWorker = await server.getService(serviceId);
 
-      // Use new run_application API
-      // deployMode 'cpu' means disable_gpu=true, 'gpu' means disable_gpu=false
-      const disable_gpu = deployMode === 'cpu';
-
-      await bioengineWorker.run_application({
-        artifact_id: artifactId,
-        disable_gpu: disable_gpu,
-        max_ongoing_requests: 10,
+      await bioengineWorker.deploy_app({
+        ...config,
         _rkwargs: true
       });
 
@@ -481,7 +483,7 @@ const BioEngineWorker: React.FC = () => {
       await fetchStatus(false);
 
       setDeployingArtifactId(null);
-      console.log(`Successfully submitted deployment for ${artifactId} in ${deployMode || 'default'} mode`);
+      console.log(`Successfully submitted deployment for ${artifactId}`);
     } catch (err) {
       console.error('Deployment failed:', err);
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -504,6 +506,24 @@ const BioEngineWorker: React.FC = () => {
     }
   };
 
+  const handleDeployArtifact = (artifactId: string, mode: string | null = null) => {
+     const deployMode = mode || artifactModes[artifactId] || null;
+      const currentDeployments = status?.bioengine_apps || {};
+      const deployedEntry = Object.entries(currentDeployments).find(([key, value]) => {
+      if (key === 'service_id' || key === 'note') return false;
+      if (!value || typeof value !== 'object') return false;
+      return (value as any).artifact_id === artifactId;
+      });
+
+      const existingApplicationId = deployedEntry ? deployedEntry[0] : undefined;
+      setPendingDeployment({
+      artifactId,
+      mode: deployMode,
+      applicationId: existingApplicationId,
+      });
+     setShowDeployConfig(true);
+  };
+
   const handleModeChange = (artifactId: string, checked: boolean) => {
     setArtifactModes({
       ...artifactModes,
@@ -513,13 +533,25 @@ const BioEngineWorker: React.FC = () => {
 
   // Helper functions for deployment state
   const isArtifactDeployed = (artifactId: string): boolean => {
-    return !!(status?.bioengine_apps && artifactId in status.bioengine_apps);
+    if (!status?.bioengine_apps) return false;
+    return Object.entries(status.bioengine_apps).some(([key, value]) => {
+      if (key === 'service_id' || key === 'note') return false;
+      if (!value || typeof value !== 'object') return false;
+      return (value as any).artifact_id === artifactId;
+    });
   };
 
   const getDeploymentStatus = (artifactId: string): string | null => {
-    if (!status?.bioengine_apps || !(artifactId in status.bioengine_apps)) return null;
-    const deployment = status.bioengine_apps[artifactId];
-    return typeof deployment === 'object' && deployment !== null ? deployment.status : null;
+    if (!status?.bioengine_apps) return null;
+    const deploymentEntry = Object.entries(status.bioengine_apps).find(([key, value]) => {
+      if (key === 'service_id' || key === 'note') return false;
+      if (!value || typeof value !== 'object') return false;
+      return (value as any).artifact_id === artifactId;
+    });
+
+    if (!deploymentEntry) return null;
+    const deployment = deploymentEntry[1] as any;
+    return deployment?.status || null;
   };
 
   const isDeployButtonDisabled = (artifactId: string): boolean => {
@@ -553,8 +585,7 @@ const BioEngineWorker: React.FC = () => {
       setUndeployingArtifactId(applicationId);
 
       const bioengineWorker = await server.getService(serviceId);
-      // Use new stop_application API
-      await bioengineWorker.stop_application({
+      await bioengineWorker.stop_app({
         application_id: applicationId,
         _rkwargs: true
       });
@@ -763,6 +794,35 @@ const BioEngineWorker: React.FC = () => {
     fetchStatus(false);
   };
 
+  const fetchApplicationStatus = async (params: {
+    application_ids?: string[];
+    logs_tail?: number;
+    n_previous_replica?: number;
+  }) => {
+    if (!serviceId || !isLoggedIn) {
+      throw new Error('Service unavailable or user not logged in');
+    }
+
+    const bioengineWorker = await server.getService(serviceId, { mode: 'random' });
+    const result = await bioengineWorker.get_app_status({
+      ...params,
+      _rkwargs: true,
+    });
+
+    if (params.application_ids && params.application_ids.length === 1) {
+      return result;
+    }
+
+    if (result && typeof result === 'object' && params.application_ids && params.application_ids.length > 0) {
+      const firstId = params.application_ids[0];
+      if (firstId && result[firstId]) {
+        return result[firstId];
+      }
+    }
+
+    return result;
+  };
+
   // Helper function to get worker service info URL
   const getWorkerServiceInfoUrl = (): string | null => {
     if (!serviceId) return null;
@@ -935,77 +995,79 @@ const BioEngineWorker: React.FC = () => {
                 )}
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Service ID from URL */}
-                {serviceId && (
-                  <div className="md:col-span-2">
-                    <span className="text-xs font-medium text-gray-500 block">Service ID</span>
-                    <span className="text-sm font-semibold text-gray-900 font-mono break-all">{serviceId}</span>
-                  </div>
-                )}
-                {/* Use new workspace and client_id fields if available */}
-                {status?.workspace && (
-                  <div>
-                    <span className="text-xs font-medium text-gray-500 block">Workspace</span>
-                    <span className="text-sm font-semibold text-gray-900 font-mono break-all">{status.workspace}</span>
-                  </div>
-                )}
-                {status?.client_id && (
-                  <div>
-                    <span className="text-xs font-medium text-gray-500 block">Client ID</span>
-                    <span className="text-sm font-semibold text-gray-900 font-mono break-all">{status.client_id}</span>
-                  </div>
-                )}
-                {/* Fallback to parsing service ID if new fields not available */}
-                {!status?.workspace && serviceId && (() => {
-                  const { workspace, clientId, serviceName } = getCompleteServiceInfo(serviceId, status?.bioengine_apps?.service_id);
-                  return (
-                    <>
-                      <div>
-                        <span className="text-xs font-medium text-gray-500 block">Workspace</span>
-                        <span className="text-sm font-semibold text-gray-900 font-mono break-all">{workspace}</span>
-                      </div>
-                      <div>
-                        <span className="text-xs font-medium text-gray-500 block">Client ID</span>
-                        <span className="text-sm font-semibold text-gray-900 font-mono break-all">{clientId}</span>
-                      </div>
-                      <div>
-                        <span className="text-xs font-medium text-gray-500 block">Service Name</span>
-                        <span className="text-sm font-semibold text-gray-900 font-mono break-all">{serviceName}</span>
-                      </div>
-                    </>
-                  );
-                })()}
-                {status?.service_start_time && (
-                  <div>
-                    <span className="text-xs font-medium text-gray-500 block">Start Time</span>
-                    <span className="text-sm font-semibold text-gray-900">
-                      {formatTimeInfo(status.service_start_time).formattedTime}
-                    </span>
-                  </div>
-                )}
-                {/* Use service_uptime if available, otherwise calculate from start_time */}
-                {status?.service_uptime !== undefined ? (
-                  <div>
-                    <span className="text-xs font-medium text-gray-500 block">Uptime</span>
-                    <span className="text-sm font-semibold text-gray-900">{formatUptime(status.service_uptime)}</span>
-                  </div>
-                ) : status?.service_start_time && (
-                  <div>
-                    <span className="text-xs font-medium text-gray-500 block">Uptime</span>
-                    <span className="text-sm font-semibold text-gray-900">
-                      {formatTimeInfo(status.service_start_time).uptime}
-                    </span>
-                  </div>
-                )}
-                {status?.geo_location && (
-                  <div>
-                    <span className="text-xs font-medium text-gray-500 block">Location</span>
-                    <span className="text-sm font-semibold text-gray-900">
-                      {[status.geo_location.region, status.geo_location.country_name, status.geo_location.continent_code]
-                        .filter(Boolean).join(', ')}
-                    </span>
-                  </div>
-                )}
+                <div className="space-y-4">
+                  {/* Service ID from URL */}
+                  {serviceId && (
+                    <div>
+                      <span className="text-xs font-medium text-gray-500 block">Service ID</span>
+                      <span className="text-sm font-semibold text-gray-900 font-mono break-all">{serviceId}</span>
+                    </div>
+                  )}
+
+                  {/* Workspace and Client ID (fallback to parsed service info when needed) */}
+                  {(() => {
+                    const parsed = serviceId
+                      ? getCompleteServiceInfo(serviceId, status?.bioengine_apps?.service_id)
+                      : null;
+                    const workspace = status?.workspace || parsed?.workspace;
+                    const clientId = status?.client_id || parsed?.clientId;
+
+                    return (
+                      <>
+                        {workspace && (
+                          <div>
+                            <span className="text-xs font-medium text-gray-500 block">Workspace</span>
+                            <span className="text-sm font-semibold text-gray-900 font-mono break-all">{workspace}</span>
+                          </div>
+                        )}
+                        {clientId && (
+                          <div>
+                            <span className="text-xs font-medium text-gray-500 block">Client ID</span>
+                            <span className="text-sm font-semibold text-gray-900 font-mono break-all">{clientId}</span>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+
+                <div className="space-y-4">
+                  {status?.service_start_time && (
+                    <div>
+                      <span className="text-xs font-medium text-gray-500 block">Start Time</span>
+                      <span className="text-sm font-semibold text-gray-900">
+                        {formatTimeInfo(status.service_start_time).formattedTime}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Calculate uptime from service_start_time for live updates */}
+                  {status?.service_start_time && (
+                    <div>
+                      <span className="text-xs font-medium text-gray-500 block">Uptime</span>
+                      <span className="text-sm font-semibold text-gray-900">
+                        {formatTimeInfo(status.service_start_time).uptime}
+                      </span>
+                    </div>
+                  )}
+
+                  {status?.bioengine_version && (
+                    <div>
+                      <span className="text-xs font-medium text-gray-500 block">BioEngine Version</span>
+                      <span className="text-sm font-semibold text-gray-900 font-mono break-all">{status.bioengine_version}</span>
+                    </div>
+                  )}
+
+                  {status?.geo_location && (
+                    <div>
+                      <span className="text-xs font-medium text-gray-500 block">Location</span>
+                      <span className="text-sm font-semibold text-gray-900">
+                        {[status.geo_location.region, status.geo_location.country_name, status.geo_location.continent_code]
+                          .filter(Boolean).join(', ')}
+                      </span>
+                    </div>
+                  )}
+                </div>
                 {/* Admin users */}
                 {status?.admin_users && status.admin_users.length > 0 && (
                   <div className="md:col-span-2">
@@ -1093,6 +1155,7 @@ const BioEngineWorker: React.FC = () => {
           // Pass deployment-related props and handlers
           deployingArtifactId={deployingArtifactId}
           undeployingArtifactId={undeployingArtifactId}
+          pendingDeploymentArtifactId={pendingDeployment?.artifactId}
           artifactModes={artifactModes}
           status={status}
           onDeployArtifact={handleDeployArtifact}
@@ -1109,7 +1172,23 @@ const BioEngineWorker: React.FC = () => {
           setUndeploymentError={setUndeploymentError}
           formatTimeInfo={formatTimeInfo}
           server={server}
+          fetchApplicationStatus={fetchApplicationStatus}
         />
+
+        {pendingDeployment && (
+          <DeploymentConfigModal
+            isOpen={showDeployConfig}
+            onClose={() => {
+              setShowDeployConfig(false);
+              setPendingDeployment(null);
+            }}
+            onDeploy={executeDeployment}
+            artifactId={pendingDeployment.artifactId}
+            initialMode={pendingDeployment.mode}
+            bioengineApps={status?.bioengine_apps}
+            initialApplicationId={pendingDeployment.applicationId}
+          />
+        )}
       </div>
     </div>
   );
