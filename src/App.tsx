@@ -76,7 +76,7 @@ const AppContent: React.FC = () => {
       />
       <main className="container mx-auto px-4">
         <Routes>
-          <Route path="/" element={<ResourceGrid />} />
+          <Route path="/" element={<Navigate to="/training" replace />} />
           <Route path="/resources/:id" element={<ResourceDetails />} />
           <Route path="/about" element={<About />} />
           <Route path="/workers" element={<ResourceGrid type="worker" />} />
