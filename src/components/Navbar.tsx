@@ -34,44 +34,40 @@ const Navbar: React.FC = () => {
     <nav className="sticky top-0 z-50 bg-white border-b border-gray-200">
       <div className="max-w-[1400px] mx-auto px-4">
         <div className="relative flex items-center justify-between h-16">
-          {/* Left section: logo + Worker */}
-          <div className="flex items-center space-x-2">
+          {/* Left: logo */}
+          <div className="flex items-center">
             <Link to="/" className="flex items-center">
               <div className="flex items-center text-2xl font-bold text-blue-600">
                 <BiCube className="mr-2" size={24} />
                 Chiron Platform
               </div>
             </Link>
-            <div className="hidden md:flex items-center">
-              <Link to="/worker" className={navLinkClasses("/worker")}>
-                <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                  <TbEngine size={20} />
-                </span>
-                Worker
-              </Link>
-            </div>
           </div>
 
-          {/* Center section: Training */}
-          <div className="hidden md:flex items-center absolute left-1/2 -translate-x-1/2">
+          {/* Center: Worker · Training · Chiron Lab */}
+          <div className="hidden md:flex items-center space-x-1 absolute left-1/2 -translate-x-1/2">
+            <Link to="/worker" className={navLinkClasses("/worker")}>
+              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+                <TbEngine size={20} />
+              </span>
+              Worker
+            </Link>
             <Link to="/training" className={navLinkClasses("/training")}>
               <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
                 <TbTopologyStar size={20} />
               </span>
               Training
             </Link>
+            <Link to="/lab" className={navLinkClasses("/lab")}>
+              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+                <RiTestTubeLine size={20} />
+              </span>
+              Chiron Lab
+            </Link>
           </div>
 
-          {/* Right section: Chiron Lab + Login */}
-          <div className="flex items-center space-x-2">
-            <div className="hidden md:flex items-center">
-              <Link to="/lab" className={navLinkClasses("/lab")}>
-                <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                  <RiTestTubeLine size={20} />
-                </span>
-                Chiron Lab
-              </Link>
-            </div>
+          {/* Right: Login */}
+          <div className="flex items-center space-x-4">
             <div className="hidden md:flex items-center">
               <LoginButton />
             </div>
