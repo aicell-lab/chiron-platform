@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useHyphaStore } from '../store/hyphaStore';
-import { UserCircleIcon, ArrowRightOnRectangleIcon } from '@heroicons/react/24/outline';
+import { UserCircleIcon } from '@heroicons/react/24/outline';
 import { RiLoginBoxLine } from 'react-icons/ri';
 import { useHyphaContext } from '../HyphaContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { Spinner } from './Spinner';
 
 interface LoginButtonProps {
@@ -16,8 +16,8 @@ interface LoginConfig {
 }
 
 const serverUrl = "https://hypha.aicell.io";
+const REDIRECT_PATH_KEY = 'redirectPath';
 
-// Move token logic outside of component
 const getSavedToken = () => {
   const token = localStorage.getItem("token");
   if (token) {
@@ -32,11 +32,13 @@ const getSavedToken = () => {
 export default function LoginButton({ className = '' }: LoginButtonProps) {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
-  const { client, user, connect, setUser, server } = useHyphaStore();
+  const { client, user, connect, setUser, server, isConnected, isLoggedIn } = useHyphaStore();
   const { hyphaClient, setHyphaClient } = useHyphaContext();
   const navigate = useNavigate();
+  const location = useLocation();
+  const autoLoginAttemptedRef = useRef(false);
 
-  // Add click outside handler to close dropdown
+  // Close dropdown on outside click
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const dropdown = document.getElementById('user-dropdown');
@@ -44,29 +46,22 @@ export default function LoginButton({ className = '' }: LoginButtonProps) {
         setIsDropdownOpen(false);
       }
     };
-
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Add logout handler
   const handleLogout = async () => {
     try {
-      // Disconnect from Hypha server if connected
       if (hyphaClient) {
         await hyphaClient.disconnect();
         setHyphaClient(null);
       }
-
-      // Clear any auth tokens or user data from localStorage
       localStorage.removeItem('token');
+      localStorage.removeItem('tokenExpiry');
       localStorage.removeItem('user');
-      
-      // Perform existing logout logic
+      sessionStorage.removeItem(REDIRECT_PATH_KEY);
       setUser(null);
       setIsDropdownOpen(false);
-      
-      // Optionally redirect to home page
       navigate('/');
     } catch (error) {
       console.error('Error during logout:', error);
@@ -77,12 +72,11 @@ export default function LoginButton({ className = '' }: LoginButtonProps) {
     window.open(context.login_url);
   };
 
-  const login = async () => {    
+  const login = async () => {
     const config: LoginConfig = {
       server_url: serverUrl,
       login_callback: loginCallback,
     };
-
     try {
       const token = await client.login(config);
       localStorage.setItem("token", token);
@@ -95,37 +89,68 @@ export default function LoginButton({ className = '' }: LoginButtonProps) {
   };
 
   const handleLogin = useCallback(async () => {
+    if (isConnected && server) return;
+
+    // Save current path so we can redirect back after login
+    const currentPath = location.pathname !== '/' ? location.pathname + location.search + location.hash : null;
+    if (currentPath) {
+      sessionStorage.setItem(REDIRECT_PATH_KEY, currentPath);
+    }
+
     setIsLoggingIn(true);
-    
     try {
       let token = getSavedToken();
-      
       if (!token) {
         token = await login();
-        if (!token) {
-          throw new Error('Failed to obtain token');
-        }
+        if (!token) throw new Error('Failed to obtain token');
       }
-      await connect({
-        server_url: serverUrl,
-        token: token,
-        method_timeout: 600,
-      });
+      await connect({ server_url: serverUrl, token, method_timeout: 300 });
     } catch (error) {
       console.error("Error during login:", error);
       localStorage.removeItem("token");
       localStorage.removeItem("tokenExpiry");
+      sessionStorage.removeItem(REDIRECT_PATH_KEY);
     } finally {
       setIsLoggingIn(false);
     }
-  }, [setUser, server]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connect, isConnected, server, location.pathname, location.search, location.hash]);
 
+  // Auto-login on mount if a valid cached token exists
   useEffect(() => {
-    if (server) {
+    const autoLogin = async () => {
+      if (autoLoginAttemptedRef.current) return;
+      const token = getSavedToken();
+      if (token && !isConnected && !isLoggedIn) {
+        autoLoginAttemptedRef.current = true;
+        setIsLoggingIn(true);
+        try {
+          await connect({ server_url: serverUrl, token, method_timeout: 300 });
+        } catch (error) {
+          console.error("Auto-login failed:", error);
+          localStorage.removeItem("token");
+          localStorage.removeItem("tokenExpiry");
+          sessionStorage.removeItem(REDIRECT_PATH_KEY);
+        } finally {
+          setIsLoggingIn(false);
+        }
+      }
+    };
+    autoLogin();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connect, isConnected, isLoggedIn]);
+
+  // Set user and redirect after successful connection
+  useEffect(() => {
+    if (server && server.config.user) {
       setUser(server.config.user);
-      console.log("Logged in as:", server.config.user);
+      const redirectPath = sessionStorage.getItem(REDIRECT_PATH_KEY);
+      if (redirectPath) {
+        sessionStorage.removeItem(REDIRECT_PATH_KEY);
+        navigate(redirectPath);
+      }
     }
-  }, [server]);
+  }, [server, setUser, navigate]);
 
   return (
     <div className={className}>

@@ -4,7 +4,7 @@ import LoginButton from './LoginButton';
 import { BiCube } from 'react-icons/bi';
 import { TbEngine } from 'react-icons/tb';
 import { RiTestTubeLine } from 'react-icons/ri';
-import { FaGraduationCap } from 'react-icons/fa';
+import { TbTopologyStar } from 'react-icons/tb';
 
 const Navbar: React.FC = () => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -33,8 +33,8 @@ const Navbar: React.FC = () => {
   return (
     <nav className="sticky top-0 z-50 bg-white border-b border-gray-200">
       <div className="max-w-[1400px] mx-auto px-4">
-        <div className="flex items-center justify-between h-16">
-          {/* Left section with logo */}
+        <div className="relative flex items-center justify-between h-16">
+          {/* Left: logo */}
           <div className="flex items-center">
             <Link to="/" className="flex items-center">
               <div className="flex items-center text-2xl font-bold text-blue-600">
@@ -44,8 +44,8 @@ const Navbar: React.FC = () => {
             </Link>
           </div>
 
-          {/* Center section with navigation */}
-          <div className="hidden md:flex items-center space-x-4">
+          {/* Center: Worker · Training · Chiron Lab */}
+          <div className="hidden md:flex items-center space-x-1 absolute left-1/2 -translate-x-1/2">
             <Link to="/worker" className={navLinkClasses("/worker")}>
               <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
                 <TbEngine size={20} />
@@ -54,7 +54,7 @@ const Navbar: React.FC = () => {
             </Link>
             <Link to="/training" className={navLinkClasses("/training")}>
               <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <FaGraduationCap size={20} />
+                <TbTopologyStar size={20} />
               </span>
               Training
             </Link>
@@ -66,10 +66,9 @@ const Navbar: React.FC = () => {
             </Link>
           </div>
 
-          {/* Right section with auth buttons */}
+          {/* Right: Login */}
           <div className="flex items-center space-x-4">
-            {/* Login button desktop-only */}
-            <div className="hidden md:flex items-center space-x-4">
+            <div className="hidden md:flex items-center">
               <LoginButton />
             </div>
             
@@ -99,12 +98,12 @@ const Navbar: React.FC = () => {
               </span>
               Worker
             </Link>
-            <Link 
-              to="/training" 
+            <Link
+              to="/training"
               className={mobileNavLinkClasses("/training")}
             >
               <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <FaGraduationCap size={20} />
+                <TbTopologyStar size={20} />
               </span>
               Training
             </Link>
