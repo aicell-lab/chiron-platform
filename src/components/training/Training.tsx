@@ -1,39 +1,32 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useHyphaStore } from '../../store/hyphaStore';
-import { hyphaWebsocketClient } from 'hypha-rpc';
-import { FaNetworkWired, FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
+import { FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
-import WorkerMap from './WorkerMap';
+import FederatedWorldMap, { MapWorker, MapLegend } from './FederatedWorldMap';
 
 const CountryFlag: React.FC<{ countryName?: string; className?: string }> = ({ countryName, className }) => {
   const [flagUrl, setFlagUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (!countryName) return;
-    
-    // Check if we have cached this country's flag in session storage to avoid rate limiting
     const cacheKey = `country_flag_${countryName}`;
     const cached = sessionStorage.getItem(cacheKey);
-    if (cached) {
-      setFlagUrl(cached);
-      return;
-    }
-
+    if (cached) { setFlagUrl(cached); return; }
     fetch(`https://restcountries.com/v3.1/name/${encodeURIComponent(countryName)}?fields=flags`)
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data) && data.length > 0 && data[0].flags) {
-           const url = data[0].flags.png || data[0].flags.svg;
-           setFlagUrl(url);
-           sessionStorage.setItem(cacheKey, url);
+          const url = data[0].flags.png || data[0].flags.svg;
+          setFlagUrl(url);
+          sessionStorage.setItem(cacheKey, url);
         }
       })
-      .catch(err => console.error(`Failed to fetch flag for ${countryName}`, err));
+      .catch(() => {});
   }, [countryName]);
 
   if (!flagUrl) return null;
-  return <img src={flagUrl} alt={`${countryName} flag`} className={className || "w-5 h-auto inline-block"} />;
+  return <img src={flagUrl} alt={`${countryName} flag`} className={className || 'w-5 h-auto inline-block'} />;
 };
 
 interface GeoLocation {
@@ -79,13 +72,8 @@ interface ApplicationInfo {
   auto_redeploy?: boolean;
 }
 
-interface OrchestratorStatus extends ApplicationInfo {
-  application_id?: string;
-}
-
-interface TrainerStatus extends ApplicationInfo {
-  datasets?: Record<string, any>;
-}
+interface OrchestratorStatus extends ApplicationInfo { application_id?: string; }
+interface TrainerStatus extends ApplicationInfo { datasets?: Record<string, any>; }
 
 interface WorkerInfo {
   worker_info?: WorkerStatus;
@@ -129,17 +117,12 @@ interface TrainingStatus {
   current_training_round: number;
   target_round: number;
   stage: string | null;
-  trainers_progress: Record<string, {
-    current_batch: number;
-    total_batches: number;
-    progress: number;
-    error?: string;
-  }>;
+  trainers_progress: Record<string, { current_batch: number; total_batches: number; progress: number; error?: string; }>;
 }
 
 interface TrainingHistory {
-  training_losses: [number, number][];  // Array of [round, loss] pairs
-  validation_losses: [number, number][];  // Array of [round, loss] pairs
+  training_losses: [number, number][];
+  validation_losses: [number, number][];
 }
 
 interface ClusterStatus {
@@ -157,39 +140,19 @@ interface ManagerInfoModalData {
   workspace: string;
   clusterStatus: ClusterStatus | null;
   datasets: Record<string, any>;
-  location?: {
-    region: string;
-    country_name: string;
-    country_code: string;
-    continent_code: string;
-    latitude: number;
-    longitude: number;
-  };
+  location?: { region: string; country_name: string; country_code: string; continent_code: string; latitude: number; longitude: number; };
 }
-
-interface OrchestratorInfoModalData {
-  status?: string;
-  artifactId?: string;
-}
-
-interface TrainerInfoModalData {
-  appId: string;
-  status?: string;
-  datasets: Record<string, any>;
-  artifactId?: string;
-}
-
+interface OrchestratorInfoModalData { status?: string; artifactId?: string; }
+interface TrainerInfoModalData { appId: string; status?: string; datasets: Record<string, any>; artifactId?: string; }
 type InfoModalData = ManagerInfoModalData | OrchestratorInfoModalData | TrainerInfoModalData;
 
 const Training: React.FC = () => {
   const { server, isLoggedIn, user } = useHyphaStore();
 
-  // Manager connections state
   const [managers, setManagers] = useState<ManagerConnection[]>([]);
   const [connectingWorkspace, setConnectingWorkspace] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
 
-  // Observed workspaces discovery state
   const STORAGE_KEY_WS = 'chiron-training-observed-workspaces';
   const DEFAULT_PUBLIC_WORKSPACE = 'chiron-platform';
   type DiscoveredWorker = { serviceId: string; name: string; description: string; hasChironManager: boolean; geo_location?: GeoLocation; datasetCount?: number };
@@ -202,30 +165,25 @@ const Training: React.FC = () => {
   const [wsDiscoveryStatus, setWsDiscoveryStatus] = useState<Record<string, WsDiscoveryStatus>>({});
   const [connectingServiceId, setConnectingServiceId] = useState<string | null>(null);
 
-  // Error popup state
   const [showErrorPopup, setShowErrorPopup] = useState(false);
   const [errorPopupMessage, setErrorPopupMessage] = useState('');
   const [errorPopupDetails, setErrorPopupDetails] = useState('');
 
-  // Orchestrators and trainers state
   const [orchestrators, setOrchestrators] = useState<OrchestratorApp[]>([]);
   const [trainers, setTrainers] = useState<TrainerApp[]>([]);
   const [selectedOrchestrator, setSelectedOrchestrator] = useState<string | null>(null);
 
-  // Create app state
   const [showCreateOrchestrator, setShowCreateOrchestrator] = useState(false);
   const [showCreateTrainer, setShowCreateTrainer] = useState(false);
   const [creatingFor, setCreatingFor] = useState<string | null>(null);
   const [isCreatingOrchestrator, setIsCreatingOrchestrator] = useState(false);
   const [isCreatingTrainer, setIsCreatingTrainer] = useState(false);
-  const [newOrchestratorArtifactId, setNewOrchestratorArtifactId] = useState('chiron-platform/tabula-trainer');
+  const [newOrchestratorArtifactId, setNewOrchestratorArtifactId] = useState('chiron-platform/chiron-orchestrator');
   const [newTrainerDatasets, setNewTrainerDatasets] = useState<string[]>([]);
   const [newTrainerArtifactId, setNewTrainerArtifactId] = useState('chiron-platform/tabula-trainer');
 
-  // Per-worker timers for status updates
   const [workerTimers, setWorkerTimers] = useState<Record<string, NodeJS.Timeout>>({});
 
-  // Training state
   const [isTraining, setIsTraining] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
   const [trainingHistory, setTrainingHistory] = useState<TrainingHistory | null>(null);
@@ -233,41 +191,42 @@ const Training: React.FC = () => {
   const [isLoadingRegisteredTrainers, setIsLoadingRegisteredTrainers] = useState(false);
   const [isPreparingTraining, setIsPreparingTraining] = useState(false);
   const [isStoppingTraining, setIsStoppingTraining] = useState(false);
-  
-  // Trainer params state
+
   const [trainerParams, setTrainerParams] = useState<any>(null);
   const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
   const [trainerParamsError, setTrainerParamsError] = useState<string | null>(null);
-  
-  // Error modal state
+
   const [showErrorDetailModal, setShowErrorDetailModal] = useState(false);
   const [errorDetailTrainerId, setErrorDetailTrainerId] = useState<string>('');
   const [errorDetailMessage, setErrorDetailMessage] = useState<string>('');
 
-  // Confirmation modal state
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [confirmModalTitle, setConfirmModalTitle] = useState<string>('');
   const [confirmModalMessage, setConfirmModalMessage] = useState<string>('');
   const [confirmModalAction, setConfirmModalAction] = useState<(() => void) | null>(null);
 
-  // Info modal state
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [infoModalData, setInfoModalData] = useState<InfoModalData | null>(null);
   const [infoModalType, setInfoModalType] = useState<'manager' | 'orchestrator' | 'trainer'>('manager');
   const [isInfoModalLoading, setIsInfoModalLoading] = useState(false);
 
-  // Service selection modal state
   const [showServiceSelectionModal, setShowServiceSelectionModal] = useState(false);
   const [availableServices, setAvailableServices] = useState<string[]>([]);
   const [selectedServices, setSelectedServices] = useState<Set<string>>(new Set());
   const [pendingWorkspace, setPendingWorkspace] = useState<string>('');
 
-  // Persist custom workspaces
+  // Step navigation
+  const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
+
+  // Launch app dialog
+  const [showLaunchDialog, setShowLaunchDialog] = useState(false);
+  const [launchDialogManagerId, setLaunchDialogManagerId] = useState<string | null>(null);
+  const [launchDialogTab, setLaunchDialogTab] = useState<'orchestrator' | 'trainer'>('orchestrator');
+
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_WS, JSON.stringify(customWorkspaces));
   }, [customWorkspaces]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Observed workspace helpers
   const userWorkspace = server?.config?.workspace as string | undefined;
 
   const defaultWorkspaces = useMemo(() => {
@@ -297,7 +256,6 @@ const Training: React.FC = () => {
     setWsDiscoveryStatus(prev => ({ ...prev, [workspace]: 'loading' }));
     try {
       let serviceIds: string[] = [];
-
       if (isLoggedIn && workspace === userWorkspace) {
         const list = await server.listServices({ type: 'bioengine-worker' });
         serviceIds = list.map((s: any) => s.id);
@@ -313,7 +271,6 @@ const Training: React.FC = () => {
         }
       }
 
-      // For each worker, check if chiron-manager is running
       const workers: DiscoveredWorker[] = [];
       await Promise.allSettled(serviceIds.map(async (svcId) => {
         try {
@@ -330,7 +287,6 @@ const Training: React.FC = () => {
               : undefined;
             if (managerKey) {
               hasChironManager = true;
-              // Enrich with geo_location and dataset count from the manager service
               try {
                 const managerServiceId = appStatus[managerKey]?.service_ids?.[0]?.websocket_service_id;
                 if (managerServiceId) {
@@ -339,29 +295,26 @@ const Training: React.FC = () => {
                   geo_location = workerInfo?.worker_info?.geo_location;
                   datasetCount = workerInfo?.datasets ? Object.keys(workerInfo.datasets).length : 0;
                 }
-              } catch { /* enrichment is optional */ }
+              } catch { /* enrichment optional */ }
             }
           } catch { /* no app status */ }
           if (hasChironManager) {
             workers.push({ serviceId: svcId, name, description, hasChironManager: true, geo_location, datasetCount });
           }
-        } catch { /* unreachable service */ }
+        } catch { /* unreachable */ }
       }));
 
       setDiscoveredWorkers(prev => ({ ...prev, [workspace]: workers }));
       setWsDiscoveryStatus(prev => ({ ...prev, [workspace]: 'loaded' }));
     } catch (err) {
-      console.error(`Discovery failed for ${workspace}:`, err);
       setWsDiscoveryStatus(prev => ({ ...prev, [workspace]: 'error' }));
     }
   }, [server, isLoggedIn, userWorkspace]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Discover on mount, server change, and workspace list change
   useEffect(() => {
     if (server) observedWorkspaces.forEach(ws => discoverWorkspace(ws));
   }, [server, observedWorkspaces]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-refresh discovery every 15 seconds
   useEffect(() => {
     if (!server) return;
     const interval = setInterval(() => observedWorkspaces.forEach(ws => discoverWorkspace(ws)), 15000);
@@ -382,81 +335,53 @@ const Training: React.FC = () => {
   };
 
   const connectWorker = async (serviceId: string, workspace: string) => {
-    if (managers.find(m => m.serviceId === serviceId)) return; // already connected
+    if (managers.find(m => m.serviceId === serviceId)) return;
     setConnectingServiceId(serviceId);
     setConnectError(null);
     try {
       await connectToManagerService(workspace, [serviceId]);
-    } catch { /* error already handled */ }
+    } catch { /* handled */ }
     setConnectingServiceId(null);
   };
 
-  // Legacy addManager kept for service-selection modal path
   const addManager = async (workspaceArg: string) => {
     if (!workspaceArg.trim()) return;
     setConnectingWorkspace(workspaceArg);
     setConnectError(null);
-
     try {
-      // Get manager service ID from the workspace (without _mode=last)
       const url = `https://hypha.aicell.io/${workspaceArg}/services/chiron-manager`;
       let response;
       let data;
-
       try {
         response = await fetch(url);
         data = await response.json();
       } catch (fetchError) {
-        throw new Error(`Failed to fetch manager service information. The workspace may not exist or the service may not be available. Error: ${fetchError instanceof Error ? fetchError.message : 'Network error'}`);
+        throw new Error(`Failed to fetch manager service information. Error: ${fetchError instanceof Error ? fetchError.message : 'Network error'}`);
       }
-
-      // Check if we have a single service (success case)
-      if (data.id) {
-        // Single service found
-        await connectToManagerService(workspaceArg, [data.id]);
-        return;
-      }
-
-      // Check for error response
+      if (data.id) { await connectToManagerService(workspaceArg, [data.id]); return; }
       if (!data.success && data.detail) {
         const detail = data.detail;
-        
-        // Check if it's a "multiple services" error
         if (detail.includes('Multiple services found')) {
-          // Extract service IDs from the error message
-          // Pattern: b'services:public|bioengine-apps:ws-user-github|49943582/ID:chiron-manager@*'
-          // We need to extract: ws-user-github|49943582/ID:chiron-manager
           const servicePattern = /b'services:[^:]+:([^@]+):chiron-manager@\*'/g;
           const matches = [...detail.matchAll(servicePattern)];
-          const serviceIds = matches.map(match => `${match[1]}:chiron-manager`);
-          
+          const serviceIds = matches.map((match: RegExpMatchArray) => `${match[1]}:chiron-manager`);
           if (serviceIds.length > 0) {
-            // Remove duplicates by converting to Set and back to array
-            const uniqueServiceIds = Array.from(new Set(serviceIds));
-            
-            // Show service selection modal
+            const uniqueServiceIds = Array.from(new Set(serviceIds)) as string[];
             setAvailableServices(uniqueServiceIds);
-            setSelectedServices(new Set(uniqueServiceIds)); // Default to all selected
+            setSelectedServices(new Set(uniqueServiceIds));
             setPendingWorkspace(workspaceArg);
             setShowServiceSelectionModal(true);
             setConnectingWorkspace(null);
             return;
           }
         }
-        
-        // Check if it's a "service not found" error
         if (detail.includes('Service not found')) {
-          throw new Error('Manager service not found in workspace. Please ensure the chiron-manager service is running in this workspace.');
+          throw new Error('Manager service not found in workspace. Please ensure the chiron-manager service is running.');
         }
-        
-        // Unknown error format
         throw new Error(`Failed to fetch manager service: ${detail}`);
       }
-
-      // Unexpected response format
       throw new Error('Unexpected response format from service endpoint.');
     } catch (error) {
-      console.error('Failed to connect to manager:', error);
       const errorMessage = error instanceof Error ? error.message : 'Failed to connect to manager';
       setErrorPopupMessage('Failed to Add Worker');
       setErrorPopupDetails(errorMessage);
@@ -466,118 +391,56 @@ const Training: React.FC = () => {
     }
   };
 
-  // Connect to one or more manager services
   const connectToManagerService = async (workspace: string, serviceIds: string[]) => {
     try {
-      // Check for duplicate serviceIds before connecting
       for (const serviceId of serviceIds) {
         if (managers.find(m => m.serviceId === serviceId)) {
-          throw new Error(`This worker (${serviceId}) is already connected. Each worker can only be added once.`);
+          throw new Error(`This worker (${serviceId}) is already connected.`);
         }
       }
-
-      // Accumulate all changes before setting state
       const newManagers: ManagerConnection[] = [];
       const newOrchestrators: OrchestratorApp[] = [];
       const newTrainers: TrainerApp[] = [];
 
       for (const serviceId of serviceIds) {
-        // Connect to the manager service
         let managerService;
-        try {
-          managerService = await server.getService(serviceId);
-        } catch (serviceError) {
-          throw new Error(`Failed to connect to manager service (${serviceId}). The service may not be reachable. Error: ${serviceError instanceof Error ? serviceError.message : 'Connection error'}`);
+        try { managerService = await server.getService(serviceId); } catch (serviceError) {
+          throw new Error(`Failed to connect to manager service (${serviceId}). Error: ${serviceError instanceof Error ? serviceError.message : 'Connection error'}`);
         }
-
-        // Get worker info to fetch datasets - retry if not fully initialized
         let workerInfo;
         let retryCount = 0;
-        const maxRetries = 12; // 12 retries * 2.5 seconds = 30 seconds max wait
-        const retryDelay = 2500; // 2.5 seconds between retries
-
+        const maxRetries = 12;
+        const retryDelay = 2500;
         while (retryCount < maxRetries) {
-          try {
-            workerInfo = await managerService.get_worker_info();
-            break; // Success, exit retry loop
-          } catch (workerInfoError) {
+          try { workerInfo = await managerService.get_worker_info(); break; } catch (workerInfoError) {
             const errorMessage = workerInfoError instanceof Error ? workerInfoError.message : '';
-            
-            // Check if this is the known initialization error
             if (errorMessage.includes("'NoneType' object has no attribute 'get_status'")) {
               retryCount++;
               if (retryCount < maxRetries) {
-                console.log(`Manager ${serviceId} not fully initialized yet. Retrying in ${retryDelay / 1000}s... (${retryCount}/${maxRetries})`);
-                // Wait before retrying
                 await new Promise(resolve => setTimeout(resolve, retryDelay));
                 continue;
-              } else {
-                throw new Error(`Failed to retrieve worker information after ${maxRetries} retries. The manager service may still be initializing. Error: ${errorMessage}`);
-              }
-            } else {
-              // Different error, don't retry
-              throw new Error(`Failed to retrieve worker information. The manager service may be unhealthy or not responding. Error: ${errorMessage}`);
-            }
+              } else { throw new Error(`Failed after ${maxRetries} retries: ${errorMessage}`); }
+            } else { throw new Error(`Failed to retrieve worker information: ${errorMessage}`); }
           }
         }
-
-        // Add manager - serviceId is the unique identifier (already contains workspace)
-        newManagers.push({
-          workspace: workspace,
-          serviceId: serviceId,
-          service: managerService,
-          isConnected: true,
-          workerInfo
-        });
-
-        // Use serviceId as managerId - it's already unique (format: workspace/client-id:chiron-manager)
+        newManagers.push({ workspace, serviceId, service: managerService, isConnected: true, workerInfo });
         const managerId = serviceId;
-
-        // Check for existing orchestrator - only add if it has a valid status
         if (workerInfo!.orchestrator_status && workerInfo!.orchestrator_status.status) {
           const orchStatus = workerInfo!.orchestrator_status;
-          newOrchestrators.push({
-            managerId: managerId,
-            appId: 'chiron-orchestrator',
-            status: orchStatus.status,
-            serviceIds: orchStatus.service_ids || [],
-            artifactId: orchStatus.artifact_id || 'chiron-platform/tabula-trainer',
-            displayName: orchStatus.display_name,
-            applicationId: orchStatus.application_id
-          });
+          newOrchestrators.push({ managerId, appId: 'chiron-orchestrator', status: orchStatus.status, serviceIds: orchStatus.service_ids || [], artifactId: orchStatus.artifact_id || 'chiron-platform/chiron-orchestrator', displayName: orchStatus.display_name, applicationId: orchStatus.application_id });
         }
-
-        // Check for existing trainers
         if (workerInfo!.trainers_status) {
           for (const [appId, trainerStatus] of Object.entries(workerInfo!.trainers_status)) {
-            newTrainers.push({
-              managerId: managerId,
-              appId: appId,
-              status: (trainerStatus as any).status,
-              serviceIds: (trainerStatus as any).service_ids || [],
-              datasets: (trainerStatus as any).datasets || {},
-              artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer',
-              displayName: (trainerStatus as any).display_name,
-              applicationId: appId
-            });
+            newTrainers.push({ managerId, appId, status: (trainerStatus as any).status, serviceIds: (trainerStatus as any).service_ids || [], datasets: (trainerStatus as any).datasets || {}, artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer', displayName: (trainerStatus as any).display_name, applicationId: appId });
           }
         }
-
-        // Start timer for periodic updates - immediately after connection
         scheduleWorkerRefresh(serviceId);
       }
-
-      // Now set all the state at once
       setManagers(prev => [...prev, ...newManagers]);
       setOrchestrators(prev => [...prev, ...newOrchestrators]);
       setTrainers(prev => [...prev, ...newTrainers]);
-
-      // Log successful connections
-      console.log(`✓ Connected to ${serviceIds.length} worker(s) in workspace "${workspace}":`, serviceIds.map(id => id.split('/')[1]));
-
       setConnectingWorkspace(null);
     } catch (error) {
-      console.error('Failed to connect to manager service:', error);
       const errorMessage = error instanceof Error ? error.message : 'Failed to connect to manager';
       setErrorPopupMessage('Failed to Add Worker');
       setErrorPopupDetails(errorMessage);
@@ -588,7 +451,6 @@ const Training: React.FC = () => {
     }
   };
 
-  // Handle service selection confirmation
   const handleServiceSelectionConfirm = async () => {
     if (selectedServices.size === 0) {
       setErrorPopupMessage('No Services Selected');
@@ -596,2275 +458,1282 @@ const Training: React.FC = () => {
       setShowErrorPopup(true);
       return;
     }
-
     setShowServiceSelectionModal(false);
     setConnectingWorkspace(pendingWorkspace);
-    
-    try {
-      await connectToManagerService(pendingWorkspace, Array.from(selectedServices));
-    } catch (error) {
-      // Error already handled in connectToManagerService
-    } finally {
-      setPendingWorkspace('');
-      setAvailableServices([]);
-      setSelectedServices(new Set());
+    try { await connectToManagerService(pendingWorkspace, Array.from(selectedServices)); } catch { /* handled */ } finally {
+      setPendingWorkspace(''); setAvailableServices([]); setSelectedServices(new Set());
     }
   };
 
-  // Remove manager connection
   const removeManager = (serviceId: string) => {
-    // serviceId is the unique identifier (format: workspace/client-id:chiron-manager)
     const managerId = serviceId;
     const manager = managers.find(m => m.serviceId === serviceId);
     const workspace = manager?.workspace || 'Unknown';
-
-    // Check if this manager has the selected orchestrator
-    const hasSelectedOrchestrator = selectedOrchestrator && 
-      orchestrators.some(o => o.managerId === managerId && `${o.managerId}::${o.appId}` === selectedOrchestrator);
-    
-    // Check if we have registered trainers from this manager
+    const hasSelectedOrchestrator = selectedOrchestrator && orchestrators.some(o => o.managerId === managerId && `${o.managerId}::${o.appId}` === selectedOrchestrator);
     const managersTrainers = trainers.filter(t => t.managerId === managerId);
-    const hasRegisteredTrainers = managersTrainers.some(t => {
-      const trainerServiceId = t.serviceIds[0]?.websocket_service_id;
-      return registeredTrainers.includes(trainerServiceId);
-    });
-
-    // Build warning message
-    let warningMessage = `Disconnecting from BioEngine Worker "${workspace}" (Manager: ${serviceId.substring(0, 12)}...) will:\n\n`;
-    warningMessage += '• Remove this worker connection from your interface\n';
-    warningMessage += '• Keep the orchestrator and trainer applications running on the worker\n';
-    
-    if (hasSelectedOrchestrator) {
-      warningMessage += '• Deselect the currently selected orchestrator\n';
-    }
-    
-    if (hasRegisteredTrainers) {
-      warningMessage += '• Deselect the trainers from this worker\n';
-      if (isTraining) {
-        warningMessage += '• Selected trainers will finish the current round but won\'t participate in future rounds\n';
-      }
-    }
-
-    warningMessage += '\nAre you sure you want to disconnect?';
-
-    // Show confirmation modal
+    const hasRegisteredTrainers = managersTrainers.some(t => { const tid = t.serviceIds[0]?.websocket_service_id; return registeredTrainers.includes(tid); });
+    let warningMessage = `Disconnecting from "${workspace}" will:\n\n• Remove this worker connection\n• Keep apps running on the worker\n`;
+    if (hasSelectedOrchestrator) warningMessage += '• Deselect the current orchestrator\n';
+    if (hasRegisteredTrainers) warningMessage += '• Deselect trainers from this worker\n';
+    warningMessage += '\nAre you sure?';
     setConfirmModalTitle('Disconnect Worker');
     setConfirmModalMessage(warningMessage);
-    setConfirmModalAction(() => () => {
-      performRemoveManager(serviceId);
-    });
+    setConfirmModalAction(() => () => { performRemoveManager(serviceId); });
     setShowConfirmModal(true);
   };
 
-  // Perform the actual manager removal
   const performRemoveManager = async (serviceId: string) => {
-    // serviceId is the unique identifier
     const managerId = serviceId;
-
-    // Unregister trainers from this manager
     const managersTrainers = trainers.filter(t => t.managerId === managerId);
-    if (managersTrainers.length > 0) {
-      // Unregister each registered trainer
-      for (const trainer of managersTrainers) {
-        const trainerId = `${trainer.managerId}::${trainer.appId}`;
-        const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
-        if (registeredTrainers.includes(trainerServiceId)) {
-          await unregisterTrainer(trainerId);
-        }
-      }
+    for (const trainer of managersTrainers) {
+      const trainerId = `${trainer.managerId}::${trainer.appId}`;
+      const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
+      if (registeredTrainers.includes(trainerServiceId)) { await unregisterTrainer(trainerId); }
     }
-
-    // Deselect orchestrator if it belongs to this manager
-    if (selectedOrchestrator && 
-        orchestrators.some(o => o.managerId === managerId && `${o.managerId}::${o.appId}` === selectedOrchestrator)) {
-      setSelectedOrchestrator(null);
-      setTrainingHistory(null);
+    if (selectedOrchestrator && orchestrators.some(o => o.managerId === managerId && `${o.managerId}::${o.appId}` === selectedOrchestrator)) {
+      setSelectedOrchestrator(null); setTrainingHistory(null);
     }
-
-    // Remove only this specific manager (by serviceId)
     setManagers(prev => prev.filter(m => m.serviceId !== serviceId));
-    
-    // Clear timer for this specific manager
     setWorkerTimers(prev => {
       const timer = prev[managerId];
-      if (timer) {
-        clearTimeout(timer);
-        const newTimers = { ...prev };
-        delete newTimers[managerId];
-        return newTimers;
-      }
+      if (timer) { clearTimeout(timer); const n = { ...prev }; delete n[managerId]; return n; }
       return prev;
     });
-    
-    // Remove orchestrators/trainers only from this specific manager
     setOrchestrators(prev => prev.filter(o => o.managerId !== managerId));
     setTrainers(prev => prev.filter(t => t.managerId !== managerId));
   };
 
-  // Refresh a specific manager's worker info
   const refreshWorkerInfo = useCallback(async (serviceId: string) => {
     const managerId = serviceId;
-    
-    // Get current manager from state
     const manager = managers.find(m => m.serviceId === serviceId);
-    
-    if (!manager) {
-      console.warn(`[${serviceId}] Manager not found, skipping refresh`);
-      return;
-    }
-
-    console.log(`[${serviceId}] Starting refreshWorkerInfo...`);
-
+    if (!manager) return;
     try {
-      // Try to verify service is still available by getting worker info
-      // Retry once if we get the initialization error
       let workerInfo;
       let retryOnce = true;
-
       try {
-        // Set up a 10-second timeout for the worker info request
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Worker info request timeout (10s)')), 10000)
-        );
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000));
         workerInfo = await Promise.race([manager.service.get_worker_info(), timeoutPromise]);
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : '';
-        
-        // Check if this is a timeout
-        if (errorMessage.includes('timeout')) {
-          throw new Error('Worker is not responding (timeout after 10s)');
-        }
-        
-        // Check if this is the known initialization error and we haven't retried yet
-        if (retryOnce && errorMessage.includes("'NoneType' object has no attribute 'get_status'")) {
-          console.debug(`[${serviceId}] Temporary initialization issue, retrying in 2s...`);
+        const msg = error instanceof Error ? error.message : '';
+        if (msg.includes('timeout')) throw new Error('Worker is not responding (timeout)');
+        if (retryOnce && msg.includes("'NoneType' object has no attribute 'get_status'")) {
           retryOnce = false;
-          
-          // Wait 2 seconds and retry once (with new timeout)
           await new Promise(resolve => setTimeout(resolve, 2000));
-          const retryTimeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Worker info request timeout (10s)')), 10000)
-          );
-          workerInfo = await Promise.race([manager.service.get_worker_info(), retryTimeoutPromise]);
-        } else {
-          throw error;
-        }
+          const t2 = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000));
+          workerInfo = await Promise.race([manager.service.get_worker_info(), t2]);
+        } else { throw error; }
       }
-
-      console.log(`[${serviceId}] refreshWorkerInfo - orchestrator_status:`, workerInfo.orchestrator_status);
-
-      // Mark as connected and update worker info
-      setManagers(prev => prev.map(m =>
-        m.serviceId === serviceId
-          ? { ...m, isConnected: true, workerInfo }
-          : m
-      ));
-
-      // Update orchestrator
+      setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: true, workerInfo } : m));
       setOrchestrators(prev => {
         const filtered = prev.filter(o => o.managerId !== managerId);
-        // Only add orchestrator if it has a valid status (not empty string or undefined)
         if (workerInfo.orchestrator_status && workerInfo.orchestrator_status.status) {
           const orchStatus = workerInfo.orchestrator_status;
-          console.log(`[${serviceId}] Updating orchestrator in state with status: ${orchStatus.status}`);
-          return [...filtered, {
-            managerId: managerId,
-            appId: 'chiron-orchestrator',
-            status: orchStatus.status,
-            serviceIds: orchStatus.service_ids || [],
-            artifactId: orchStatus.artifact_id || 'chiron-platform/tabula-trainer',
-            displayName: orchStatus.display_name,
-            applicationId: orchStatus.application_id
-          }];
+          return [...filtered, { managerId, appId: 'chiron-orchestrator', status: orchStatus.status, serviceIds: orchStatus.service_ids || [], artifactId: orchStatus.artifact_id || 'chiron-platform/chiron-orchestrator', displayName: orchStatus.display_name, applicationId: orchStatus.application_id }];
         }
-        console.log(`[${serviceId}] No valid orchestrator status found, not adding to state`);
         return filtered;
       });
-
-      // Update trainers
       setTrainers(prev => {
         const filtered = prev.filter(t => t.managerId !== managerId);
-        const newTrainers: TrainerApp[] = [];
+        const newT: TrainerApp[] = [];
         if (workerInfo.trainers_status) {
           for (const [appId, trainerStatus] of Object.entries(workerInfo.trainers_status)) {
-            newTrainers.push({
-              managerId: managerId,
-              appId: appId,
-              status: (trainerStatus as any).status,
-              serviceIds: (trainerStatus as any).service_ids || [],
-              datasets: (trainerStatus as any).datasets || {},
-              artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer',
-              displayName: (trainerStatus as any).display_name,
-              applicationId: appId
-            });
+            newT.push({ managerId, appId, status: (trainerStatus as any).status, serviceIds: (trainerStatus as any).service_ids || [], datasets: (trainerStatus as any).datasets || {}, artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer', displayName: (trainerStatus as any).display_name, applicationId: appId });
           }
         }
-        return [...filtered, ...newTrainers];
+        return [...filtered, ...newT];
       });
     } catch (error) {
-      console.error(`Failed to refresh worker (${serviceId}):`, error);
-      // Mark manager as disconnected - service is no longer available or not responding
-      setManagers(prev => prev.map(m =>
-        m.serviceId === serviceId
-          ? { ...m, isConnected: false }
-          : m
-      ));
-      // Stop refreshing this manager since it's unavailable
+      setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: false } : m));
       setWorkerTimers(prev => {
         const timer = prev[managerId];
-        if (timer) {
-          clearTimeout(timer);
-          const newTimers = { ...prev };
-          delete newTimers[managerId];
-          return newTimers;
-        }
+        if (timer) { clearTimeout(timer); const n = { ...prev }; delete n[managerId]; return n; }
         return prev;
       });
     }
-  }, [managers]); // Need managers to find the manager connection
+  }, [managers]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Schedule next refresh for a worker (5 seconds)
   const scheduleWorkerRefresh = useCallback((serviceId: string) => {
     const managerId = serviceId;
-    
-    // Set new timer
     const timer = setTimeout(() => {
-      refreshWorkerInfo(serviceId).then(() => {
-        scheduleWorkerRefresh(serviceId);
-      }).catch((error) => {
-        console.error(`[${serviceId}] Refresh failed:`, error);
-      });
+      refreshWorkerInfo(serviceId).then(() => { scheduleWorkerRefresh(serviceId); }).catch(() => {});
     }, 5000);
-
     setWorkerTimers(prev => {
-      // Clear existing timer if any
-      if (prev[managerId]) {
-        clearTimeout(prev[managerId]);
-      }
+      if (prev[managerId]) clearTimeout(prev[managerId]);
       return { ...prev, [managerId]: timer };
     });
   }, [refreshWorkerInfo]);
 
-  // Refresh all managers (initial load and when managers change)
-  const refreshAllManagers = useCallback(async () => {
-    // Use functional update to get current managers
-    let currentManagers: ManagerConnection[] = [];
-    setManagers(prev => {
-      currentManagers = prev;
-      return prev; // No change, just reading
-    });
-    
-    for (const manager of currentManagers) {
-      const managerId = manager.serviceId;
-      await refreshWorkerInfo(managerId);
-      scheduleWorkerRefresh(managerId);
-    }
-  }, [refreshWorkerInfo, scheduleWorkerRefresh]);
-
-  // Refresh all managers for a specific workspace
-  const refreshWorkspace = useCallback(async (workspace: string) => {
-    // Use functional update to get current managers
-    let currentManagers: ManagerConnection[] = [];
-    setManagers(prev => {
-      currentManagers = prev.filter(m => m.workspace === workspace);
-      return prev; // No change, just reading
-    });
-    
-    for (const manager of currentManagers) {
-      const managerId = manager.serviceId;
-      await refreshWorkerInfo(managerId);
-      scheduleWorkerRefresh(managerId);
-    }
-  }, [refreshWorkerInfo, scheduleWorkerRefresh]);
-
-  // Clean up timers on unmount
   useEffect(() => {
-    return () => {
-      Object.values(workerTimers).forEach(timer => clearTimeout(timer));
-    };
+    return () => { Object.values(workerTimers).forEach(timer => clearTimeout(timer)); };
   }, [workerTimers]);
 
-  // Create orchestrator
   const createOrchestrator = async (managerId: string) => {
-    // managerId is the serviceId (format: workspace/client-id:chiron-manager)
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
-
     setIsCreatingOrchestrator(true);
-
     try {
-      // Generate token
-      const applicationToken = await server.generateToken({
-        workspace: server.config.workspace,
-        permission: 'read_write',
-        expires_in: 3600 * 24 * 30
-      });
-
-      await manager.service.create_orchestrator({
-        token: applicationToken,
-        trainer_artifact_id: newOrchestratorArtifactId,
-        _rkwargs: true
-      });
-
-      console.log(`[${managerId.split('/')[1]}] Orchestrator creation initiated, waiting for orchestrator to appear...`);
-
-      // Wait for orchestrator to appear in worker info (retry up to 40 times with 500ms delay = 20 seconds)
+      const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
+      await manager.service.create_orchestrator({ token: applicationToken, trainer_artifact_id: newOrchestratorArtifactId, _rkwargs: true });
       let retries = 40;
-      let orchestratorFound = false;
-      
-      while (retries > 0 && !orchestratorFound) {
+      let found = false;
+      while (retries > 0 && !found) {
         await new Promise(resolve => setTimeout(resolve, 500));
-        
         try {
-          const workerInfo = await manager.service.get_worker_info();
-          
-          // Check if orchestrator appears with any status
-          if (workerInfo.orchestrator_status && workerInfo.orchestrator_status.status) {
-            orchestratorFound = true;
-            console.log(`✓ Orchestrator found on worker ${managerId.split('/')[1]} with status: ${workerInfo.orchestrator_status.status}`);
-          } else {
-            retries--;
-            if (retries % 5 === 0) { // Log every 2.5 seconds
-              console.log(`[${managerId.split('/')[1]}] Waiting for orchestrator to appear... (${retries * 0.5}s remaining)`);
-            }
-          }
-        } catch (error) {
-          console.warn(`[${managerId.split('/')[1]}] Failed to poll worker info:`, error);
-          retries--;
-        }
+          const wi = await manager.service.get_worker_info();
+          if (wi.orchestrator_status && wi.orchestrator_status.status) { found = true; }
+          else { retries--; }
+        } catch { retries--; }
       }
-
-      if (!orchestratorFound) {
-        throw new Error('Orchestrator deployment timed out. The orchestrator may still be starting in the background.');
-      }
-
-      console.log(`[${managerId.split('/')[1]}] Calling refreshWorkerInfo after orchestrator creation...`);
-      
-      // Refresh worker info immediately to update state and reset timer
+      if (!found) throw new Error('Orchestrator deployment timed out.');
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
-      
-      console.log(`[${managerId.split('/')[1]}] Refresh complete, closing modal`);
-      
-      // Close the modal
-      setShowCreateOrchestrator(false);
-      setCreatingFor(null);
-      setIsCreatingOrchestrator(false);
+      setShowCreateOrchestrator(false); setShowLaunchDialog(false); setCreatingFor(null); setIsCreatingOrchestrator(false);
     } catch (error) {
-      console.error('Failed to create orchestrator:', error);
       setErrorPopupMessage('Failed to Create Orchestrator');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while creating the orchestrator');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
       setShowErrorPopup(true);
       setIsCreatingOrchestrator(false);
     }
   };
 
-  // Create trainer
   const createTrainer = async (managerId: string) => {
-    // managerId is the serviceId (format: workspace/client-id:chiron-manager)
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager || newTrainerDatasets.length === 0) return;
-
     setIsCreatingTrainer(true);
-
     try {
-      // Generate token
-      const applicationToken = await server.generateToken({
-        workspace: server.config.workspace,
-        permission: 'read_write',
-        expires_in: 3600 * 24 * 30
-      });
-
-      const createdTrainerId = await manager.service.create_trainer({
-        token: applicationToken,
-        datasets: newTrainerDatasets,
-        trainer_artifact_id: newTrainerArtifactId,
-        _rkwargs: true
-      });
-
-      console.log(`[${managerId.split('/')[1]}] Trainer creation initiated (ID: ${createdTrainerId}), waiting for trainer to appear...`);
-
-      // Wait for the specific trainer to appear in worker info (retry up to 40 times with 500ms delay = 20 seconds)
+      const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
+      const createdTrainerId = await manager.service.create_trainer({ token: applicationToken, datasets: newTrainerDatasets, trainer_artifact_id: newTrainerArtifactId, _rkwargs: true });
       let retries = 40;
-      let trainerFound = false;
-      
-      while (retries > 0 && !trainerFound) {
+      let found = false;
+      while (retries > 0 && !found) {
         await new Promise(resolve => setTimeout(resolve, 500));
-        
         try {
-          const workerInfo = await manager.service.get_worker_info();
-          
-          // Check if the created trainer appears in trainers_status
-          if (workerInfo.trainers_status && workerInfo.trainers_status[createdTrainerId]) {
-            const status = workerInfo.trainers_status[createdTrainerId].status;
-            trainerFound = true;
-            console.log(`✓ Trainer ${createdTrainerId} found on worker ${managerId.split('/')[1]} with status: ${status}`);
-          } else {
-            retries--;
-            if (retries % 5 === 0) { // Log every 2.5 seconds
-              console.log(`[${managerId.split('/')[1]}] Waiting for trainer ${createdTrainerId} to appear... (${retries * 0.5}s remaining)`);
-            }
-          }
-        } catch (error) {
-          console.warn(`[${managerId.split('/')[1]}] Failed to poll worker info:`, error);
-          retries--;
-        }
+          const wi = await manager.service.get_worker_info();
+          if (wi.trainers_status && wi.trainers_status[createdTrainerId]) { found = true; }
+          else { retries--; }
+        } catch { retries--; }
       }
-
-      if (!trainerFound) {
-        throw new Error('Trainer deployment timed out. The trainer may still be starting in the background.');
-      }
-
-      console.log(`[${managerId.split('/')[1]}] Calling refreshWorkerInfo after trainer creation...`);
-      
-      // Refresh worker info immediately to update state and reset timer
+      if (!found) throw new Error('Trainer deployment timed out.');
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
-      
-      console.log(`[${managerId.split('/')[1]}] Refresh complete, closing modal`);
-      
-      // Close the modal
-      setShowCreateTrainer(false);
-      setCreatingFor(null);
-      setNewTrainerDatasets([]);
-      setIsCreatingTrainer(false);
+      setShowCreateTrainer(false); setShowLaunchDialog(false); setCreatingFor(null); setNewTrainerDatasets([]); setIsCreatingTrainer(false);
     } catch (error) {
-      console.error('Failed to create trainer:', error);
       setErrorPopupMessage('Failed to Create Trainer');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while creating the trainer');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
       setShowErrorPopup(true);
       setIsCreatingTrainer(false);
     }
   };
 
-  // Remove orchestrator
   const removeOrchestrator = async (managerId: string) => {
-    // managerId is the serviceId
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
-
-    // Check if this orchestrator has training history (only if it's selected, since we only load history for selected orchestrator)
     const orchestratorId = `${managerId}::chiron-orchestrator`;
     const isSelected = orchestratorId === selectedOrchestrator;
-    
-    if (isSelected && trainingHistory && 
-        ((trainingHistory.training_losses && trainingHistory.training_losses.length > 0) || 
-         (trainingHistory.validation_losses && trainingHistory.validation_losses.length > 0))) {
-      // Show confirmation modal for orchestrator with known training history
-      setConfirmModalTitle('Delete Orchestrator with Training History');
-      setConfirmModalMessage(
-        'This orchestrator has training history that will be permanently lost. ' +
-        'Are you sure you want to delete it?'
-      );
-      setConfirmModalAction(() => async () => {
-        await performRemoveOrchestrator(managerId);
-      });
-      setShowConfirmModal(true);
-      return;
+    if (isSelected && trainingHistory && ((trainingHistory.training_losses?.length > 0) || (trainingHistory.validation_losses?.length > 0))) {
+      setConfirmModalTitle('Delete Orchestrator with History');
+      setConfirmModalMessage('This orchestrator has training history that will be permanently lost. Continue?');
+      setConfirmModalAction(() => async () => { await performRemoveOrchestrator(managerId); });
+      setShowConfirmModal(true); return;
     }
-
-    // If orchestrator is selected but we're unsure about history, or if it's not selected, show generic warning
     const orchestrator = orchestrators.find(o => o.managerId === managerId);
     if (orchestrator && orchestrator.status === 'RUNNING') {
       setConfirmModalTitle('Delete Orchestrator');
-      setConfirmModalMessage(
-        'Are you sure you want to delete this orchestrator? ' +
-        (isSelected ? 'Any training history will be permanently lost.' : 'Any training history on this orchestrator will be permanently lost.')
-      );
-      setConfirmModalAction(() => async () => {
-        await performRemoveOrchestrator(managerId);
-      });
-      setShowConfirmModal(true);
-      return;
+      setConfirmModalMessage('Are you sure you want to delete this orchestrator? Training history will be lost.');
+      setConfirmModalAction(() => async () => { await performRemoveOrchestrator(managerId); });
+      setShowConfirmModal(true); return;
     }
-
-    // Not running, proceed directly
     await performRemoveOrchestrator(managerId);
   };
 
-  // Perform the actual orchestrator removal
   const performRemoveOrchestrator = async (managerId: string) => {
-    // managerId is the serviceId
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
-
-    // Immediately mark as deleting in UI
-    setOrchestrators(prev => prev.map(o =>
-      o.managerId === managerId ? { ...o, status: 'DELETING' } : o
-    ));
-
+    setOrchestrators(prev => prev.map(o => o.managerId === managerId ? { ...o, status: 'DELETING' } : o));
     try {
       await manager.service.remove_orchestrator();
-
-      // Immediately refresh worker info and reset the timer
-      await refreshWorkerInfo(managerId);
-      scheduleWorkerRefresh(managerId);
+      await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
-      console.error('Failed to remove orchestrator:', error);
       setErrorPopupMessage('Failed to Remove Orchestrator');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while removing the orchestrator');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
       setShowErrorPopup(true);
-      // Refresh to restore the correct state
-      await refreshWorkerInfo(managerId);
-      scheduleWorkerRefresh(managerId);
+      await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     }
   };
 
-  // Remove trainer
   const removeTrainer = async (managerId: string, appId: string) => {
-    // Prevent trainer deletion during training
     if (isTraining) {
-      setErrorPopupMessage('Cannot Delete Trainer');
-      setErrorPopupDetails('You cannot delete a trainer while training is in progress. Please stop the training first.');
-      setShowErrorPopup(true);
-      return;
+      setErrorPopupMessage('Cannot Delete Trainer'); setErrorPopupDetails('Stop training first.'); setShowErrorPopup(true); return;
     }
-
     const trainerId = `${managerId}::${appId}`;
     const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
-    
-    // Unregister if registered
     if (trainer) {
       const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
-      if (registeredTrainers.includes(trainerServiceId)) {
-        await unregisterTrainer(trainerId);
-      }
+      if (registeredTrainers.includes(trainerServiceId)) { await unregisterTrainer(trainerId); }
     }
-
-    // managerId is the serviceId
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
-
-    // Immediately mark as deleting in UI
-    setTrainers(prev => prev.map(t =>
-      t.managerId === managerId && t.appId === appId ? { ...t, status: 'DELETING' } : t
-    ));
-
+    setTrainers(prev => prev.map(t => t.managerId === managerId && t.appId === appId ? { ...t, status: 'DELETING' } : t));
     try {
       await manager.service.remove_trainer(appId);
-
-      // Immediately refresh worker info and reset the timer
-      await refreshWorkerInfo(managerId);
-      scheduleWorkerRefresh(managerId);
+      await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
-      console.error('Failed to remove trainer:', error);
       setErrorPopupMessage('Failed to Remove Trainer');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while removing the trainer');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
       setShowErrorPopup(true);
-      // Refresh to restore the correct state
-      await refreshWorkerInfo(managerId);
-      scheduleWorkerRefresh(managerId);
+      await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     }
   };
 
-  // Show info modal
   const showInfo = async (type: 'manager' | 'orchestrator' | 'trainer', id: string) => {
-    // Extract serviceId from the id
-    // For manager: format is "workspace::serviceId"
-    // For orchestrator: format is "managerId::appId" where managerId is the serviceId
-    // For trainer: format is "workspace::appId" - this needs to be fixed too!
-    
     let manager: ManagerConnection | undefined;
-    
-    if (type === 'manager') {
-      // id format: "workspace::serviceId"
-      const serviceId = id.split('::')[1];
-      manager = managers.find(m => m.serviceId === serviceId);
-    } else if (type === 'orchestrator') {
-      // id format: "managerId::appId" where managerId is the serviceId
-      const managerId = id.split('::')[0];
-      manager = managers.find(m => m.serviceId === managerId);
-    } else if (type === 'trainer') {
-      // id format should be "managerId::appId" not "workspace::appId"
-      // But let's handle both cases for backward compatibility
+    if (type === 'manager') { const serviceId = id.split('::')[1]; manager = managers.find(m => m.serviceId === serviceId); }
+    else if (type === 'orchestrator') { const managerId = id.split('::')[0]; manager = managers.find(m => m.serviceId === managerId); }
+    else if (type === 'trainer') {
       const parts = id.split('::');
-      if (parts.length === 2) {
-        // Try to find by serviceId first (correct format)
-        manager = managers.find(m => m.serviceId === parts[0]);
-        // If not found, try by workspace (old format)
-        if (!manager) {
-          manager = managers.find(m => m.workspace === parts[0]);
-        }
-      }
+      if (parts.length === 2) { manager = managers.find(m => m.serviceId === parts[0]); if (!manager) manager = managers.find(m => m.workspace === parts[0]); }
     }
-    
     if (!manager) return;
-
-    // Show modal immediately with loading state
-    setInfoModalType(type);
-    setInfoModalData(null);
-    setIsInfoModalLoading(true);
-    setShowInfoModal(true);
-
+    setInfoModalType(type); setInfoModalData(null); setIsInfoModalLoading(true); setShowInfoModal(true);
     try {
-      // Use cached worker info if available, otherwise fetch fresh
       let workerInfo = manager.workerInfo;
-      
       if (!workerInfo) {
-        // If no cached info, try to fetch with timeout
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Timeout')), 10000)
-        );
-        workerInfo = await Promise.race([manager.service.get_worker_info(), timeoutPromise]);
+        const t = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000));
+        workerInfo = await Promise.race([manager.service.get_worker_info(), t]);
       }
-
-      if (!workerInfo) {
-        throw new Error('Could not retrieve worker information');
-      }
-
+      if (!workerInfo) throw new Error('Could not retrieve worker information');
       if (type === 'manager') {
-        setInfoModalData({
-          workspace: manager.workspace,
-          clusterStatus: workerInfo.cluster_status || null,
-          datasets: workerInfo.datasets || {},
-          location: workerInfo.worker_info?.geo_location ? {
-            region: workerInfo.worker_info.geo_location.region,
-            country_name: workerInfo.worker_info.geo_location.country_name,
-            country_code: workerInfo.worker_info.geo_location.country_code,
-            continent_code: workerInfo.worker_info.geo_location.continent_code,
-            latitude: workerInfo.worker_info.geo_location.latitude,
-            longitude: workerInfo.worker_info.geo_location.longitude
-          } : undefined
-        });
+        setInfoModalData({ workspace: manager.workspace, clusterStatus: workerInfo.cluster_status || null, datasets: workerInfo.datasets || {}, location: workerInfo.worker_info?.geo_location ? { region: workerInfo.worker_info.geo_location.region, country_name: workerInfo.worker_info.geo_location.country_name, country_code: workerInfo.worker_info.geo_location.country_code, continent_code: workerInfo.worker_info.geo_location.continent_code, latitude: workerInfo.worker_info.geo_location.latitude, longitude: workerInfo.worker_info.geo_location.longitude } : undefined });
       } else if (type === 'orchestrator') {
-        setInfoModalData({
-          status: workerInfo.orchestrator_status?.status,
-          artifactId: workerInfo.orchestrator_status?.artifact_id
-        });
+        setInfoModalData({ status: workerInfo.orchestrator_status?.status, artifactId: workerInfo.orchestrator_status?.artifact_id });
       } else if (type === 'trainer') {
         const appId = id.split('::')[1];
         const trainerStatus = workerInfo.trainers_status?.[appId];
-        setInfoModalData({
-          appId,
-          status: trainerStatus?.status,
-          datasets: trainerStatus?.datasets || {},
-          artifactId: trainerStatus?.artifact_id
-        });
+        setInfoModalData({ appId, status: trainerStatus?.status, datasets: trainerStatus?.datasets || {}, artifactId: trainerStatus?.artifact_id });
       }
-
       setIsInfoModalLoading(false);
     } catch (error) {
-      console.error('Failed to get info:', error);
       setIsInfoModalLoading(false);
       setErrorPopupMessage('Failed to Get Information');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while retrieving information');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
       setShowErrorPopup(true);
       setShowInfoModal(false);
     }
   };
 
-  // Register a trainer with the orchestrator
   const registerTrainer = async (trainerId: string) => {
     if (!selectedOrchestrator) return;
-
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-
     const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
     if (!trainer || trainer.status !== 'RUNNING') return;
-
     try {
       setIsLoadingRegisteredTrainers(true);
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
-      await orchestratorService.add_trainer(trainerServiceId);
-      
-      // Refresh registered trainers list
+      await orchestratorService.add_trainer(trainer.serviceIds[0].websocket_service_id);
       const registeredServiceIds = await orchestratorService.list_trainers();
       setRegisteredTrainers(registeredServiceIds);
     } catch (error) {
-      console.error('Failed to register trainer:', error);
       setErrorPopupMessage('Failed to Register Trainer');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while registering the trainer');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
       setShowErrorPopup(true);
-    } finally {
-      setIsLoadingRegisteredTrainers(false);
-    }
+    } finally { setIsLoadingRegisteredTrainers(false); }
   };
 
-  // Unregister a trainer from the orchestrator
   const unregisterTrainer = async (trainerId: string) => {
     if (!selectedOrchestrator) return;
-
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-
     const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
     if (!trainer || trainer.status !== 'RUNNING') return;
-
     try {
       setIsLoadingRegisteredTrainers(true);
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
-      await orchestratorService.remove_trainer(trainerServiceId);
-      
-      // Refresh registered trainers list
+      await orchestratorService.remove_trainer(trainer.serviceIds[0].websocket_service_id);
       const registeredServiceIds = await orchestratorService.list_trainers();
       setRegisteredTrainers(registeredServiceIds);
-    } catch (error) {
-      console.error('Failed to unregister trainer:', error);
-      // Don't show error popup for unregister as it might happen during cleanup
-      console.warn('Continuing despite unregister error');
-    } finally {
-      setIsLoadingRegisteredTrainers(false);
-    }
+    } catch { /* silent */ } finally { setIsLoadingRegisteredTrainers(false); }
   };
 
-  // Sync trainers with orchestrator
-
-  // Fetch registered trainers when orchestrator is selected
   useEffect(() => {
     const fetchRegisteredTrainers = async () => {
-      if (!selectedOrchestrator) {
-        setRegisteredTrainers([]);
-        return;
-      }
-
+      if (!selectedOrchestrator) { setRegisteredTrainers([]); return; }
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
-      if (!orchestrator || orchestrator.status !== 'RUNNING') {
-        setRegisteredTrainers([]);
-        return;
-      }
-
+      if (!orchestrator || orchestrator.status !== 'RUNNING') { setRegisteredTrainers([]); return; }
       try {
         setIsLoadingRegisteredTrainers(true);
         const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
         const registeredServiceIds = await orchestratorService.list_trainers();
         setRegisteredTrainers(registeredServiceIds);
-      } catch (error) {
-        console.error('Failed to fetch registered trainers:', error);
-        setRegisteredTrainers([]);
-      } finally {
-        setIsLoadingRegisteredTrainers(false);
-      }
+      } catch { setRegisteredTrainers([]); } finally { setIsLoadingRegisteredTrainers(false); }
     };
-
     fetchRegisteredTrainers();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedOrchestrator, server]);
+  }, [selectedOrchestrator, server]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch trainer params when orchestrator and at least one trainer are selected
   useEffect(() => {
     const fetchTrainerParams = async () => {
-      if (!selectedOrchestrator) {
-        setTrainerParams(null);
-        setTrainerParamsLoading(false);
-        setTrainerParamsError(null);
-        return;
-      }
-
+      if (!selectedOrchestrator) { setTrainerParams(null); setTrainerParamsLoading(false); setTrainerParamsError(null); return; }
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
-      if (!orchestrator || orchestrator.status !== 'RUNNING') {
-        setTrainerParams(null);
-        setTrainerParamsLoading(false);
-        setTrainerParamsError('Orchestrator not running');
-        return;
-      }
-
-      // Only fetch params if at least one trainer is registered
-      if (registeredTrainers.length === 0) {
-        setTrainerParams(null);
-        setTrainerParamsLoading(false);
-        setTrainerParamsError(null);
-        return;
-      }
-
+      if (!orchestrator || orchestrator.status !== 'RUNNING') { setTrainerParams(null); setTrainerParamsError('Orchestrator not running'); return; }
+      if (registeredTrainers.length === 0) { setTrainerParams(null); setTrainerParamsLoading(false); setTrainerParamsError(null); return; }
       try {
-        setTrainerParamsLoading(true);
-        setTrainerParamsError(null);
+        setTrainerParamsLoading(true); setTrainerParamsError(null);
         const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
         const params = await orchestratorService.get_trainer_params();
         setTrainerParams(params);
       } catch (error) {
-        console.error('Failed to fetch trainer params:', error);
         setTrainerParamsError(error instanceof Error ? error.message : 'Failed to fetch parameters');
-      } finally {
-        setTrainerParamsLoading(false);
-      }
+      } finally { setTrainerParamsLoading(false); }
     };
-
     fetchTrainerParams();
-  }, [selectedOrchestrator, registeredTrainers, server]);
+  }, [selectedOrchestrator, registeredTrainers, server]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch training history when orchestrator is selected or on stage changes
   useEffect(() => {
     const fetchTrainingHistory = async () => {
-      if (!selectedOrchestrator) {
-        setTrainingHistory(null);
-        return;
-      }
-
+      if (!selectedOrchestrator) { setTrainingHistory(null); return; }
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
       if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-
       try {
         const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
         const history = await orchestratorService.get_training_history();
-        
-        // Set history regardless of whether it has data (allows showing empty charts)
-        if (history) {
-          setTrainingHistory(history);
-        }
-      } catch (error) {
-        // Silently handle - orchestrator might not have history yet
-        console.debug('No training history available yet:', error);
-      }
+        if (history) setTrainingHistory(history);
+      } catch { /* no history yet */ }
     };
-
     fetchTrainingHistory();
-  }, [selectedOrchestrator, server]);
+  }, [selectedOrchestrator, server]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch training history regularly while training is active or on stage changes
   useEffect(() => {
     if (!selectedOrchestrator || !isTraining) return;
-
-    let previousStage: string | null = trainingStatus?.stage ?? null;
-
     const fetchHistoryPeriodically = async () => {
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
       if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-
       try {
         const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-        
-        // Fetch history
         const history = await orchestratorService.get_training_history();
-        if (history) {
-          setTrainingHistory(history);
-        }
-
-        // Check for stage changes
+        if (history) setTrainingHistory(history);
         const status = await orchestratorService.get_training_status();
-        if (status) {
-          setTrainingStatus(status);
-          
-          // If stage changed, fetch history immediately
-          if (previousStage !== status.stage) {
-            previousStage = status.stage;
-          }
-        }
-      } catch (error) {
-        console.debug('Failed to fetch training history during training:', error);
-      }
+        if (status) setTrainingStatus(status);
+      } catch { /* silent */ }
     };
-
-    // Poll for history every 2 seconds while training
     const historyInterval = setInterval(fetchHistoryPeriodically, 2000);
-    
     return () => clearInterval(historyInterval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isTraining, selectedOrchestrator]);
+  }, [isTraining, selectedOrchestrator]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Start training
-  const startTraining = async (config: {
-    num_rounds: number;
-    fit_config: Record<string, any>;
-    eval_config: Record<string, any>;
-    per_round_timeout: number;
-  }) => {
+  const startTraining = async (config: { num_rounds: number; fit_config: Record<string, any>; eval_config: Record<string, any>; per_round_timeout: number; }) => {
     if (!selectedOrchestrator) return;
-
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-
     setIsPreparingTraining(true);
-
     try {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-
-      // Ensure correct trainers are added before starting
       const currentTrainers = await orchestratorService.list_trainers();
-      
-      if (currentTrainers.length === 0) {
-        throw new Error('No trainers available for training. Please select at least one trainer.');
-      }
-
-      setIsPreparingTraining(false);
-      setIsTraining(true);
-
-      // Prepare training parameters from config
-      const trainingParams: any = { 
-        num_rounds: config.num_rounds,
-        fit_config: config.fit_config,
-        eval_config: config.eval_config,
-        per_round_timeout: config.per_round_timeout,
-        _rkwargs: true 
-      };
-
-      console.log(`✓ Starting federated training with ${currentTrainers.length} trainer(s) for ${config.num_rounds} rounds`);
-      console.log('Training parameters:', JSON.stringify(trainingParams, null, 2));
-
-      // Start training in background
+      if (currentTrainers.length === 0) throw new Error('No trainers available. Please select at least one trainer.');
+      setIsPreparingTraining(false); setIsTraining(true);
+      const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, _rkwargs: true };
       orchestratorService.start_training(trainingParams).catch((error: Error) => {
-        console.error('Training failed:', error);
-        setErrorPopupMessage('Training Failed');
-        setErrorPopupDetails(error.message);
-        setShowErrorPopup(true);
-        setIsTraining(false);
+        setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true); setIsTraining(false);
       });
-
-      // Poll for status (every 3 seconds)
       const statusInterval = setInterval(async () => {
         try {
           const status = await orchestratorService.get_training_status();
           setTrainingStatus(status);
-
           if (!status.is_running) {
-            setIsTraining(false);
-            clearInterval(statusInterval);
-
-            console.log(`✓ Federated training completed (${status.current_training_round}/${status.target_round} rounds)`);
-
-            // Get training history
+            setIsTraining(false); clearInterval(statusInterval);
             const history = await orchestratorService.get_training_history();
             setTrainingHistory(history);
           }
-        } catch (error) {
-          console.error('Failed to get training status:', error);
-        }
+        } catch { /* silent */ }
       }, 3000);
     } catch (error) {
-      console.error('Failed to start training:', error);
       setErrorPopupMessage('Failed to Start Training');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while starting the training');
-      setShowErrorPopup(true);
-      setIsPreparingTraining(false);
-      setIsTraining(false);
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setShowErrorPopup(true); setIsPreparingTraining(false); setIsTraining(false);
     }
   };
 
-  // Stop training
   const stopTraining = async () => {
     if (!selectedOrchestrator) return;
-
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-
     setIsStoppingTraining(true);
     try {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       await orchestratorService.stop_training();
-      setIsTraining(false);
-      setTrainingStatus(null);
-      console.log('✓ Training stopped successfully');
+      setIsTraining(false); setTrainingStatus(null);
     } catch (error) {
-      console.error('Failed to stop training:', error);
       setErrorPopupMessage('Failed to Stop Training');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while stopping the training');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
       setShowErrorPopup(true);
-    } finally {
-      setIsStoppingTraining(false);
-    }
+    } finally { setIsStoppingTraining(false); }
   };
 
-  // Reset training state
   const resetTrainingState = async () => {
     if (!selectedOrchestrator) return;
-
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-
     try {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       await orchestratorService.reset_training_state();
-      setTrainingHistory(null);
-      setTrainingStatus(null);
+      setTrainingHistory(null); setTrainingStatus(null);
     } catch (error) {
-      console.error('Failed to reset training state:', error);
       setErrorPopupMessage('Failed to Reset Training State');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error occurred while resetting the training state');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
       setShowErrorPopup(true);
     }
   };
 
-  // Handle orchestrator selection change with confirmation
   const handleOrchestratorSelectionChange = (newOrchestratorId: string) => {
-    // Prevent orchestrator changes during training
-    if (isTraining) {
-      setErrorPopupMessage('Cannot Change Orchestrator');
-      setErrorPopupDetails('You cannot change the orchestrator while training is in progress. Please stop the training first.');
-      setShowErrorPopup(true);
-      return;
-    }
-
-    // Check if currently selected orchestrator has training history
-    if (selectedOrchestrator && selectedOrchestrator !== newOrchestratorId && 
-        trainingHistory && 
-        ((trainingHistory.training_losses && trainingHistory.training_losses.length > 0) || 
-         (trainingHistory.validation_losses && trainingHistory.validation_losses.length > 0))) {
-      // Show confirmation modal
+    if (isTraining) { setErrorPopupMessage('Cannot Change Orchestrator'); setErrorPopupDetails('Stop training first.'); setShowErrorPopup(true); return; }
+    if (selectedOrchestrator && selectedOrchestrator !== newOrchestratorId && trainingHistory && ((trainingHistory.training_losses?.length > 0) || (trainingHistory.validation_losses?.length > 0))) {
       setConfirmModalTitle('Switch Orchestrator');
-      setConfirmModalMessage(
-        'The currently selected orchestrator has training history. ' +
-        'Switching will clear the displayed history. Do you want to continue?'
-      );
-      setConfirmModalAction(() => () => {
-        setSelectedOrchestrator(newOrchestratorId);
-      });
-      setShowConfirmModal(true);
-      return;
+      setConfirmModalMessage('The current orchestrator has training history. Switching will clear the displayed history. Continue?');
+      setConfirmModalAction(() => () => { setSelectedOrchestrator(newOrchestratorId); });
+      setShowConfirmModal(true); return;
     }
-
-    // No history or same orchestrator, proceed directly
     setSelectedOrchestrator(newOrchestratorId);
   };
 
-  // Check if user has access to a dataset
   const hasDatasetAccess = (dataset: any) => {
-    if (!dataset.authorized_users) return true; // If no restriction, allow access
-    if (dataset.authorized_users.includes('*')) return true; // Wildcard access
-
+    if (!dataset.authorized_users) return true;
+    if (dataset.authorized_users.includes('*')) return true;
     const userId = server?.config?.user?.id;
     const userEmail = server?.config?.user?.email;
-
     return dataset.authorized_users.includes(userId) || dataset.authorized_users.includes(userEmail);
   };
 
-  // Get trainer app ID from service ID
   const getTrainerAppId = (serviceId: string): string => {
-    const trainer = trainers.find(t => 
-      t.serviceIds && t.serviceIds[0] && t.serviceIds[0].websocket_service_id === serviceId
-    );
+    const trainer = trainers.find(t => t.serviceIds && t.serviceIds[0] && t.serviceIds[0].websocket_service_id === serviceId);
     return trainer ? trainer.appId : serviceId;
   };
 
-  // Get status badge
   const getStatusBadge = (status?: string) => {
     const displayStatus = status || 'NOT_STARTED';
-    const statusConfig: Record<string, { color: string; icon: any }> = {
-      'NOT_STARTED': { color: 'bg-gray-100 text-gray-800', icon: FaClock },
-      'DEPLOYING': { color: 'bg-blue-100 text-blue-800', icon: BiLoaderAlt },
-      'DEPLOY_FAILED': { color: 'bg-red-100 text-red-800', icon: FaTimesCircle },
-      'RUNNING': { color: 'bg-green-100 text-green-800', icon: FaCheckCircle },
-      'UNHEALTHY': { color: 'bg-yellow-100 text-yellow-800', icon: FaTimesCircle },
-      'DELETING': { color: 'bg-orange-100 text-orange-800', icon: BiLoaderAlt }
+    const statusConfig: Record<string, { color: string; dot: string }> = {
+      'NOT_STARTED': { color: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400' },
+      'DEPLOYING': { color: 'bg-blue-100 text-blue-700', dot: 'bg-blue-500 animate-pulse' },
+      'DEPLOY_FAILED': { color: 'bg-red-100 text-red-700', dot: 'bg-red-500' },
+      'RUNNING': { color: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500' },
+      'UNHEALTHY': { color: 'bg-amber-100 text-amber-700', dot: 'bg-amber-500' },
+      'DELETING': { color: 'bg-orange-100 text-orange-700', dot: 'bg-orange-500 animate-pulse' },
     };
-
-    const config = statusConfig[displayStatus] || statusConfig['NOT_STARTED'];
-    const Icon = config.icon;
-
+    const cfg = statusConfig[displayStatus] || statusConfig['NOT_STARTED'];
     return (
-      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${config.color}`}>
-        <Icon className={`mr-1 ${displayStatus === 'DEPLOYING' || displayStatus === 'DELETING' ? 'animate-spin' : ''}`} />
+      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.color}`}>
+        <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
         {displayStatus}
       </span>
     );
   };
 
+  // Compute map workers from discovered + connected state
+  const mapWorkers = useMemo<MapWorker[]>(() => {
+    const result: MapWorker[] = [];
+    // Connected managers (with full info)
+    managers.forEach(manager => {
+      const geo = manager.workerInfo?.worker_info?.geo_location;
+      if (!geo?.latitude || !geo?.longitude) return;
+      const hasOrch = orchestrators.some(o => o.managerId === manager.serviceId && o.status === 'RUNNING');
+      const hasTrainer = trainers.some(t => t.managerId === manager.serviceId && t.status === 'RUNNING');
+      let role: MapWorker['role'] = 'connected';
+      if (hasOrch && hasTrainer) role = 'both';
+      else if (hasOrch) role = 'orchestrator';
+      else if (hasTrainer) role = 'trainer';
+      const orchCount = orchestrators.filter(o => o.managerId === manager.serviceId).length;
+      const trainerCount = trainers.filter(t => t.managerId === manager.serviceId).length;
+      result.push({ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role, label: `${orchCount} orch, ${trainerCount} trainer(s)` });
+    });
+    // Available (discovered but not connected)
+    observedWorkspaces.forEach(ws => {
+      (discoveredWorkers[ws] || []).forEach(worker => {
+        if (managers.find(m => m.serviceId === worker.serviceId)) return;
+        if (!worker.geo_location?.latitude || !worker.geo_location?.longitude) return;
+        result.push({ id: worker.serviceId, name: worker.name, lat: worker.geo_location.latitude, lng: worker.geo_location.longitude, role: 'available', label: `${worker.datasetCount ?? 0} dataset(s)` });
+      });
+    });
+    return result;
+  }, [managers, orchestrators, trainers, discoveredWorkers, observedWorkspaces]);
+
+  // All discovered workers (flat list with workspace context)
+  const allDiscoveredWorkers = useMemo(() => {
+    return observedWorkspaces.flatMap(ws => (discoveredWorkers[ws] || []).map(w => ({ ...w, workspace: ws })));
+  }, [observedWorkspaces, discoveredWorkers]);
+
+  const stepEnabled = (step: number) => {
+    if (step === 1) return true;
+    if (step === 2) return managers.length > 0;
+    if (step === 3) return !!selectedOrchestrator;
+    return false;
+  };
+
   if (!isLoggedIn) {
     return (
-      <div className="max-w-7xl mx-auto px-4 py-12">
-        <div className="text-center">
-          <h1 className="text-3xl font-bold text-gray-900 mb-4">Federated Training</h1>
-          <p className="text-gray-600 mb-8">Please log in to access federated training.</p>
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <div className="text-center max-w-md">
+          <div className="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-6">
+            <svg className="w-10 h-10 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064" />
+            </svg>
+          </div>
+          <h2 className="text-2xl font-bold text-gray-900 mb-2">Federated Training</h2>
+          <p className="text-gray-500">Please log in to access federated training across BioEngine workers.</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8">
+    <div className="max-w-screen-xl mx-auto px-4 py-6">
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-2">
-          Federated Training
-        </h1>
-        <p className="text-gray-600">
-          Set up and run federated training across multiple BioEngine workers
-        </p>
+        <h1 className="text-3xl font-bold text-gray-900 mb-1">Federated Training</h1>
+        <p className="text-gray-500 text-sm">Coordinate privacy-preserving training across distributed BioEngine workers</p>
       </div>
 
-      {/* Step 1: Available BioEngine Workers (with chiron-manager) */}
-      <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-sm border border-white/20 p-6 mb-6 hover:shadow-md transition-all duration-200">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-semibold text-gray-900 flex items-center">
-            <FaNetworkWired className="mr-2 text-blue-600" />
-            Available BioEngine Workers
-          </h2>
-          <button
-            onClick={() => observedWorkspaces.forEach(ws => discoverWorkspace(ws))}
-            disabled={!server}
-            className="px-3 py-1.5 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-lg hover:from-green-700 hover:to-green-800 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed flex items-center text-sm shadow-sm transition-all duration-200"
-          >
-            <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            Refresh
-          </button>
+      {/* Step Navigator */}
+      <div className="flex items-center mb-8">
+        {[
+          { num: 1, label: 'Setup Workers', desc: 'Connect workers & launch apps' },
+          { num: 2, label: 'Select Apps', desc: 'Choose orchestrator & trainers' },
+          { num: 3, label: 'Train', desc: 'Configure & run training' },
+        ].map((step, idx) => {
+          const enabled = stepEnabled(step.num);
+          const active = currentStep === step.num;
+          const done = currentStep > step.num;
+          return (
+            <React.Fragment key={step.num}>
+              <button
+                onClick={() => enabled && setCurrentStep(step.num as 1 | 2 | 3)}
+                disabled={!enabled}
+                className={`flex items-center gap-3 group transition-all duration-200 ${!enabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+              >
+                <div className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold transition-all duration-200 flex-shrink-0 ${
+                  active ? 'bg-blue-600 text-white shadow-md shadow-blue-200 ring-4 ring-blue-100'
+                  : done ? 'bg-emerald-500 text-white'
+                  : 'bg-gray-100 text-gray-500 group-hover:bg-gray-200'
+                }`}>
+                  {done ? <FaCheckCircle size={14} /> : step.num}
+                </div>
+                <div className="text-left hidden sm:block">
+                  <p className={`text-sm font-semibold leading-tight ${active ? 'text-blue-700' : done ? 'text-emerald-700' : 'text-gray-600'}`}>{step.label}</p>
+                  <p className="text-xs text-gray-400 leading-tight">{step.desc}</p>
+                </div>
+              </button>
+              {idx < 2 && (
+                <div className={`flex-1 h-0.5 mx-4 transition-all duration-300 ${done ? 'bg-emerald-400' : 'bg-gray-200'}`} />
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+
+      {/* Main content: map left + step content right */}
+      <div className="flex gap-6 items-start">
+        {/* Left: World Map */}
+        <div className="w-80 xl:w-96 flex-shrink-0 space-y-4 sticky top-6">
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+            <div className="px-4 pt-4 pb-2 flex items-center gap-2">
+              <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064" />
+              </svg>
+              <span className="text-sm font-semibold text-gray-700">Federation Map</span>
+              <span className="ml-auto text-xs text-gray-400">{mapWorkers.length} worker{mapWorkers.length !== 1 ? 's' : ''}</span>
+            </div>
+            <FederatedWorldMap workers={mapWorkers} style={{ height: 260, width: '100%' }} />
+            <div className="px-4 py-3 border-t border-gray-50">
+              <MapLegend />
+            </div>
+          </div>
+
+          {/* Workspace input (all steps) */}
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+            <h3 className="text-sm font-semibold text-gray-700 mb-3">Observed Workspaces</h3>
+            <form onSubmit={e => { e.preventDefault(); addObservedWorkspace(); }} className="flex gap-2 mb-3">
+              <input type="text" value={workspaceInput} onChange={e => setWorkspaceInput(e.target.value)} placeholder="Add workspace..." className="flex-1 px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-0" />
+              <button type="submit" disabled={!workspaceInput.trim() || observedWorkspaces.includes(workspaceInput.trim())} className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0">Add</button>
+            </form>
+            <div className="flex flex-col gap-1.5">
+              {observedWorkspaces.map(ws => {
+                const isDefault = defaultWorkspaces.includes(ws);
+                const status = wsDiscoveryStatus[ws];
+                const count = (discoveredWorkers[ws] || []).length;
+                return (
+                  <div key={ws} className="flex items-center gap-2 px-2.5 py-1.5 bg-gray-50 rounded-lg text-xs">
+                    {status === 'loading' && <div className="w-2 h-2 border border-gray-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />}
+                    {status === 'loaded' && <div className={`w-2 h-2 rounded-full flex-shrink-0 ${count > 0 ? 'bg-emerald-500' : 'bg-gray-300'}`} />}
+                    {status === 'error' && <div className="w-2 h-2 rounded-full bg-red-400 flex-shrink-0" />}
+                    {!status && <div className="w-2 h-2 rounded-full bg-gray-300 flex-shrink-0" />}
+                    <span className="font-mono text-gray-700 flex-1 truncate">{ws}</span>
+                    {status === 'loaded' && <span className="text-gray-400">{count}w</span>}
+                    {!isDefault && (
+                      <button onClick={() => removeObservedWorkspace(ws)} className="text-gray-300 hover:text-red-400 flex-shrink-0">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <button onClick={() => observedWorkspaces.forEach(ws => discoverWorkspace(ws))} className="mt-3 w-full text-xs text-blue-600 hover:text-blue-800 py-1 flex items-center justify-center gap-1">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+              Refresh
+            </button>
+          </div>
         </div>
 
-        {/* Observed Workspaces */}
-        <div className="mb-5">
-          <h3 className="text-sm font-semibold text-gray-700 mb-2">Observed Workspaces</h3>
-          <form onSubmit={(e) => { e.preventDefault(); addObservedWorkspace(); }} className="flex gap-2 mb-2">
-            <input
-              type="text"
-              value={workspaceInput}
-              onChange={(e) => setWorkspaceInput(e.target.value)}
-              placeholder="Add workspace name..."
-              className="flex-1 px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-            />
-            <button
-              type="submit"
-              disabled={!workspaceInput.trim() || observedWorkspaces.includes(workspaceInput.trim())}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium transition-colors"
-            >
-              Add
-            </button>
-          </form>
-          <div className="flex flex-wrap gap-2">
-            {observedWorkspaces.map(ws => {
-              const isDefault = defaultWorkspaces.includes(ws);
-              const isUserWs = isLoggedIn && ws === userWorkspace;
-              const status = wsDiscoveryStatus[ws];
-              const count = (discoveredWorkers[ws] || []).length;
-              return (
-                <div key={ws} className="group flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 rounded-full text-sm text-gray-700 hover:bg-gray-200 transition-colors">
-                  {status === 'loading' && <div className="w-2.5 h-2.5 border border-gray-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />}
-                  {status === 'loaded' && <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${count > 0 ? 'bg-green-500' : 'bg-gray-400'}`} />}
-                  {status === 'error' && <div className="w-2.5 h-2.5 rounded-full bg-red-400 flex-shrink-0" />}
-                  {!status && <div className="w-2.5 h-2.5 rounded-full bg-gray-300 flex-shrink-0" />}
-                  <span className="font-mono">{ws}</span>
-                  {ws === DEFAULT_PUBLIC_WORKSPACE && <span className="text-xs text-gray-400">(public)</span>}
-                  {isUserWs && ws !== DEFAULT_PUBLIC_WORKSPACE && <span className="text-xs text-blue-500">(you)</span>}
-                  {status === 'loaded' && <span className="text-xs text-gray-400">{count} worker{count !== 1 ? 's' : ''}</span>}
-                  {!isDefault && (
-                    <button onClick={() => removeObservedWorkspace(ws)} className="ml-0.5 opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all flex-shrink-0">
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
+        {/* Right: Step content */}
+        <div className="flex-1 min-w-0">
+
+          {/* ====== STEP 1: SETUP WORKERS ====== */}
+          {currentStep === 1 && (
+            <div className="space-y-4">
+              <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-50 flex items-center justify-between">
+                  <div>
+                    <h2 className="text-base font-semibold text-gray-900">BioEngine Workers</h2>
+                    <p className="text-xs text-gray-500 mt-0.5">Workers with Chiron Manager across observed workspaces</p>
+                  </div>
+                  {Object.values(wsDiscoveryStatus).some(s => s === 'loading') && (
+                    <BiLoaderAlt className="animate-spin text-blue-500" size={18} />
+                  )}
+                </div>
+
+                {allDiscoveredWorkers.length === 0 && !Object.values(wsDiscoveryStatus).some(s => s === 'loading') ? (
+                  <div className="text-center py-12 text-gray-400">
+                    <svg className="w-10 h-10 mx-auto mb-3 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+                    <p className="text-sm">No workers with Chiron Manager found</p>
+                    <p className="text-xs mt-1">Add workspaces on the left to discover workers</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-gray-50/70 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                          <th className="text-left px-6 py-3">Worker</th>
+                          <th className="text-left px-4 py-3">Location</th>
+                          <th className="text-center px-4 py-3">Datasets</th>
+                          <th className="text-center px-4 py-3">Orchestrator</th>
+                          <th className="text-center px-4 py-3">Trainers</th>
+                          <th className="text-right px-6 py-3">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {allDiscoveredWorkers.map(worker => {
+                          const isConnected = managers.some(m => m.serviceId === worker.serviceId);
+                          const manager = managers.find(m => m.serviceId === worker.serviceId);
+                          const isConnecting = connectingServiceId === worker.serviceId;
+                          const orchCount = orchestrators.filter(o => o.managerId === worker.serviceId).length;
+                          const trainerCount = trainers.filter(t => t.managerId === worker.serviceId).length;
+                          const geo = isConnected ? manager?.workerInfo?.worker_info?.geo_location : worker.geo_location;
+                          const datasetCount = isConnected ? (manager?.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0) : worker.datasetCount;
+
+                          return (
+                            <tr key={worker.serviceId} className={`hover:bg-gray-50/50 transition-colors ${isConnected ? '' : 'opacity-80'}`}>
+                              <td className="px-6 py-3.5">
+                                <div className="flex items-center gap-2.5">
+                                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? (manager?.isConnected ? 'bg-emerald-500' : 'bg-red-400') : 'bg-gray-300'}`} />
+                                  <div>
+                                    <p className="font-medium text-gray-900 leading-tight">{worker.name}</p>
+                                    <p className="text-xs text-gray-400 font-mono">{worker.workspace}</p>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-4 py-3.5">
+                                {geo ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <CountryFlag countryName={geo.country_name} className="w-4 h-3 object-cover rounded-sm flex-shrink-0" />
+                                    <span className="text-gray-600 text-xs">{geo.region}, {geo.country_name}</span>
+                                  </div>
+                                ) : <span className="text-gray-300 text-xs">—</span>}
+                              </td>
+                              <td className="px-4 py-3.5 text-center">
+                                {datasetCount !== undefined ? (
+                                  <span className="inline-flex items-center gap-1 text-xs font-medium text-gray-700">
+                                    <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" /></svg>
+                                    {datasetCount}
+                                  </span>
+                                ) : <span className="text-gray-300 text-xs">—</span>}
+                              </td>
+                              <td className="px-4 py-3.5 text-center">
+                                {isConnected ? (
+                                  orchCount > 0 ? (
+                                    <div className="flex flex-col gap-1 items-center">
+                                      {orchestrators.filter(o => o.managerId === worker.serviceId).map(o => (
+                                        <div key={o.appId} className="flex items-center gap-1">
+                                          {getStatusBadge(o.status)}
+                                          <button onClick={() => removeOrchestrator(worker.serviceId)} className="text-red-400 hover:text-red-600 ml-0.5" title="Remove"><FaTrash size={10} /></button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : <span className="text-gray-300 text-xs">None</span>
+                                ) : <span className="text-gray-300 text-xs">—</span>}
+                              </td>
+                              <td className="px-4 py-3.5 text-center">
+                                {isConnected ? (
+                                  trainerCount > 0 ? (
+                                    <div className="flex flex-col gap-1 items-center">
+                                      {trainers.filter(t => t.managerId === worker.serviceId).map(t => (
+                                        <div key={t.appId} className="flex items-center gap-1">
+                                          {getStatusBadge(t.status)}
+                                          <button onClick={() => removeTrainer(worker.serviceId, t.appId)} className="text-red-400 hover:text-red-600 ml-0.5" title="Remove"><FaTrash size={10} /></button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : <span className="text-gray-300 text-xs">None</span>
+                                ) : <span className="text-gray-300 text-xs">—</span>}
+                              </td>
+                              <td className="px-6 py-3.5 text-right">
+                                <div className="flex items-center justify-end gap-2">
+                                  {isConnected ? (
+                                    <>
+                                      <button
+                                        onClick={() => { setLaunchDialogManagerId(worker.serviceId); setLaunchDialogTab('orchestrator'); setNewTrainerDatasets([]); setShowLaunchDialog(true); }}
+                                        disabled={!manager?.isConnected}
+                                        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                        title="Launch app on this worker"
+                                      >
+                                        <FaPlus size={9} /> Launch
+                                      </button>
+                                      <button onClick={() => showInfo('manager', `${manager?.workspace}::${worker.serviceId}`)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors" title="Info"><FaInfo size={12} /></button>
+                                      <button onClick={() => removeManager(worker.serviceId)} className="p-1.5 text-gray-400 hover:text-orange-600 hover:bg-orange-50 rounded-lg transition-colors" title="Disconnect"><FaUnlink size={12} /></button>
+                                    </>
+                                  ) : (
+                                    <button
+                                      onClick={() => connectWorker(worker.serviceId, worker.workspace)}
+                                      disabled={isConnecting}
+                                      className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 text-white text-xs font-medium rounded-lg hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                    >
+                                      {isConnecting ? <><BiLoaderAlt className="animate-spin" size={12} /> Connecting...</> : <><FaPlus size={9} /> Connect</>}
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {managers.length > 0 && (
+                <div className="flex justify-end">
+                  <button onClick={() => setCurrentStep(2)} className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 shadow-sm shadow-blue-200 transition-all">
+                    Next: Select Applications
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ====== STEP 2: SELECT APPS ====== */}
+          {currentStep === 2 && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {/* Orchestrator selection */}
+                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+                  <div className="px-5 py-4 border-b border-gray-50">
+                    <h2 className="text-base font-semibold text-gray-900">Orchestrator</h2>
+                    <p className="text-xs text-gray-500 mt-0.5">Select one orchestrator to coordinate training</p>
+                    {isTraining && <span className="text-xs text-amber-600 mt-1 block">Cannot change during training</span>}
+                  </div>
+                  <div className="p-4 space-y-2">
+                    {orchestrators.filter(o => o.status === 'RUNNING').length === 0 ? (
+                      <div className="text-center py-8 text-gray-400">
+                        <FaClock className="mx-auto mb-2 opacity-40" size={24} />
+                        <p className="text-sm">No running orchestrators</p>
+                        <p className="text-xs mt-1">Launch one from the Setup step</p>
+                      </div>
+                    ) : (
+                      orchestrators.filter(o => o.status === 'RUNNING').map(orch => {
+                        const orchestratorId = `${orch.managerId}::${orch.appId}`;
+                        const isSelected = selectedOrchestrator === orchestratorId;
+                        const manager = managers.find(m => m.serviceId === orch.managerId);
+                        const geo = manager?.workerInfo?.worker_info?.geo_location;
+                        return (
+                          <label key={orchestratorId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 cursor-pointer transition-all ${isSelected ? 'border-blue-500 bg-blue-50/60' : 'border-transparent bg-gray-50 hover:border-gray-200'} ${isTraining ? 'cursor-not-allowed opacity-60' : ''}`}>
+                            <input type="radio" name="orchestrator" checked={isSelected} onChange={() => handleOrchestratorSelectionChange(orchestratorId)} disabled={isTraining} className="mt-0.5 accent-blue-600" />
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium text-gray-900 text-sm leading-tight">{orch.displayName || 'Chiron Orchestrator'}</p>
+                              {geo && <p className="text-xs text-gray-500 mt-0.5">{geo.region}, {geo.country_name}</p>}
+                              <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{orch.managerId.split('/')[1]?.split(':')[0] || orch.managerId}</p>
+                            </div>
+                            {isSelected && <FaCheckCircle className="text-blue-500 flex-shrink-0 mt-0.5" size={14} />}
+                          </label>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                {/* Trainer selection */}
+                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+                  <div className="px-5 py-4 border-b border-gray-50 flex items-center justify-between">
+                    <div>
+                      <h2 className="text-base font-semibold text-gray-900">Trainers</h2>
+                      <p className="text-xs text-gray-500 mt-0.5">Select one or more trainers</p>
+                    </div>
+                    {isLoadingRegisteredTrainers && <BiLoaderAlt className="animate-spin text-blue-500" size={16} />}
+                  </div>
+                  <div className="p-4 space-y-2">
+                    {!selectedOrchestrator && (
+                      <div className="text-center py-8 text-amber-500">
+                        <svg className="w-8 h-8 mx-auto mb-2 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                        <p className="text-sm font-medium">Select an orchestrator first</p>
+                      </div>
+                    )}
+                    {selectedOrchestrator && trainers.filter(t => t.status === 'RUNNING').length === 0 && (
+                      <div className="text-center py-8 text-gray-400">
+                        <FaClock className="mx-auto mb-2 opacity-40" size={24} />
+                        <p className="text-sm">No running trainers</p>
+                        <p className="text-xs mt-1">Launch trainers from the Setup step</p>
+                      </div>
+                    )}
+                    {selectedOrchestrator && trainers.filter(t => t.status === 'RUNNING').map(trainer => {
+                      const trainerId = `${trainer.managerId}::${trainer.appId}`;
+                      const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
+                      const isRegistered = registeredTrainers.includes(trainerServiceId);
+                      const manager = managers.find(m => m.serviceId === trainer.managerId);
+                      const geo = manager?.workerInfo?.worker_info?.geo_location;
+                      const datasetNames = Object.values(trainer.datasets).map((d: any) => d.name || Object.keys(trainer.datasets).find(k => trainer.datasets[k] === d)).filter(Boolean);
+                      return (
+                        <label key={trainerId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${!selectedOrchestrator ? 'cursor-not-allowed opacity-40 border-transparent bg-gray-50' : isRegistered ? 'border-emerald-400 bg-emerald-50/60 cursor-pointer' : 'border-transparent bg-gray-50 hover:border-gray-200 cursor-pointer'}`}>
+                          <input type="checkbox" checked={isRegistered} disabled={!selectedOrchestrator || isLoadingRegisteredTrainers} onChange={async e => { e.target.checked ? await registerTrainer(trainerId) : await unregisterTrainer(trainerId); }} className="mt-0.5 accent-emerald-600" />
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium text-gray-900 text-sm leading-tight">{trainer.displayName || 'Tabula Trainer'}</p>
+                            {geo && <p className="text-xs text-gray-500 mt-0.5">{geo.region}, {geo.country_name}</p>}
+                            {datasetNames.length > 0 && <p className="text-xs text-gray-400 mt-0.5 truncate">{datasetNames.join(', ')}</p>}
+                          </div>
+                          {isRegistered && <FaCheckCircle className="text-emerald-500 flex-shrink-0 mt-0.5" size={14} />}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Summary */}
+              {selectedOrchestrator && registeredTrainers.length > 0 && (
+                <div className="bg-blue-50 border border-blue-100 rounded-2xl px-5 py-3.5 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <FaCheckCircle className="text-blue-500" size={16} />
+                    <span className="text-sm text-blue-800 font-medium">
+                      {registeredTrainers.length} trainer{registeredTrainers.length !== 1 ? 's' : ''} registered to orchestrator
+                    </span>
+                  </div>
+                  <button onClick={() => setCurrentStep(3)} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 transition-all">
+                    Next: Train
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                  </button>
+                </div>
+              )}
+
+              <div className="flex justify-between">
+                <button onClick={() => setCurrentStep(1)} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+                  Back to Setup
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ====== STEP 3: TRAIN ====== */}
+          {currentStep === 3 && (
+            <div className="space-y-4">
+              {/* Config + Controls */}
+              <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+                <TrainingConfigPanel
+                  params={trainerParams}
+                  loading={trainerParamsLoading}
+                  error={trainerParamsError}
+                  onStart={startTraining}
+                  isPreparingTraining={isPreparingTraining}
+                  isTraining={isTraining}
+                />
+                <div className="mt-4 flex items-center gap-3">
+                  {isTraining && (
+                    <button onClick={stopTraining} disabled={isStoppingTraining} className="flex items-center gap-2 px-5 py-2.5 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                      {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping...</> : <><FaStop size={12} /> Stop Training</>}
                     </button>
                   )}
+                  <button onClick={resetTrainingState} disabled={isTraining} className="flex items-center gap-2 px-4 py-2.5 text-gray-600 text-sm font-medium border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
+                    <FaTrash size={12} /> Reset State
+                  </button>
                 </div>
-              );
-            })}
-          </div>
-        </div>
+              </div>
 
-        {/* Worker cards */}
-        <div className="border-t border-gray-200/50 pt-4">
-          {!server ? (
-            <p className="text-gray-500 text-center py-6 text-sm">Please log in to discover BioEngine workers</p>
-          ) : Object.values(wsDiscoveryStatus).some(s => s === 'loading') && Object.values(discoveredWorkers).every(ws => ws.length === 0) ? (
-            <div className="flex flex-col items-center py-8">
-              <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mb-3" />
-              <p className="text-gray-500 text-sm animate-pulse">Discovering workers with Chiron Manager...</p>
-            </div>
-          ) : (
-            <>
-              {/* Connected managers */}
-              {managers.length > 0 && (
-                <div className="mb-4">
-                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Connected</h3>
-                  <div className="space-y-2">
-                    {managers.map(manager => (
-                      <div key={manager.serviceId} className={`flex items-center justify-between p-3 rounded-xl border ${manager.isConnected ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
-                        <div className="flex items-center gap-3">
-                          <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${manager.isConnected ? 'bg-green-500' : 'bg-red-400'}`} />
-                          <div>
+              {/* Training Status */}
+              {isTraining && trainingStatus && (
+                <div className="bg-white rounded-2xl border border-blue-100 shadow-sm p-5">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2.5 h-2.5 bg-blue-500 rounded-full animate-pulse" />
+                      <h3 className="font-semibold text-gray-900 text-sm">Training in Progress</h3>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{trainingStatus.stage || 'Idle'}</span>
+                      <span className="text-xs text-gray-500">Round {trainingStatus.current_training_round} / {trainingStatus.target_round}</span>
+                    </div>
+                  </div>
+                  {/* Overall round progress */}
+                  <div className="mb-4">
+                    <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
+                      <div className="bg-blue-500 h-2 rounded-full transition-all duration-500" style={{ width: `${(trainingStatus.current_training_round / Math.max(trainingStatus.target_round, 1)) * 100}%` }} />
+                    </div>
+                  </div>
+                  <div className="space-y-3">
+                    {Object.entries(trainingStatus.trainers_progress).map(([trainerId, progress]) => {
+                      const hasError = !!progress.error;
+                      return (
+                        <div key={trainerId}>
+                          <div className="flex justify-between text-xs mb-1">
                             <div className="flex items-center gap-2">
-                              <p className="font-medium text-gray-900 text-sm">{manager.workspace}</p>
-                              {!manager.isConnected && <span className="px-1.5 py-0.5 rounded text-xs bg-red-100 text-red-700">Disconnected</span>}
+                              <span className="text-gray-600 font-medium">{getTrainerAppId(trainerId)}</span>
+                              {hasError && <button onClick={() => { setErrorDetailTrainerId(getTrainerAppId(trainerId)); setErrorDetailMessage(progress.error || ''); setShowErrorDetailModal(true); }} className="text-red-500 hover:text-red-700"><FaTimesCircle size={12} /></button>}
                             </div>
-                            <p className="text-xs text-gray-500 font-mono">{manager.serviceId}</p>
-                            {manager.workerInfo?.worker_info?.geo_location && (
-                              <div className="flex items-center mt-0.5 text-xs text-gray-500 gap-1.5">
-                                <CountryFlag countryName={manager.workerInfo.worker_info.geo_location.country_name} className="w-4 h-3 object-cover" />
-                                <span>{manager.workerInfo.worker_info.geo_location.region}, {manager.workerInfo.worker_info.geo_location.country_name}</span>
-                              </div>
-                            )}
+                            <span className="text-gray-400">{progress.current_batch}/{progress.total_batches} batches</span>
+                          </div>
+                          <div className="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
+                            <div className={`h-1.5 rounded-full transition-all duration-300 ${hasError ? 'bg-red-500' : trainingStatus.stage === 'fit' ? 'bg-blue-500' : 'bg-emerald-500'}`} style={{ width: `${progress.progress * 100}%` }} />
                           </div>
                         </div>
-                        <div className="flex items-center gap-1">
-                          <button onClick={() => showInfo('manager', `${manager.workspace}::${manager.serviceId}`)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg" title="Show info">
-                            <FaInfo size={12} />
-                          </button>
-                          <button onClick={() => removeManager(manager.serviceId)} className="p-1.5 text-orange-600 hover:bg-orange-50 rounded-lg" title="Disconnect">
-                            <FaUnlink size={12} />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
 
-              {/* Available workers not yet connected */}
-              {(() => {
-                const allDiscovered = observedWorkspaces.flatMap(ws =>
-                  (discoveredWorkers[ws] || []).map(w => ({ ...w, workspace: ws }))
-                );
-                const available = allDiscovered.filter(w => !managers.find(m => m.serviceId === w.serviceId));
-                if (available.length === 0 && managers.length === 0) {
-                  return <p className="text-gray-500 text-center py-6 text-sm">No workers with Chiron Manager found in observed workspaces</p>;
-                }
-                if (available.length === 0) return null;
-                return (
-                  <div>
-                    <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Available</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                      {available.map(worker => (
-                        <div key={worker.serviceId} className="bg-white border border-gray-200 rounded-xl p-4 hover:border-blue-300 hover:shadow-sm transition-all duration-200">
-                          <div className="flex items-center mb-3">
-                            <img src="/bioengine-icon.svg" alt="BioEngine" className="w-7 h-7 mr-2" />
-                            <div className="flex-1 min-w-0">
-                              <p className="font-medium text-gray-800 text-sm truncate">{worker.name}</p>
-                              <p className="text-xs text-gray-400 font-mono truncate">{worker.workspace}</p>
-                            </div>
+              {/* Loss Charts */}
+              {trainingHistory && ((trainingHistory.training_losses?.length > 0) || (trainingHistory.validation_losses?.length > 0)) && (
+                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+                  <h3 className="font-semibold text-gray-900 mb-4 text-sm">Training History</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                    {[
+                      { title: 'Training Loss', data: trainingHistory.training_losses, color: '#2563eb', fill: '#dbeafe' },
+                      { title: 'Validation Loss', data: trainingHistory.validation_losses, color: '#10b981', fill: '#d1fae5' },
+                    ].filter(chart => chart.data && chart.data.length > 0).map(chart => {
+                      const lossData = chart.data.map((item: [number, number]) => ({ round: item[0], value: item[1] }));
+                      const values = lossData.map(d => d.value);
+                      const maxV = Math.max(...values); const minV = Math.min(...values);
+                      const range = maxV - minV || 1;
+                      const PAD = { l: 52, r: 16, t: 16, b: 36 };
+                      const W = 420; const H = 180;
+                      const plotW = W - PAD.l - PAD.r; const plotH = H - PAD.t - PAD.b;
+                      const pts = lossData.map((d, i) => {
+                        const x = PAD.l + (i / Math.max(lossData.length - 1, 1)) * plotW;
+                        const y = PAD.t + ((maxV - d.value) / range) * plotH;
+                        return { x, y, d };
+                      });
+                      return (
+                        <div key={chart.title}>
+                          <h4 className="text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">{chart.title}</h4>
+                          <div className="bg-gray-50 rounded-xl p-2 border border-gray-100">
+                            <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
+                              {/* Y grid + labels */}
+                              {Array.from({ length: 5 }).map((_, i) => {
+                                const v = maxV - (i / 4) * range;
+                                const y = PAD.t + (i / 4) * plotH;
+                                return (
+                                  <g key={i}>
+                                    <line x1={PAD.l} y1={y} x2={W - PAD.r} y2={y} stroke="#e5e7eb" strokeWidth="1" />
+                                    <text x={PAD.l - 4} y={y + 4} textAnchor="end" fontSize="9" fill="#9ca3af">{v.toFixed(3)}</text>
+                                  </g>
+                                );
+                              })}
+                              {/* X labels */}
+                              {pts.filter((_, i, a) => i === 0 || i === a.length - 1 || (a.length <= 10) || i % Math.ceil(a.length / 5) === 0).map(({ x, d }, i) => (
+                                <text key={i} x={x} y={H - 8} textAnchor="middle" fontSize="9" fill="#9ca3af">{d.round}</text>
+                              ))}
+                              <text x={W / 2} y={H - 1} textAnchor="middle" fontSize="9" fill="#6b7280">Round</text>
+                              {/* Area fill */}
+                              {pts.length > 1 && (
+                                <polygon
+                                  points={[...pts.map(p => `${p.x},${p.y}`), `${pts[pts.length - 1].x},${PAD.t + plotH}`, `${pts[0].x},${PAD.t + plotH}`].join(' ')}
+                                  fill={chart.fill} opacity="0.5"
+                                />
+                              )}
+                              {/* Line */}
+                              {pts.length > 1 && (
+                                <polyline points={pts.map(p => `${p.x},${p.y}`).join(' ')} fill="none" stroke={chart.color} strokeWidth="2" strokeLinejoin="round" />
+                              )}
+                              {/* Dots */}
+                              {pts.map(({ x, y, d }, i) => (
+                                <circle key={i} cx={x} cy={y} r="3.5" fill={chart.color} stroke="white" strokeWidth="1.5">
+                                  <title>Round {d.round}: {d.value.toFixed(4)}</title>
+                                </circle>
+                              ))}
+                            </svg>
                           </div>
-                          <div className="mb-3 space-y-1.5">
-                            {worker.geo_location && (
-                              <div className="flex items-center gap-1.5 text-xs text-gray-500">
-                                <svg className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                                </svg>
-                                <span>
-                                  {[worker.geo_location.region, worker.geo_location.country_name, worker.geo_location.continent_code]
-                                    .filter(Boolean).join(', ')}
-                                </span>
-                              </div>
-                            )}
-                            {worker.datasetCount !== undefined && (
-                              <div className="flex items-center gap-1.5 text-xs text-gray-500">
-                                <svg className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-                                </svg>
-                                <span>{worker.datasetCount} dataset{worker.datasetCount !== 1 ? 's' : ''} available</span>
-                              </div>
-                            )}
-                          </div>
-                          <button
-                            onClick={() => connectWorker(worker.serviceId, worker.workspace)}
-                            disabled={connectingServiceId === worker.serviceId}
-                            className="w-full px-3 py-2 bg-gradient-to-r from-blue-600 to-blue-700 text-white text-sm rounded-lg hover:from-blue-700 hover:to-blue-800 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed flex items-center justify-center transition-all duration-200"
-                          >
-                            {connectingServiceId === worker.serviceId ? (
-                              <><BiLoaderAlt className="mr-1.5 animate-spin" size={14} />Connecting...</>
-                            ) : (
-                              <><FaPlus className="mr-1.5" size={10} />Connect</>
-                            )}
-                          </button>
                         </div>
-                      ))}
-                    </div>
+                      );
+                    })}
                   </div>
-                );
-              })()}
-            </>
+                </div>
+              )}
+
+              <div className="flex justify-start">
+                <button onClick={() => setCurrentStep(2)} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+                  Back to Selection
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </div>
 
-      {/* Step 2: Create Orchestrators and Trainers */}
-      {managers.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-          <h2 className="text-xl font-semibold text-gray-900 mb-4">
-            Start Orchestrators and Trainers
-          </h2>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {managers.map((manager) => {
-              const workerId = `${manager.workspace}::${manager.serviceId}`;
-              const managerId = manager.serviceId;
-              const isDisconnected = !manager.isConnected;
-              
-              return (
-                <div 
-                  key={workerId} 
-                  className={`border rounded-lg p-4 ${isDisconnected ? 'border-red-300 bg-red-50 opacity-75' : 'border-gray-200'}`}
-                >
-                  <div className="flex items-center justify-between mb-3">
-                    <div>
-                      <h3 className="font-medium text-gray-900">{manager.workspace}</h3>
-                      <p className="text-xs text-gray-500 break-all">Manager: {manager.serviceId}</p>
-                    </div>
-                    {isDisconnected && (
-                      <span className="text-xs px-2 py-1 bg-red-200 text-red-800 rounded font-medium">
-                        DISCONNECTED
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Orchestrator section */}
-                  <div className="mb-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-medium text-gray-700">Orchestrator</span>
-                      {!orchestrators.find(o => o.managerId === managerId) && (
-                        <button
-                          onClick={() => {
-                            setCreatingFor(managerId);
-                            setShowCreateOrchestrator(true);
-                          }}
-                          disabled={isDisconnected}
-                          className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-50 rounded disabled:text-gray-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
-                          title={isDisconnected ? "Cannot create while disconnected" : "Create orchestrator"}
-                        >
-                          Create
-                        </button>
-                      )}
-                    </div>
-
-                    {orchestrators.filter(o => o.managerId === managerId).map((orch) => (
-                      <div key={orch.appId} className="bg-gray-50 p-3 rounded flex items-center justify-between">
-                        <div className="flex-1">
-                          <p className="text-sm font-medium">{orch.displayName || 'Chiron Orchestrator'}</p>
-                          <p className="text-xs text-gray-600 mt-0.5">Application ID: {orch.applicationId || orch.appId}</p>
-                          <p className="text-xs text-gray-500">Artifact: {orch.artifactId}</p>
-                          <div className="mt-1">{getStatusBadge(orch.status)}</div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => showInfo('orchestrator', `${managerId}::${orch.appId}`)}
-                            className="p-2 text-blue-600 hover:bg-blue-100 rounded"
-                          >
-                            <FaInfo />
-                          </button>
-                          <button
-                            onClick={() => removeOrchestrator(managerId)}
-                            disabled={isDisconnected}
-                            className="p-2 text-red-600 hover:bg-red-50 rounded disabled:text-gray-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
-                            title={isDisconnected ? "Cannot remove while disconnected" : "Remove orchestrator"}
-                          >
-                            <FaTrash />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Trainers section */}
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-medium text-gray-700">Trainers</span>
-                      <button
-                        onClick={() => {
-                          setCreatingFor(managerId);
-                          setShowCreateTrainer(true);
-                        }}
-                        disabled={isDisconnected}
-                        className="text-xs px-2 py-1 text-blue-600 hover:bg-blue-50 rounded disabled:text-gray-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
-                        title={isDisconnected ? "Cannot create while disconnected" : "Create trainer"}
-                      >
-                        Create
-                      </button>
-                    </div>
-
-                    <div className="space-y-2">
-                      {trainers.filter(t => t.managerId === managerId).map((trainer) => (
-                        <div key={trainer.appId} className="bg-gray-50 p-3 rounded">
-                          <div className="flex items-center justify-between mb-2">
-                            <div className="flex-1">
-                              <p className="text-sm font-medium">{trainer.displayName || 'Trainer'}</p>
-                              <p className="text-xs text-gray-600 mt-0.5">Application ID: {trainer.applicationId || trainer.appId}</p>
-                              <p className="text-xs text-gray-500">Artifact: {trainer.artifactId}</p>
-                              <p className="text-xs text-gray-500 mt-1">Datasets: {Object.keys(trainer.datasets).join(', ') || 'None'}</p>
-                              <div className="mt-1">{getStatusBadge(trainer.status)}</div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => showInfo('trainer', `${managerId}::${trainer.appId}`)}
-                                className="p-2 text-blue-600 hover:bg-blue-100 rounded"
-                              >
-                                <FaInfo />
-                              </button>
-                              <button
-                                onClick={() => removeTrainer(managerId, trainer.appId)}
-                                disabled={isDisconnected}
-                                className="p-2 text-red-600 hover:bg-red-50 rounded disabled:text-gray-400 disabled:hover:bg-transparent disabled:cursor-not-allowed"
-                                title={isDisconnected ? "Cannot remove while disconnected" : "Remove trainer"}
-                              >
-                                <FaTrash />
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                      {trainers.filter(t => t.managerId === managerId).length === 0 && (
-                        <p className="text-xs text-gray-500 text-center py-2">No trainers</p>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Selection section */}
-          <div className="mt-6 pt-6 border-t border-gray-200">
-            <h3 className="font-medium text-gray-900 mb-3">Select Applications for Training</h3>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Select orchestrator */}
+      {/* ====== LAUNCH APP DIALOG ====== */}
+      {showLaunchDialog && launchDialogManagerId && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Orchestrator (select one)
-                  {isTraining && <span className="text-xs text-orange-600 ml-2">(Cannot change during training)</span>}
-                </label>
-                <div className="space-y-2">
-                  {orchestrators.filter(o => o.status === 'RUNNING').map((orch) => (
-                    <label 
-                      key={`${orch.managerId}::${orch.appId}`} 
-                      className={`flex items-center p-3 bg-gray-50 rounded ${isTraining ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:bg-gray-100'}`}
-                    >
-                      <input
-                        type="radio"
-                        name="orchestrator"
-                        checked={selectedOrchestrator === `${orch.managerId}::${orch.appId}`}
-                        onChange={() => handleOrchestratorSelectionChange(`${orch.managerId}::${orch.appId}`)}
-                        disabled={isTraining}
-                        className="mr-3"
-                      />
-                      <div>
-                        <p className="text-sm font-medium">{orch.displayName || 'Chiron Orchestrator'}</p>
-                        <p className="text-xs text-gray-600">App ID: {orch.applicationId || orch.appId}</p>
-                        <p className="text-xs text-gray-500">Worker: {orch.managerId.split('/')[1]?.split(':')[0] || orch.managerId}</p>
-                      </div>
-                    </label>
-                  ))}
-                  {orchestrators.filter(o => o.status === 'RUNNING').length === 0 && (
-                    <p className="text-sm text-gray-500">No running orchestrators available</p>
-                  )}
-                </div>
+                <h3 className="font-semibold text-gray-900">Launch Application</h3>
+                <p className="text-xs text-gray-500 mt-0.5 font-mono">{launchDialogManagerId.split('/')[1]?.split(':')[0] || launchDialogManagerId}</p>
               </div>
-
-              {/* Select trainers */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Trainers (select multiple)
-                  {isTraining && <span className="text-xs text-blue-600 ml-2">(Deselecting removes from next round)</span>}
-                  {!selectedOrchestrator && <span className="text-xs text-orange-600 ml-2">(Select orchestrator first)</span>}
-                  {isLoadingRegisteredTrainers && <BiLoaderAlt className="inline ml-2 animate-spin" />}
-                </label>
-                <div className="space-y-2">
-                  {trainers.filter(t => t.status === 'RUNNING').map((trainer) => {
-                    const trainerId = `${trainer.managerId}::${trainer.appId}`;
-                    const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
-                    const isRegistered = registeredTrainers.includes(trainerServiceId);
-                    
-                    return (
-                      <label 
-                        key={trainerId} 
-                        className={`flex items-center p-3 rounded ${
-                          !selectedOrchestrator 
-                            ? 'bg-gray-100 cursor-not-allowed opacity-60' 
-                            : 'bg-gray-50 cursor-pointer hover:bg-gray-100'
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isRegistered}
-                          disabled={!selectedOrchestrator || isLoadingRegisteredTrainers}
-                          onChange={async (e) => {
-                            const isChecked = e.target.checked;
-                            
-                            // Register or unregister with orchestrator
-                            if (isChecked) {
-                              await registerTrainer(trainerId);
-                            } else {
-                              await unregisterTrainer(trainerId);
-                            }
-                          }}
-                          className="mr-3"
-                        />
-                        <div className="flex-1">
-                          <p className="text-sm font-medium">{trainer.displayName || 'Trainer'}</p>
-                          <p className="text-xs text-gray-600">App ID: {trainer.applicationId || trainer.appId}</p>
-                          <p className="text-xs text-gray-500">Worker: {trainer.managerId.split('/')[1]?.split(':')[0] || trainer.managerId}</p>
-                          <p className="text-xs text-gray-500">Datasets: {Object.keys(trainer.datasets).join(', ') || 'None'}</p>
-                        </div>
-                      </label>
-                    );
-                  })}
-                  {trainers.filter(t => t.status === 'RUNNING').length === 0 && (
-                    <p className="text-sm text-gray-500">No running trainers available</p>
-                  )}
-                </div>
-              </div>
+              <button onClick={() => { setShowLaunchDialog(false); setLaunchDialogManagerId(null); setNewTrainerDatasets([]); }} className="text-gray-400 hover:text-gray-600 p-1">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* Step 3: Start Training */}
-      {selectedOrchestrator && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-          {/* Training Configuration Panel */}
-          <TrainingConfigPanel
-            params={trainerParams}
-            loading={trainerParamsLoading}
-            error={trainerParamsError}
-            onStart={startTraining}
-            isPreparingTraining={isPreparingTraining}
-            isTraining={isTraining}
-          />
-
-          {/* Training controls */}
-          <div className="mb-6 mt-6">
-            <div className="flex items-center gap-3">
-              {isTraining && (
-                <button
-                  onClick={stopTraining}
-                  disabled={isStoppingTraining}
-                  className="px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:bg-red-400 disabled:cursor-not-allowed flex items-center font-medium"
-                >
-                  {isStoppingTraining ? (
-                    <>
-                      <BiLoaderAlt className="mr-2 animate-spin" />
-                      Stopping...
-                    </>
+            {/* Tabs */}
+            <div className="flex border-b border-gray-100">
+              {(['orchestrator', 'trainer'] as const).map(tab => (
+                <button key={tab} onClick={() => setLaunchDialogTab(tab)} className={`flex-1 py-3 text-sm font-medium transition-colors capitalize ${launchDialogTab === tab ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'}`}>
+                  {tab === 'orchestrator' ? '🎭 Orchestrator' : '🏋 Trainer'}
+                </button>
+              ))}
+            </div>
+            <div className="p-6">
+              {launchDialogTab === 'orchestrator' && (
+                <div className="space-y-4">
+                  {orchestrators.find(o => o.managerId === launchDialogManagerId) ? (
+                    <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
+                      This worker already has an orchestrator ({getStatusBadge(orchestrators.find(o => o.managerId === launchDialogManagerId)?.status)}). Only one orchestrator per worker is supported.
+                    </div>
                   ) : (
                     <>
-                      <FaStop className="mr-2" />
-                      Stop Training
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1.5">Artifact ID</label>
+                        <input type="text" value={newOrchestratorArtifactId} onChange={e => setNewOrchestratorArtifactId(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="chiron-platform/chiron-orchestrator" />
+                      </div>
+                      <button onClick={() => { setCreatingFor(launchDialogManagerId); createOrchestrator(launchDialogManagerId); }} disabled={isCreatingOrchestrator || !newOrchestratorArtifactId.trim()} className="w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                        {isCreatingOrchestrator ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Orchestrator</>}
+                      </button>
                     </>
                   )}
-                </button>
+                </div>
               )}
-
-              <button
-                onClick={resetTrainingState}
-                disabled={isTraining}
-                className="px-6 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center font-medium"
-                title="Reset training state (clears history and parameters)"
-              >
-                <FaTrash className="mr-2" />
-                Reset State
-              </button>
-            </div>
-          </div>
-
-          {/* Training status - only show when actively training */}
-          {isTraining && trainingStatus && (
-            <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-medium text-blue-900">
-                  Training Round {trainingStatus.current_training_round} / {trainingStatus.target_round}
-                </h3>
-                <span className="text-sm font-medium text-blue-700 uppercase">
-                  {trainingStatus.stage || 'Idle'}
-                </span>
-              </div>
-
-              <div className="space-y-2">
-                {Object.entries(trainingStatus.trainers_progress).map(([trainerId, progress]) => {
-                  const hasError = !!progress.error;
-                  const stageColor = trainingStatus.stage === 'fit' ? 'bg-blue-600' : 'bg-green-600';
-                  
-                  return (
-                    <div key={trainerId}>
-                      <div className="flex justify-between text-sm mb-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-gray-700">Trainer {getTrainerAppId(trainerId)}</span>
-                          {hasError && (
-                            <button
-                              onClick={() => {
-                                setErrorDetailTrainerId(getTrainerAppId(trainerId));
-                                setErrorDetailMessage(progress.error || 'Unknown error');
-                                setShowErrorDetailModal(true);
-                              }}
-                              className="text-red-600 hover:text-red-800"
-                              title="View error details"
-                            >
-                              <FaTimesCircle />
-                            </button>
-                          )}
-                        </div>
-                        <span className="text-gray-600">
-                          {progress.current_batch} / {progress.total_batches} batches
-                        </span>
-                      </div>
-                      <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
-                        <div
-                          className={`${hasError ? 'bg-red-600' : stageColor} h-2 rounded-full transition-all duration-300 relative`}
-                          style={{ width: `${progress.progress * 100}%` }}
-                        >
-                          {/* Animated shimmer effect */}
-                          {!hasError && (
-                            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer"></div>
-                          )}
-                        </div>
-                      </div>
+              {launchDialogTab === 'trainer' && (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Datasets <span className="text-red-500">*</span></label>
+                    <div className="max-h-44 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-50">
+                      {(() => {
+                        const manager = managers.find(m => m.serviceId === launchDialogManagerId);
+                        const datasets = manager?.workerInfo?.datasets || {};
+                        const entries = Object.entries(datasets);
+                        if (entries.length === 0) return <p className="text-sm text-gray-400 text-center py-4">No datasets available on this worker</p>;
+                        return entries.map(([datasetId, manifest]: [string, any]) => {
+                          const hasAccess = hasDatasetAccess(manifest);
+                          return (
+                            <label key={datasetId} className={`flex items-center gap-2.5 px-3 py-2.5 ${hasAccess ? 'hover:bg-gray-50 cursor-pointer' : 'opacity-50 cursor-not-allowed bg-red-50'}`}>
+                              <input type="checkbox" checked={newTrainerDatasets.includes(datasetId)} onChange={e => { e.target.checked ? setNewTrainerDatasets(p => [...p, datasetId]) : setNewTrainerDatasets(p => p.filter(d => d !== datasetId)); }} disabled={!hasAccess} className="accent-emerald-600 flex-shrink-0" />
+                              <div className="flex-1 min-w-0">
+                                <span className="text-sm text-gray-800">{manifest.name || datasetId}</span>
+                                {!hasAccess && <span className="ml-2 text-xs text-red-500">(No access)</span>}
+                              </div>
+                            </label>
+                          );
+                        });
+                      })()}
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Training history */}
-          {trainingHistory && ((trainingHistory.training_losses && trainingHistory.training_losses.length > 0) || 
-                                (trainingHistory.validation_losses && trainingHistory.validation_losses.length > 0)) && (
-            <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
-              <h3 className="font-medium text-gray-900 mb-4">Training History</h3>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Training Loss chart */}
-                {trainingHistory.training_losses && trainingHistory.training_losses.length > 0 && (
-                  <div>
-                    <h4 className="text-sm font-medium text-gray-700 mb-2">Training Loss</h4>
-                    <div className="relative h-64 bg-white border border-gray-200 rounded p-4">
-                      <svg className="w-full h-full" viewBox="0 0 450 200">
-                        {(() => {
-                          // Extract values from [[round, loss], [round, loss], ...]
-                          const lossData = trainingHistory.training_losses.map((item: [number, number]) => ({
-                            round: item[0],
-                            value: item[1]
-                          }));
-                          
-                          const lossValues = lossData.map((d: {round: number, value: number}) => d.value);
-                          const maxLoss = Math.max(...lossValues);
-                          const minLoss = Math.min(...lossValues);
-                          const range = maxLoss - minLoss || 1;
-                          const numYTicks = 5;
-                        
-                        return (
-                          <>
-                            {/* Grid lines and Y-axis labels */}
-                            {Array.from({ length: numYTicks }).map((_, i) => {
-                              const value = maxLoss - (i * range / (numYTicks - 1));
-                              const y = 20 + (i * 140 / (numYTicks - 1));
-                              return (
-                                <g key={i}>
-                                  <line x1="50" y1={y} x2="420" y2={y} stroke="#e5e7eb" strokeWidth="1" />
-                                  <text x="45" y={y + 4} textAnchor="end" fontSize="10" fill="#6b7280">
-                                    {value.toFixed(3)}
-                                  </text>
-                                </g>
-                              );
-                            })}
-                            
-                            {/* X-axis labels - show round numbers */}
-                            {lossData.map((d: {round: number, value: number}, i: number) => {
-                              const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
-                              return (
-                                <text key={i} x={x} y="180" textAnchor="middle" fontSize="10" fill="#6b7280">
-                                  {d.round}
-                                </text>
-                              );
-                            })}
-                            
-                            {/* X-axis label */}
-                            <text x="235" y="195" textAnchor="middle" fontSize="11" fill="#374151" fontWeight="500">
-                              Round
-                            </text>
-                            
-                            {/* Plot line */}
-                            <polyline
-                              points={lossData.map((d: {round: number, value: number}, i: number) => {
-                                const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
-                                const y = 20 + ((maxLoss - d.value) / range) * 140;
-                                return `${x},${y}`;
-                              }).join(' ')}
-                              fill="none"
-                              stroke="#2563eb"
-                              strokeWidth="2"
-                            />
-                            
-                            {/* Plot points */}
-                            {lossData.map((d: {round: number, value: number}, i: number) => {
-                              const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
-                              const y = 20 + ((maxLoss - d.value) / range) * 140;
-                              return (
-                                <g key={i}>
-                                  <circle cx={x} cy={y} r="4" fill="#2563eb" />
-                                  <title>{`Round ${d.round}: ${d.value.toFixed(4)}`}</title>
-                                </g>
-                              );
-                            })}
-                          </>
-                        );
-                      })()}
-                    </svg>
                   </div>
-                </div>
-                )}
-
-                {/* Validation Loss chart */}
-                {trainingHistory.validation_losses && trainingHistory.validation_losses.length > 0 && (
                   <div>
-                    <h4 className="text-sm font-medium text-gray-700 mb-2">Validation Loss</h4>
-                    <div className="relative h-64 bg-white border border-gray-200 rounded p-4">
-                      <svg className="w-full h-full" viewBox="0 0 450 200">
-                        {(() => {
-                          // Extract values from [[round, loss], [round, loss], ...]
-                          const lossData = trainingHistory.validation_losses.map((item: [number, number]) => ({
-                            round: item[0],
-                            value: item[1]
-                          }));
-                          
-                          const lossValues = lossData.map((d: {round: number, value: number}) => d.value);
-                          const maxLoss = Math.max(...lossValues);
-                          const minLoss = Math.min(...lossValues);
-                          const range = maxLoss - minLoss || 1;
-                          const numYTicks = 5;
-                        
-                        return (
-                          <>
-                            {/* Grid lines and Y-axis labels */}
-                            {Array.from({ length: numYTicks }).map((_, i) => {
-                              const value = maxLoss - (i * range / (numYTicks - 1));
-                              const y = 20 + (i * 140 / (numYTicks - 1));
-                              return (
-                                <g key={i}>
-                                  <line x1="50" y1={y} x2="420" y2={y} stroke="#e5e7eb" strokeWidth="1" />
-                                  <text x="45" y={y + 4} textAnchor="end" fontSize="10" fill="#6b7280">
-                                    {value.toFixed(3)}
-                                  </text>
-                                </g>
-                              );
-                            })}
-                            
-                            {/* X-axis labels - show round numbers */}
-                            {lossData.map((d: {round: number, value: number}, i: number) => {
-                              const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
-                              return (
-                                <text key={i} x={x} y="180" textAnchor="middle" fontSize="10" fill="#6b7280">
-                                  {d.round}
-                                </text>
-                              );
-                            })}
-                            
-                            {/* X-axis label */}
-                            <text x="235" y="195" textAnchor="middle" fontSize="11" fill="#374151" fontWeight="500">
-                              Round
-                            </text>
-                            
-                            {/* Plot line */}
-                            <polyline
-                              points={lossData.map((d: {round: number, value: number}, i: number) => {
-                                const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
-                                const y = 20 + ((maxLoss - d.value) / range) * 140;
-                                return `${x},${y}`;
-                              }).join(' ')}
-                              fill="none"
-                              stroke="#10b981"
-                              strokeWidth="2"
-                            />
-                            
-                            {/* Plot points */}
-                            {lossData.map((d: {round: number, value: number}, i: number) => {
-                              const x = 50 + (i / Math.max(lossData.length - 1, 1)) * 370;
-                              const y = 20 + ((maxLoss - d.value) / range) * 140;
-                              return (
-                                <g key={i}>
-                                  <circle cx={x} cy={y} r="4" fill="#10b981" />
-                                  <title>{`Round ${d.round}: ${d.value.toFixed(4)}`}</title>
-                                </g>
-                              );
-                            })}
-                          </>
-                        );
-                      })()}
-                    </svg>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Artifact ID</label>
+                    <input type="text" value={newTrainerArtifactId} onChange={e => setNewTrainerArtifactId(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="chiron-platform/tabula-trainer" />
                   </div>
+                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainer || newTrainerDatasets.length === 0} className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                    {isCreatingTrainer ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Trainer ({newTrainerDatasets.length} dataset{newTrainerDatasets.length !== 1 ? 's' : ''})</>}
+                  </button>
                 </div>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Create Orchestrator Modal */}
-      {showCreateOrchestrator && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4">Create Orchestrator</h3>
-
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Trainer Artifact ID
-              </label>
-              <input
-                type="text"
-                value={newOrchestratorArtifactId}
-                onChange={(e) => setNewOrchestratorArtifactId(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-              />
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={() => {
-                  setShowCreateOrchestrator(false);
-                  setCreatingFor(null);
-                }}
-                disabled={isCreatingOrchestrator}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:bg-gray-200 disabled:cursor-not-allowed"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => creatingFor && createOrchestrator(creatingFor)}
-                disabled={isCreatingOrchestrator}
-                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed flex items-center justify-center"
-              >
-                {isCreatingOrchestrator ? (
-                  <>
-                    <BiLoaderAlt className="mr-2 animate-spin" />
-                    Creating...
-                  </>
-                ) : (
-                  'Create'
-                )}
-              </button>
+              )}
             </div>
           </div>
         </div>
       )}
 
-      {/* Create Trainer Modal */}
-      {showCreateTrainer && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4">Create Trainer</h3>
-
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Datasets (select at least one)
-              </label>
-              <div className="max-h-48 overflow-y-auto border border-gray-300 rounded-lg p-2">
-                {creatingFor && managers.find(m => m.serviceId === creatingFor)?.workerInfo?.datasets &&
-                  Object.entries(managers.find(m => m.serviceId === creatingFor)!.workerInfo!.datasets!).map(([datasetId, manifest]: [string, any]) => {
-                    const hasAccess = hasDatasetAccess(manifest);
-                    return (
-                      <label
-                        key={datasetId}
-                        className={`flex items-center p-2 rounded ${hasAccess ? 'hover:bg-gray-50 cursor-pointer' : 'opacity-50 cursor-not-allowed'}`}
-                        title={!hasAccess ? 'You do not have access to this dataset' : ''}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={newTrainerDatasets.includes(datasetId)}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setNewTrainerDatasets([...newTrainerDatasets, datasetId]);
-                            } else {
-                              setNewTrainerDatasets(newTrainerDatasets.filter(d => d !== datasetId));
-                            }
-                          }}
-                          disabled={!hasAccess}
-                          className="mr-2"
-                        />
-                        <div className="flex-1">
-                          <span className="text-sm">{manifest.name || datasetId}</span>
-                          {!hasAccess && <span className="ml-2 text-xs text-red-600">(No access)</span>}
-                        </div>
-                      </label>
-                    );
-                  })
-                }
-              </div>
-            </div>
-
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Trainer Artifact ID
-              </label>
-              <input
-                type="text"
-                value={newTrainerArtifactId}
-                onChange={(e) => setNewTrainerArtifactId(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-              />
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={() => {
-                  setShowCreateTrainer(false);
-                  setCreatingFor(null);
-                  setNewTrainerDatasets([]);
-                }}
-                disabled={isCreatingTrainer}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:bg-gray-200 disabled:cursor-not-allowed"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => creatingFor && createTrainer(creatingFor)}
-                disabled={newTrainerDatasets.length === 0 || isCreatingTrainer}
-                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center"
-              >
-                {isCreatingTrainer ? (
-                  <>
-                    <BiLoaderAlt className="mr-2 animate-spin" />
-                    Creating...
-                  </>
-                ) : (
-                  'Create'
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Info Modal */}
+      {/* ====== INFO MODAL ====== */}
       {showInfoModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">
-                {infoModalType === 'manager' && 'Worker Information'}
-                {infoModalType === 'orchestrator' && 'Orchestrator Information'}
-                {infoModalType === 'trainer' && 'Trainer Information'}
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between flex-shrink-0">
+              <h3 className="font-semibold text-gray-900">
+                {infoModalType === 'manager' ? 'Worker Information' : infoModalType === 'orchestrator' ? 'Orchestrator Information' : 'Trainer Information'}
               </h3>
-              <button
-                onClick={() => setShowInfoModal(false)}
-                className="text-gray-400 hover:text-gray-600 text-xl"
-              >
-                ✕
+              <button onClick={() => setShowInfoModal(false)} className="text-gray-400 hover:text-gray-600 p-1">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
-
-            {isInfoModalLoading ? (
-              <div className="flex items-center justify-center py-12">
-                <FaSpinner className="animate-spin text-blue-600 text-4xl" />
-              </div>
-            ) : (
-              <>
-                {infoModalType === 'manager' && infoModalData && 'workspace' in infoModalData && (
-                  <div>
-                    <h4 className="font-medium text-gray-900 mb-2">Workspace: {infoModalData.workspace}</h4>
-
-                    {/* Worker Location Map */}
-                    {infoModalData.location && (
-                      <div className="mb-4">
-                        <h5 className="font-medium text-gray-700 mb-2">Approximate Location:</h5>
-                        <WorkerMap 
-                          country={infoModalData.location.country_name} 
-                          region={infoModalData.location.region}
-                          continent={infoModalData.location.continent_code}
-                          latitude={infoModalData.location.latitude}
-                          longitude={infoModalData.location.longitude}
-                        />
-                      </div>
-                    )}
-
-                    {/* Cluster Status */}
-                    {infoModalData.clusterStatus && (
-                      <div className="mb-4">
-                        <h5 className="font-medium text-gray-700 mb-2">Cluster Status:</h5>
-                        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                          <div className="grid grid-cols-2 gap-4">
-                        {/* CPU */}
+            <div className="flex-1 overflow-y-auto p-6">
+              {isInfoModalLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <FaSpinner className="animate-spin text-blue-500 text-3xl" />
+                </div>
+              ) : (
+                <>
+                  {infoModalType === 'manager' && infoModalData && 'workspace' in infoModalData && (
+                    <div className="space-y-4">
+                      <div className="text-sm font-medium text-gray-700">Workspace: <span className="font-mono text-gray-900">{infoModalData.workspace}</span></div>
+                      {infoModalData.clusterStatus && (
                         <div>
-                          <p className="text-xs font-medium text-gray-600 mb-1">CPU</p>
-                          <div className="flex items-center justify-between text-sm">
-                            <span className="text-gray-700">
-                              {infoModalData.clusterStatus.available_cpu?.toFixed(1)} / {infoModalData.clusterStatus.total_cpu?.toFixed(1)} cores
-                            </span>
-                          </div>
-                          <div className="mt-1 w-full bg-gray-200 rounded-full h-2">
-                            <div
-                              className="bg-blue-600 h-2 rounded-full"
-                              style={{ width: `${((infoModalData.clusterStatus.available_cpu || 0) / (infoModalData.clusterStatus.total_cpu || 1)) * 100}%` }}
-                            ></div>
+                          <h5 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Cluster Resources</h5>
+                          <div className="grid grid-cols-2 gap-3">
+                            {[
+                              { label: 'CPU', val: `${infoModalData.clusterStatus.available_cpu?.toFixed(1)} / ${infoModalData.clusterStatus.total_cpu?.toFixed(1)} cores`, pct: (infoModalData.clusterStatus.available_cpu || 0) / (infoModalData.clusterStatus.total_cpu || 1), color: 'bg-blue-500' },
+                              ...(infoModalData.clusterStatus.total_gpu > 0 ? [{ label: 'GPU', val: `${infoModalData.clusterStatus.available_gpu} / ${infoModalData.clusterStatus.total_gpu}`, pct: (infoModalData.clusterStatus.available_gpu || 0) / (infoModalData.clusterStatus.total_gpu || 1), color: 'bg-emerald-500' }] : []),
+                              { label: 'Memory', val: `${(infoModalData.clusterStatus.available_memory / 1e9).toFixed(1)} / ${(infoModalData.clusterStatus.total_memory / 1e9).toFixed(1)} GB`, pct: (infoModalData.clusterStatus.available_memory || 0) / (infoModalData.clusterStatus.total_memory || 1), color: 'bg-purple-500' },
+                            ].map(r => (
+                              <div key={r.label} className="bg-gray-50 rounded-xl p-3">
+                                <p className="text-xs font-medium text-gray-500 mb-1">{r.label}</p>
+                                <p className="text-sm text-gray-900 mb-2">{r.val}</p>
+                                <div className="w-full bg-gray-200 rounded-full h-1.5"><div className={`${r.color} h-1.5 rounded-full`} style={{ width: `${r.pct * 100}%` }} /></div>
+                              </div>
+                            ))}
                           </div>
                         </div>
-
-                        {/* GPU */}
-                        {infoModalData.clusterStatus.total_gpu > 0 && (
-                          <div>
-                            <p className="text-xs font-medium text-gray-600 mb-1">GPU</p>
-                            <div className="flex items-center justify-between text-sm">
-                              <span className="text-gray-700">
-                                {infoModalData.clusterStatus.available_gpu} / {infoModalData.clusterStatus.total_gpu} GPUs
-                              </span>
-                            </div>
-                            <div className="mt-1 w-full bg-gray-200 rounded-full h-2">
-                              <div
-                                className="bg-green-600 h-2 rounded-full"
-                                style={{ width: `${((infoModalData.clusterStatus.available_gpu || 0) / (infoModalData.clusterStatus.total_gpu || 1)) * 100}%` }}
-                              ></div>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Memory */}
-                        <div>
-                          <p className="text-xs font-medium text-gray-600 mb-1">Memory</p>
-                          <div className="flex items-center justify-between text-sm">
-                            <span className="text-gray-700">
-                              {(infoModalData.clusterStatus.available_memory / (1024 ** 3)).toFixed(1)} / {(infoModalData.clusterStatus.total_memory / (1024 ** 3)).toFixed(1)} GB
-                            </span>
-                          </div>
-                          <div className="mt-1 w-full bg-gray-200 rounded-full h-2">
-                            <div
-                              className="bg-purple-600 h-2 rounded-full"
-                              style={{ width: `${((infoModalData.clusterStatus.available_memory || 0) / (infoModalData.clusterStatus.total_memory || 1)) * 100}%` }}
-                            ></div>
-                          </div>
-                        </div>
-
-                        {/* Object Store Memory */}
-                        <div>
-                          <p className="text-xs font-medium text-gray-600 mb-1">Object Store</p>
-                          <div className="flex items-center justify-between text-sm">
-                            <span className="text-gray-700">
-                              {(infoModalData.clusterStatus.available_object_store_memory / (1024 ** 3)).toFixed(1)} / {(infoModalData.clusterStatus.total_object_store_memory / (1024 ** 3)).toFixed(1)} GB
-                            </span>
-                          </div>
-                          <div className="mt-1 w-full bg-gray-200 rounded-full h-2">
-                            <div
-                              className="bg-orange-600 h-2 rounded-full"
-                              style={{ width: `${((infoModalData.clusterStatus.available_object_store_memory || 0) / (infoModalData.clusterStatus.total_object_store_memory || 1)) * 100}%` }}
-                            ></div>
-                          </div>
+                      )}
+                      <div>
+                        <h5 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Datasets ({Object.keys(infoModalData.datasets).length})</h5>
+                        <div className="space-y-2">
+                          {Object.entries(infoModalData.datasets).map(([datasetId, manifest]: [string, any]) => {
+                            const hasAccess = hasDatasetAccess(manifest);
+                            return (
+                              <div key={datasetId} className={`p-3 rounded-xl ${hasAccess ? 'bg-gray-50' : 'bg-red-50 border border-red-100'}`}>
+                                <div className="flex items-center justify-between mb-1">
+                                  <p className="font-medium text-sm text-gray-900">{manifest.name || datasetId}</p>
+                                  {!hasAccess && <span className="text-xs text-red-600 font-medium">No Access</span>}
+                                </div>
+                                {manifest.description && <p className="text-xs text-gray-500">{manifest.description}</p>}
+                                {manifest.files && (
+                                  <div className="mt-2 flex flex-wrap gap-1.5">
+                                    {Object.entries(manifest.files).map(([fn, fi]: [string, any]) => (
+                                      <span key={fn} className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">{fn} ({fi.n_samples} samples)</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     </div>
-                  </div>
-                )}
-
-                <h5 className="font-medium text-gray-700 mb-2">Available Datasets:</h5>
-                <div className="space-y-3">
-                  {Object.entries(infoModalData.datasets).map(([datasetId, manifest]: [string, any]) => {
-                    const hasAccess = hasDatasetAccess(manifest);
-                    return (
-                      <div key={datasetId} className={`p-3 rounded-lg ${hasAccess ? 'bg-gray-50' : 'bg-red-50 border border-red-200'}`}>
-                        <div className="flex items-center justify-between">
-                          <p className="font-medium text-sm">{manifest.name || datasetId}</p>
-                          {!hasAccess && <span className="text-xs text-red-600 font-medium">No Access</span>}
-                        </div>
-                        <p className="text-xs text-gray-600 mt-1">{manifest.description}</p>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {manifest.files && Object.entries(manifest.files).map(([fileName, fileInfo]: [string, any]) => (
-                            <span key={fileName} className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
-                              {fileName} ({fileInfo.n_samples} samples{fileInfo.n_vars ? `, ${fileInfo.n_vars} vars` : ''})
-                            </span>
-                          ))}
+                  )}
+                  {infoModalType === 'orchestrator' && infoModalData && 'status' in infoModalData && 'artifactId' in infoModalData && !('appId' in infoModalData) && (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2"><span className="text-sm font-medium text-gray-600">Status:</span>{getStatusBadge(infoModalData.status)}</div>
+                      <div><span className="text-sm font-medium text-gray-600">Artifact: </span><span className="text-sm text-gray-800 font-mono">{infoModalData.artifactId}</span></div>
+                    </div>
+                  )}
+                  {infoModalType === 'trainer' && infoModalData && 'appId' in infoModalData && (
+                    <div className="space-y-3">
+                      <div><span className="text-sm font-medium text-gray-600">App ID: </span><span className="text-sm font-mono text-gray-800">{infoModalData.appId}</span></div>
+                      <div className="flex items-center gap-2"><span className="text-sm font-medium text-gray-600">Status:</span>{getStatusBadge(infoModalData.status)}</div>
+                      <div><span className="text-sm font-medium text-gray-600">Artifact: </span><span className="text-sm font-mono text-gray-800">{infoModalData.artifactId}</span></div>
+                      <div>
+                        <span className="text-sm font-medium text-gray-600">Datasets: </span>
+                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                          {Object.keys(infoModalData.datasets).map(d => <span key={d} className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">{d}</span>)}
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {infoModalType === 'orchestrator' && infoModalData && 'status' in infoModalData && 'artifactId' in infoModalData && !('appId' in infoModalData) && (
-              <div>
-                <div className="mb-3">
-                  <span className="text-sm font-medium text-gray-700">Status: </span>
-                  {getStatusBadge(infoModalData.status)}
-                </div>
-                <div>
-                  <span className="text-sm font-medium text-gray-700">Artifact ID: </span>
-                  <span className="text-sm text-gray-600">{infoModalData.artifactId}</span>
-                </div>
-              </div>
-            )}
-
-            {infoModalType === 'trainer' && infoModalData && 'appId' in infoModalData && (
-              <div>
-                <div className="mb-3">
-                  <span className="text-sm font-medium text-gray-700">App ID: </span>
-                  <span className="text-sm text-gray-600">{infoModalData.appId}</span>
-                </div>
-                <div className="mb-3">
-                  <span className="text-sm font-medium text-gray-700">Status: </span>
-                  {getStatusBadge(infoModalData.status)}
-                </div>
-                <div className="mb-3">
-                  <span className="text-sm font-medium text-gray-700">Artifact ID: </span>
-                  <span className="text-sm text-gray-600">{infoModalData.artifactId}</span>
-                </div>
-                <div>
-                  <span className="text-sm font-medium text-gray-700">Datasets: </span>
-                  <div className="mt-1 flex flex-wrap gap-2">
-                    {Object.keys(infoModalData.datasets).map((datasetId: string) => (
-                      <span key={datasetId} className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">
-                        {datasetId}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <button
-              onClick={() => setShowInfoModal(false)}
-              className="mt-6 w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-            >
-              Close
-            </button>
-              </>
-            )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="px-6 pb-5 flex-shrink-0">
+              <button onClick={() => setShowInfoModal(false)} className="w-full py-2.5 bg-gray-100 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-200 transition-colors">Close</button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Error Popup Modal */}
+      {/* ====== ERROR POPUP ====== */}
       {showErrorPopup && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 max-w-2xl w-full max-h-[80vh] flex flex-col">
-            <div className="flex items-start mb-4">
-              <div className="flex-shrink-0">
-                <FaTimesCircle className="text-red-600 text-3xl" />
-              </div>
-              <div className="ml-4 flex-1 min-w-0">
-                <h3 className="text-lg font-semibold text-gray-900 mb-2">{errorPopupMessage}</h3>
-              </div>
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[80vh] flex flex-col overflow-hidden">
+            <div className="px-6 py-4 border-b border-red-50 flex items-center gap-3 flex-shrink-0">
+              <FaTimesCircle className="text-red-500 flex-shrink-0" size={20} />
+              <h3 className="font-semibold text-gray-900">{errorPopupMessage}</h3>
             </div>
-            <div className="flex-1 overflow-y-auto mb-4 px-1">
-              <p className="text-sm text-gray-700 whitespace-pre-wrap break-words">{errorPopupDetails}</p>
+            <div className="flex-1 overflow-y-auto p-6">
+              <p className="text-sm text-gray-600 whitespace-pre-wrap">{errorPopupDetails}</p>
             </div>
-            <button
-              onClick={() => {
-                setShowErrorPopup(false);
-                setErrorPopupMessage('');
-                setErrorPopupDetails('');
-              }}
-              className="w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
-            >
-              Close
-            </button>
+            <div className="px-6 pb-5 flex-shrink-0">
+              <button onClick={() => { setShowErrorPopup(false); setErrorPopupMessage(''); setErrorPopupDetails(''); }} className="w-full py-2.5 bg-red-600 text-white text-sm font-medium rounded-xl hover:bg-red-700 transition-colors">Close</button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Trainer Error Detail Modal */}
+      {/* ====== TRAINER ERROR DETAIL ====== */}
       {showErrorDetailModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 max-w-2xl w-full max-h-[80vh] flex flex-col">
-            <div className="flex items-start mb-4">
-              <div className="flex-shrink-0">
-                <FaTimesCircle className="text-red-600 text-3xl" />
-              </div>
-              <div className="ml-4 flex-1 min-w-0">
-                <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                  Error in Trainer {errorDetailTrainerId}
-                </h3>
-              </div>
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col overflow-hidden">
+            <div className="px-6 py-4 border-b border-red-50 flex items-center gap-3 flex-shrink-0">
+              <FaTimesCircle className="text-red-500 flex-shrink-0" size={20} />
+              <h3 className="font-semibold text-gray-900">Error in Trainer {errorDetailTrainerId}</h3>
             </div>
-            <div className="flex-1 overflow-y-auto mb-4 px-1 bg-gray-50 rounded p-4 border border-gray-200">
-              <pre className="text-sm text-gray-700 whitespace-pre-wrap break-words font-mono">
-                {errorDetailMessage}
-              </pre>
+            <div className="flex-1 overflow-y-auto p-6">
+              <pre className="text-xs text-gray-700 whitespace-pre-wrap break-words font-mono bg-gray-50 rounded-xl p-4 border border-gray-100">{errorDetailMessage}</pre>
             </div>
-            <button
-              onClick={() => {
-                setShowErrorDetailModal(false);
-                setErrorDetailTrainerId('');
-                setErrorDetailMessage('');
-              }}
-              className="w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
-            >
-              Close
-            </button>
+            <div className="px-6 pb-5 flex-shrink-0">
+              <button onClick={() => { setShowErrorDetailModal(false); setErrorDetailTrainerId(''); setErrorDetailMessage(''); }} className="w-full py-2.5 bg-red-600 text-white text-sm font-medium rounded-xl hover:bg-red-700 transition-colors">Close</button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Confirmation Modal */}
+      {/* ====== CONFIRM MODAL ====== */}
       {showConfirmModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 max-w-md w-full">
-            <div className="flex items-start mb-4">
-              <div className="flex-shrink-0">
-                <svg className="w-8 h-8 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                </svg>
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
+            <div className="flex items-start gap-4 mb-5">
+              <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center flex-shrink-0">
+                <svg className="w-5 h-5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
               </div>
-              <div className="ml-4 flex-1">
-                <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                  {confirmModalTitle}
-                </h3>
-                <p className="text-sm text-gray-700 whitespace-pre-wrap">
-                  {confirmModalMessage}
-                </p>
+              <div>
+                <h3 className="font-semibold text-gray-900 mb-1">{confirmModalTitle}</h3>
+                <p className="text-sm text-gray-600 whitespace-pre-wrap">{confirmModalMessage}</p>
               </div>
             </div>
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => {
-                  setShowConfirmModal(false);
-                  setConfirmModalAction(null);
-                }}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700 font-medium"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  if (confirmModalAction) {
-                    confirmModalAction();
-                  }
-                  setShowConfirmModal(false);
-                  setConfirmModalAction(null);
-                }}
-                className="flex-1 px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 font-medium"
-              >
-                Continue
-              </button>
+            <div className="flex gap-3">
+              <button onClick={() => { setShowConfirmModal(false); setConfirmModalAction(null); }} className="flex-1 py-2.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors">Cancel</button>
+              <button onClick={() => { confirmModalAction && confirmModalAction(); setShowConfirmModal(false); setConfirmModalAction(null); }} className="flex-1 py-2.5 bg-amber-600 text-white text-sm font-medium rounded-xl hover:bg-amber-700 transition-colors">Continue</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Service Selection Modal */}
+      {/* ====== SERVICE SELECTION MODAL ====== */}
       {showServiceSelectionModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 max-w-2xl w-full max-h-[80vh] flex flex-col">
-            <div className="mb-4">
-              <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                Multiple Manager Services Found
-              </h3>
-              <p className="text-sm text-gray-600 mb-4">
-                Multiple chiron-manager services were found in workspace <strong>{pendingWorkspace}</strong>. 
-                Please select which services you want to connect to:
-              </p>
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[80vh] flex flex-col overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100 flex-shrink-0">
+              <h3 className="font-semibold text-gray-900">Multiple Workers Found</h3>
+              <p className="text-sm text-gray-500 mt-1">Select which workers to connect in <strong>{pendingWorkspace}</strong>:</p>
             </div>
-            
-            <div className="flex-1 overflow-y-auto mb-4 space-y-2">
-              {availableServices.map((serviceId) => (
-                <label 
-                  key={serviceId}
-                  className="flex items-center p-3 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100"
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedServices.has(serviceId)}
-                    onChange={(e) => {
-                      const newSelected = new Set(selectedServices);
-                      if (e.target.checked) {
-                        newSelected.add(serviceId);
-                      } else {
-                        newSelected.delete(serviceId);
-                      }
-                      setSelectedServices(newSelected);
-                    }}
-                    className="mr-3"
-                  />
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-gray-900 break-all">{serviceId}</p>
-                  </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-2">
+              {availableServices.map(serviceId => (
+                <label key={serviceId} className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl cursor-pointer hover:bg-gray-100 transition-colors">
+                  <input type="checkbox" checked={selectedServices.has(serviceId)} onChange={e => { const n = new Set(selectedServices); e.target.checked ? n.add(serviceId) : n.delete(serviceId); setSelectedServices(n); }} className="accent-blue-600 flex-shrink-0" />
+                  <p className="text-sm text-gray-800 font-mono break-all">{serviceId}</p>
                 </label>
               ))}
             </div>
-            
-            <div className="flex gap-3">
-              <button
-                onClick={() => {
-                  setShowServiceSelectionModal(false);
-                  setPendingWorkspace('');
-                  setAvailableServices([]);
-                  setSelectedServices(new Set());
-                  setConnectingWorkspace(null);
-                }}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700 font-medium"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleServiceSelectionConfirm}
-                disabled={selectedServices.size === 0}
-                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed font-medium"
-              >
-                Connect ({selectedServices.size} selected)
-              </button>
+            <div className="px-6 pb-5 flex gap-3 flex-shrink-0">
+              <button onClick={() => { setShowServiceSelectionModal(false); setPendingWorkspace(''); setAvailableServices([]); setSelectedServices(new Set()); setConnectingWorkspace(null); }} className="flex-1 py-2.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors">Cancel</button>
+              <button onClick={handleServiceSelectionConfirm} disabled={selectedServices.size === 0} className="flex-1 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-xl hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">Connect ({selectedServices.size} selected)</button>
             </div>
           </div>
         </div>
