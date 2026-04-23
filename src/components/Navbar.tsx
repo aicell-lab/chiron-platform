@@ -4,7 +4,7 @@ import LoginButton from './LoginButton';
 import { BiCube } from 'react-icons/bi';
 import { TbEngine } from 'react-icons/tb';
 import { RiTestTubeLine } from 'react-icons/ri';
-import { FaGraduationCap } from 'react-icons/fa';
+import { TbTopologyStar } from 'react-icons/tb';
 
 const Navbar: React.FC = () => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -33,43 +33,46 @@ const Navbar: React.FC = () => {
   return (
     <nav className="sticky top-0 z-50 bg-white border-b border-gray-200">
       <div className="max-w-[1400px] mx-auto px-4">
-        <div className="flex items-center justify-between h-16">
-          {/* Left section with logo */}
-          <div className="flex items-center">
+        <div className="relative flex items-center justify-between h-16">
+          {/* Left section: logo + Worker */}
+          <div className="flex items-center space-x-2">
             <Link to="/" className="flex items-center">
               <div className="flex items-center text-2xl font-bold text-blue-600">
                 <BiCube className="mr-2" size={24} />
                 Chiron Platform
               </div>
             </Link>
+            <div className="hidden md:flex items-center">
+              <Link to="/worker" className={navLinkClasses("/worker")}>
+                <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+                  <TbEngine size={20} />
+                </span>
+                Worker
+              </Link>
+            </div>
           </div>
 
-          {/* Center section with navigation */}
-          <div className="hidden md:flex items-center space-x-4">
-            <Link to="/worker" className={navLinkClasses("/worker")}>
-              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <TbEngine size={20} />
-              </span>
-              Worker
-            </Link>
+          {/* Center section: Training */}
+          <div className="hidden md:flex items-center absolute left-1/2 -translate-x-1/2">
             <Link to="/training" className={navLinkClasses("/training")}>
               <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <FaGraduationCap size={20} />
+                <TbTopologyStar size={20} />
               </span>
               Training
             </Link>
-            <Link to="/lab" className={navLinkClasses("/lab")}>
-              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <RiTestTubeLine size={20} />
-              </span>
-              Chiron Lab
-            </Link>
           </div>
 
-          {/* Right section with auth buttons */}
-          <div className="flex items-center space-x-4">
-            {/* Login button desktop-only */}
-            <div className="hidden md:flex items-center space-x-4">
+          {/* Right section: Chiron Lab + Login */}
+          <div className="flex items-center space-x-2">
+            <div className="hidden md:flex items-center">
+              <Link to="/lab" className={navLinkClasses("/lab")}>
+                <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
+                  <RiTestTubeLine size={20} />
+                </span>
+                Chiron Lab
+              </Link>
+            </div>
+            <div className="hidden md:flex items-center">
               <LoginButton />
             </div>
             
@@ -99,12 +102,12 @@ const Navbar: React.FC = () => {
               </span>
               Worker
             </Link>
-            <Link 
-              to="/training" 
+            <Link
+              to="/training"
               className={mobileNavLinkClasses("/training")}
             >
               <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <FaGraduationCap size={20} />
+                <TbTopologyStar size={20} />
               </span>
               Training
             </Link>
