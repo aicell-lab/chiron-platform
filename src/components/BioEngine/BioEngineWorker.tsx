@@ -35,12 +35,44 @@ const styles = `
 type ServiceStatus = {
   service_start_time: number;
   service_uptime?: number;
+  bioengine_version?: string;
   worker_mode?: string;
   workspace?: string;
   client_id?: string;
   admin_users?: string[];
   is_ready?: boolean;
-  ray_cluster: {
+  geo_location?: {
+    region?: string;
+    country_name?: string;
+    country_code?: string;
+    continent_code?: string;
+    latitude?: number;
+    longitude?: number;
+    timezone?: string;
+  };
+  cluster?: {
+    total_cpu: number;
+    used_cpu: number;
+    total_gpu: number;
+    used_gpu: number;
+  };
+  nodes?: Record<string, {
+    node_ip?: string | null;
+    head: boolean;
+    total_cpu: number;
+    used_cpu: number;
+    total_gpu: number;
+    used_gpu: number;
+    total_gpu_memory: number | string;
+    used_gpu_memory: number | string;
+    total_memory: number;
+    used_memory: number;
+    total_object_store_memory: number;
+    used_object_store_memory: number;
+    accelerator_type?: string | null;
+    slurm_job_id?: string | null;
+  }>;
+  ray_cluster?: {
     head_address: string;
     start_time: number | "N/A";
     mode?: string;  // Legacy, now use worker_mode at top level
@@ -962,6 +994,15 @@ const BioEngineWorker: React.FC = () => {
                     <span className="text-xs font-medium text-gray-500 block">Uptime</span>
                     <span className="text-sm font-semibold text-gray-900">
                       {formatTimeInfo(status.service_start_time).uptime}
+                    </span>
+                  </div>
+                )}
+                {status?.geo_location && (
+                  <div>
+                    <span className="text-xs font-medium text-gray-500 block">Location</span>
+                    <span className="text-sm font-semibold text-gray-900">
+                      {[status.geo_location.region, status.geo_location.country_name, status.geo_location.continent_code]
+                        .filter(Boolean).join(', ')}
                     </span>
                   </div>
                 )}
