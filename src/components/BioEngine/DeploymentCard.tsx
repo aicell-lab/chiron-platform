@@ -7,8 +7,11 @@ interface DeploymentCardProps {
     display_name?: string;
     description?: string;
     deployment_name: string;
+    version?: string;
     status: string;
     start_time?: number;
+    last_updated_at?: number;
+    static_site_url?: string | null;
     available_methods?: string[];
     replica_states?: Record<string, number>;
     resources?: {
@@ -25,6 +28,7 @@ interface DeploymentCardProps {
   isUndeploying?: boolean;
   onUndeploy: (applicationId: string) => void;  // Changed: uses application_id
   formatTimeInfo?: (timestamp: number) => { formattedTime: string; uptime: string };
+  onStatusClick?: (applicationId: string) => void;
 }
 
 const DeploymentCard: React.FC<DeploymentCardProps> = ({
@@ -32,10 +36,12 @@ const DeploymentCard: React.FC<DeploymentCardProps> = ({
   serviceId,
   isUndeploying = false,
   onUndeploy,
-  formatTimeInfo
+  formatTimeInfo,
+  onStatusClick
 }) => {
   const [mcpCopied, setMcpCopied] = React.useState(false);
   const [isHovered, setIsHovered] = React.useState(false);
+  const isAppRunning = deployment.status === "RUNNING";
 
   // Helper function to format bytes to GB
   const formatMemoryToGB = (bytes: number): string => {
@@ -97,23 +103,39 @@ const DeploymentCard: React.FC<DeploymentCardProps> = ({
               {deployment.display_name || deployment.artifact_id.split('/').pop()}
             </h4>
 
-            <div className="flex items-center ml-3">
-              <span className={`inline-flex items-center px-2 py-1 rounded text-xs font-medium ${deployment.status === "HEALTHY" || deployment.status === "RUNNING"
-                ? "bg-green-100 text-green-700 border border-green-200"
-                : "bg-gray-100 text-gray-700 border border-gray-200"
-                }`}>
-                {deployment.status}
+            {deployment.version && (
+              <span className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 border border-gray-200">
+                {deployment.version === 'latest' ? 'latest' : `v${deployment.version}`}
               </span>
+            )}
+
+            <div className="flex items-center ml-3">
+              <button
+                type="button"
+                onClick={() => onStatusClick?.(deployment.application_id || deployment.artifact_id)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border shadow-sm transition-all duration-200 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${deployment.status === "HEALTHY" || deployment.status === "RUNNING"
+                  ? "bg-green-100 text-green-800 border-green-300 hover:bg-green-200 hover:border-green-400"
+                  : "bg-gray-100 text-gray-800 border-gray-300 hover:bg-gray-200 hover:border-gray-400"
+                  }`}
+                title="Click to view deployment status, logs, and replica details"
+              >
+                {deployment.status}
+                <svg className="w-3 h-3 opacity-80" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
               {deployment.status === "UPDATING" && (
                 <div className="ml-2 w-4 h-4 border-2 border-gray-300 border-t-blue-600 rounded-full animate-spin"></div>
               )}
             </div>
           </div>
 
-          <p className="text-sm text-gray-500">{deployment.artifact_id}</p>
           {deployment.description && (
             <p className="text-sm text-gray-600 mt-2">{deployment.description}</p>
           )}
+          <p className="text-sm text-gray-500 mt-2">
+            <span className="font-medium">Artifact ID:</span> {deployment.artifact_id}
+          </p>
         </div>
 
         <div className={`transition-opacity duration-200 ${isHovered || isUndeploying || deployment.status === "DELETING" ? 'opacity-100' : 'opacity-0'}`}>
@@ -154,6 +176,30 @@ const DeploymentCard: React.FC<DeploymentCardProps> = ({
               <p className="text-sm text-gray-600">
                 <span className="font-medium">Uptime:</span> {formatTimeInfo(deployment.start_time).uptime}
               </p>
+              {deployment.last_updated_at && (
+                <p className="text-sm text-gray-600">
+                  <span className="font-medium">Last Update:</span> {formatTimeInfo(deployment.last_updated_at).formattedTime}
+                </p>
+              )}
+              {deployment.static_site_url && (
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    onClick={() => window.open(deployment.static_site_url!, "_blank", "noopener,noreferrer")}
+                    disabled={!isAppRunning}
+                    className={`inline-flex items-center px-3 py-1.5 rounded text-xs font-medium border transition-colors ${isAppRunning
+                      ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 hover:text-emerald-800 cursor-pointer"
+                      : "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+                      }`}
+                    title={isAppRunning ? "Open app in a new tab" : "App must be RUNNING to open"}
+                  >
+                    <svg className="w-3 h-3 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.5 6H10a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3.5m-9-4.5L21 3m0 0v6m0-6h-6" />
+                    </svg>
+                    Open App
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -179,7 +225,7 @@ const DeploymentCard: React.FC<DeploymentCardProps> = ({
 
         <div>
           <p className="text-sm text-gray-600 mb-3">
-            <span className="font-medium">Deployment name:</span> {deployment.deployment_name}
+            <span className="font-medium">Application ID:</span> {deployment.deployment_name}
           </p>
 
           {deployment.resources && (

@@ -19,6 +19,8 @@ interface ArtifactCardProps {
     };
     supportedModes?: { cpu: boolean; gpu: boolean };
     defaultMode?: string;
+    version?: string;
+    lastFileModified?: string;
   };
   artifactMode?: string;
   onEdit: () => void;
@@ -26,6 +28,7 @@ interface ArtifactCardProps {
   onModeChange?: (checked: boolean) => void;
   server?: any;
   onDeployFeedback?: (message: string, type: 'success' | 'error' | 'info') => void;
+  isDeploying?: boolean;
 }
 
 const ArtifactCard: React.FC<ArtifactCardProps> = ({
@@ -35,22 +38,15 @@ const ArtifactCard: React.FC<ArtifactCardProps> = ({
   onDeploy,
   onModeChange,
   server,
-  onDeployFeedback
+  onDeployFeedback,
+  isDeploying = false,
 }) => {
-  const [isDeploying, setIsDeploying] = React.useState(false);
-
   const handleDeploy = () => {
-    setIsDeploying(true);
     const modeToUse = artifactMode || artifact.defaultMode || 'cpu';
     onDeploy(artifact.id, modeToUse);
     if (onDeployFeedback) {
-      onDeployFeedback('Deployment started', 'info');
+      onDeployFeedback('Deployment configuration', 'info');
     }
-
-    // Reset loading state after 5 seconds
-    setTimeout(() => {
-      setIsDeploying(false);
-    }, 5000);
   };
 
   // Helper function to transform documentation URLs
@@ -243,8 +239,16 @@ const ArtifactCard: React.FC<ArtifactCardProps> = ({
             {artifact.manifest?.id_emoji || ""} {artifact.manifest?.name || artifact.name || artifact.alias}
           </h4>
           <p className="text-sm text-gray-500 mb-2">{artifact.id}</p>
+            <p className="text-sm text-gray-500 mb-2">
+              <span className="font-medium">Version:</span> {artifact.version || 'N/A'}
+            </p>
           <p className="text-gray-600 mb-3">{artifact.manifest?.description || "No description available"}</p>
           <DocumentationLinks className="mb-3" />
+            {artifact.lastFileModified && (
+              <p className="text-xs text-gray-500 mb-3">
+                <span className="font-medium">Last file update:</span> {artifact.lastFileModified}
+              </p>
+            )}
           <ResourceInfo className="mb-3" />
         </div>
 

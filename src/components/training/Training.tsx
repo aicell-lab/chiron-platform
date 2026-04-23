@@ -192,7 +192,7 @@ const Training: React.FC = () => {
   // Observed workspaces discovery state
   const STORAGE_KEY_WS = 'chiron-training-observed-workspaces';
   const DEFAULT_PUBLIC_WORKSPACE = 'chiron-platform';
-  type DiscoveredWorker = { serviceId: string; name: string; description: string; hasChironManager: boolean };
+  type DiscoveredWorker = { serviceId: string; name: string; description: string; hasChironManager: boolean; geo_location?: GeoLocation; datasetCount?: number };
   type WsDiscoveryStatus = 'loading' | 'loaded' | 'error';
   const [customWorkspaces, setCustomWorkspaces] = useState<string[]>(() => {
     try { const s = localStorage.getItem(STORAGE_KEY_WS); return s ? JSON.parse(s) : []; } catch { return []; }
@@ -321,13 +321,29 @@ const Training: React.FC = () => {
           const name = worker.name || svcId;
           const description = worker.description || '';
           let hasChironManager = false;
+          let geo_location: GeoLocation | undefined;
+          let datasetCount: number | undefined;
           try {
             const appStatus = await worker.get_app_status({ _rkwargs: true });
-            hasChironManager = appStatus && typeof appStatus === 'object' &&
-              Object.keys(appStatus).some(k => k.includes('chiron-manager') || (appStatus[k]?.artifact_id || '').includes('chiron-manager'));
+            const managerKey = appStatus && typeof appStatus === 'object'
+              ? Object.keys(appStatus).find(k => k.includes('chiron-manager') || (appStatus[k]?.artifact_id || '').includes('chiron-manager'))
+              : undefined;
+            if (managerKey) {
+              hasChironManager = true;
+              // Enrich with geo_location and dataset count from the manager service
+              try {
+                const managerServiceId = appStatus[managerKey]?.service_ids?.[0]?.websocket_service_id;
+                if (managerServiceId) {
+                  const managerSvc = await server.getService(managerServiceId);
+                  const workerInfo = await managerSvc.get_worker_info();
+                  geo_location = workerInfo?.worker_info?.geo_location;
+                  datasetCount = workerInfo?.datasets ? Object.keys(workerInfo.datasets).length : 0;
+                }
+              } catch { /* enrichment is optional */ }
+            }
           } catch { /* no app status */ }
           if (hasChironManager) {
-            workers.push({ serviceId: svcId, name, description, hasChironManager: true });
+            workers.push({ serviceId: svcId, name, description, hasChironManager: true, geo_location, datasetCount });
           }
         } catch { /* unreachable service */ }
       }));
@@ -1796,7 +1812,28 @@ const Training: React.FC = () => {
                               <p className="text-xs text-gray-400 font-mono truncate">{worker.workspace}</p>
                             </div>
                           </div>
-                          {worker.description && <p className="text-xs text-gray-500 mb-3 line-clamp-2">{worker.description}</p>}
+                          <div className="mb-3 space-y-1.5">
+                            {worker.geo_location && (
+                              <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                                <svg className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                                </svg>
+                                <span>
+                                  {[worker.geo_location.region, worker.geo_location.country_name, worker.geo_location.continent_code]
+                                    .filter(Boolean).join(', ')}
+                                </span>
+                              </div>
+                            )}
+                            {worker.datasetCount !== undefined && (
+                              <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                                <svg className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+                                </svg>
+                                <span>{worker.datasetCount} dataset{worker.datasetCount !== 1 ? 's' : ''} available</span>
+                              </div>
+                            )}
+                          </div>
                           <button
                             onClick={() => connectWorker(worker.serviceId, worker.workspace)}
                             disabled={connectingServiceId === worker.serviceId}
