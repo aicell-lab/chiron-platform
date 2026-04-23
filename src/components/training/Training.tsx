@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useHyphaStore } from '../../store/hyphaStore';
 import { hyphaWebsocketClient } from 'hypha-rpc';
 import { FaNetworkWired, FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
@@ -186,9 +186,21 @@ const Training: React.FC = () => {
 
   // Manager connections state
   const [managers, setManagers] = useState<ManagerConnection[]>([]);
-  const [newWorkspace, setNewWorkspace] = useState('');
   const [connectingWorkspace, setConnectingWorkspace] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
+
+  // Observed workspaces discovery state
+  const STORAGE_KEY_WS = 'chiron-training-observed-workspaces';
+  const DEFAULT_PUBLIC_WORKSPACE = 'chiron-platform';
+  type DiscoveredWorker = { serviceId: string; name: string; description: string; hasChironManager: boolean };
+  type WsDiscoveryStatus = 'loading' | 'loaded' | 'error';
+  const [customWorkspaces, setCustomWorkspaces] = useState<string[]>(() => {
+    try { const s = localStorage.getItem(STORAGE_KEY_WS); return s ? JSON.parse(s) : []; } catch { return []; }
+  });
+  const [workspaceInput, setWorkspaceInput] = useState('');
+  const [discoveredWorkers, setDiscoveredWorkers] = useState<Record<string, DiscoveredWorker[]>>({});
+  const [wsDiscoveryStatus, setWsDiscoveryStatus] = useState<Record<string, WsDiscoveryStatus>>({});
+  const [connectingServiceId, setConnectingServiceId] = useState<string | null>(null);
 
   // Error popup state
   const [showErrorPopup, setShowErrorPopup] = useState(false);
@@ -250,26 +262,128 @@ const Training: React.FC = () => {
   const [selectedServices, setSelectedServices] = useState<Set<string>>(new Set());
   const [pendingWorkspace, setPendingWorkspace] = useState<string>('');
 
-  // Set default workspace when server is available
+  // Persist custom workspaces
   useEffect(() => {
-    if (server?.config?.workspace && newWorkspace === '') {
-      setNewWorkspace(server.config.workspace);
+    localStorage.setItem(STORAGE_KEY_WS, JSON.stringify(customWorkspaces));
+  }, [customWorkspaces]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Observed workspace helpers
+  const userWorkspace = server?.config?.workspace as string | undefined;
+
+  const defaultWorkspaces = useMemo(() => {
+    const ws = [DEFAULT_PUBLIC_WORKSPACE];
+    if (isLoggedIn && userWorkspace && userWorkspace !== DEFAULT_PUBLIC_WORKSPACE) ws.push(userWorkspace);
+    return ws;
+  }, [isLoggedIn, userWorkspace]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const observedWorkspaces = useMemo(() => {
+    const all = [...defaultWorkspaces];
+    for (const ws of customWorkspaces) { if (!all.includes(ws)) all.push(ws); }
+    return all;
+  }, [defaultWorkspaces, customWorkspaces]);
+
+  const parseMultipleServicesFromError = (errStr: string): string[] => {
+    const regex = /services:public\|bioengine-worker:([^@']+)@\*/g;
+    const ids: string[] = [];
+    let match;
+    while ((match = regex.exec(errStr)) !== null) {
+      if (!ids.includes(match[1])) ids.push(match[1]);
     }
-  }, [server, newWorkspace]);
+    return ids;
+  };
 
-  // Add manager connection
-  const addManager = async () => {
-    if (!newWorkspace.trim()) return;
+  const discoverWorkspace = useCallback(async (workspace: string) => {
+    if (!server) return;
+    setWsDiscoveryStatus(prev => ({ ...prev, [workspace]: 'loading' }));
+    try {
+      let serviceIds: string[] = [];
 
-    // No pre-check needed here - we'll check for duplicate serviceIds after fetching them
-    // A workspace can have multiple workers, each with their own unique serviceId
+      if (isLoggedIn && workspace === userWorkspace) {
+        const list = await server.listServices({ type: 'bioengine-worker' });
+        serviceIds = list.map((s: any) => s.id);
+      } else {
+        try {
+          const svc = await server.getService(`${workspace}/bioengine-worker`);
+          serviceIds = [svc.id];
+        } catch (err) {
+          const errStr = String(err);
+          if (errStr.includes('Multiple services found')) {
+            serviceIds = parseMultipleServicesFromError(errStr);
+          }
+        }
+      }
 
-    setConnectingWorkspace(newWorkspace);
+      // For each worker, check if chiron-manager is running
+      const workers: DiscoveredWorker[] = [];
+      await Promise.allSettled(serviceIds.map(async (svcId) => {
+        try {
+          const worker = await server.getService(svcId, { mode: 'random' });
+          const name = worker.name || svcId;
+          const description = worker.description || '';
+          let hasChironManager = false;
+          try {
+            const appStatus = await worker.get_app_status({ _rkwargs: true });
+            hasChironManager = appStatus && typeof appStatus === 'object' &&
+              Object.keys(appStatus).some(k => k.includes('chiron-manager') || (appStatus[k]?.artifact_id || '').includes('chiron-manager'));
+          } catch { /* no app status */ }
+          if (hasChironManager) {
+            workers.push({ serviceId: svcId, name, description, hasChironManager: true });
+          }
+        } catch { /* unreachable service */ }
+      }));
+
+      setDiscoveredWorkers(prev => ({ ...prev, [workspace]: workers }));
+      setWsDiscoveryStatus(prev => ({ ...prev, [workspace]: 'loaded' }));
+    } catch (err) {
+      console.error(`Discovery failed for ${workspace}:`, err);
+      setWsDiscoveryStatus(prev => ({ ...prev, [workspace]: 'error' }));
+    }
+  }, [server, isLoggedIn, userWorkspace]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Discover on mount, server change, and workspace list change
+  useEffect(() => {
+    if (server) observedWorkspaces.forEach(ws => discoverWorkspace(ws));
+  }, [server, observedWorkspaces]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-refresh discovery every 15 seconds
+  useEffect(() => {
+    if (!server) return;
+    const interval = setInterval(() => observedWorkspaces.forEach(ws => discoverWorkspace(ws)), 15000);
+    return () => clearInterval(interval);
+  }, [server, observedWorkspaces, discoverWorkspace]);
+
+  const addObservedWorkspace = () => {
+    const trimmed = workspaceInput.trim();
+    if (!trimmed || observedWorkspaces.includes(trimmed)) return;
+    setCustomWorkspaces(prev => [...prev, trimmed]);
+    setWorkspaceInput('');
+  };
+
+  const removeObservedWorkspace = (ws: string) => {
+    setCustomWorkspaces(prev => prev.filter(w => w !== ws));
+    setDiscoveredWorkers(prev => { const n = { ...prev }; delete n[ws]; return n; });
+    setWsDiscoveryStatus(prev => { const n = { ...prev }; delete n[ws]; return n; });
+  };
+
+  const connectWorker = async (serviceId: string, workspace: string) => {
+    if (managers.find(m => m.serviceId === serviceId)) return; // already connected
+    setConnectingServiceId(serviceId);
+    setConnectError(null);
+    try {
+      await connectToManagerService(workspace, [serviceId]);
+    } catch { /* error already handled */ }
+    setConnectingServiceId(null);
+  };
+
+  // Legacy addManager kept for service-selection modal path
+  const addManager = async (workspaceArg: string) => {
+    if (!workspaceArg.trim()) return;
+    setConnectingWorkspace(workspaceArg);
     setConnectError(null);
 
     try {
       // Get manager service ID from the workspace (without _mode=last)
-      const url = `https://hypha.aicell.io/${newWorkspace}/services/chiron-manager`;
+      const url = `https://hypha.aicell.io/${workspaceArg}/services/chiron-manager`;
       let response;
       let data;
 
@@ -283,7 +397,7 @@ const Training: React.FC = () => {
       // Check if we have a single service (success case)
       if (data.id) {
         // Single service found
-        await connectToManagerService(newWorkspace, [data.id]);
+        await connectToManagerService(workspaceArg, [data.id]);
         return;
       }
 
@@ -307,7 +421,7 @@ const Training: React.FC = () => {
             // Show service selection modal
             setAvailableServices(uniqueServiceIds);
             setSelectedServices(new Set(uniqueServiceIds)); // Default to all selected
-            setPendingWorkspace(newWorkspace);
+            setPendingWorkspace(workspaceArg);
             setShowServiceSelectionModal(true);
             setConnectingWorkspace(null);
             return;
@@ -445,7 +559,6 @@ const Training: React.FC = () => {
       // Log successful connections
       console.log(`✓ Connected to ${serviceIds.length} worker(s) in workspace "${workspace}":`, serviceIds.map(id => id.split('/')[1]));
 
-      setNewWorkspace('');
       setConnectingWorkspace(null);
     } catch (error) {
       console.error('Failed to connect to manager service:', error);
@@ -1545,96 +1658,163 @@ const Training: React.FC = () => {
         </p>
       </div>
 
-      {/* Step 1: Connect to Workers */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-        <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center">
-          <FaNetworkWired className="mr-2 text-blue-600" />
-          Connect to BioEngine Workers
-        </h2>
+      {/* Step 1: Available BioEngine Workers (with chiron-manager) */}
+      <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-sm border border-white/20 p-6 mb-6 hover:shadow-md transition-all duration-200">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-semibold text-gray-900 flex items-center">
+            <FaNetworkWired className="mr-2 text-blue-600" />
+            Available BioEngine Workers
+          </h2>
+          <button
+            onClick={() => observedWorkspaces.forEach(ws => discoverWorkspace(ws))}
+            disabled={!server}
+            className="px-3 py-1.5 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-lg hover:from-green-700 hover:to-green-800 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed flex items-center text-sm shadow-sm transition-all duration-200"
+          >
+            <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            Refresh
+          </button>
+        </div>
 
-        <div className="mb-4">
-          <div className="flex gap-2">
+        {/* Observed Workspaces */}
+        <div className="mb-5">
+          <h3 className="text-sm font-semibold text-gray-700 mb-2">Observed Workspaces</h3>
+          <form onSubmit={(e) => { e.preventDefault(); addObservedWorkspace(); }} className="flex gap-2 mb-2">
             <input
               type="text"
-              value={newWorkspace}
-              onChange={(e) => setNewWorkspace(e.target.value)}
-              placeholder="Workspace name"
-              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              onKeyPress={(e) => e.key === 'Enter' && addManager()}
+              value={workspaceInput}
+              onChange={(e) => setWorkspaceInput(e.target.value)}
+              placeholder="Add workspace name..."
+              className="flex-1 px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
             />
             <button
-              onClick={addManager}
-              disabled={!newWorkspace.trim() || !!connectingWorkspace}
-              className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center"
+              type="submit"
+              disabled={!workspaceInput.trim() || observedWorkspaces.includes(workspaceInput.trim())}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium transition-colors"
             >
-              {connectingWorkspace ? (
-                <>
-                  <BiLoaderAlt className="mr-2 animate-spin" />
-                  Connecting...
-                </>
-              ) : (
-                <>
-                  <FaPlus className="mr-2" />
-                  Add Worker
-                </>
-              )}
+              Add
             </button>
+          </form>
+          <div className="flex flex-wrap gap-2">
+            {observedWorkspaces.map(ws => {
+              const isDefault = defaultWorkspaces.includes(ws);
+              const isUserWs = isLoggedIn && ws === userWorkspace;
+              const status = wsDiscoveryStatus[ws];
+              const count = (discoveredWorkers[ws] || []).length;
+              return (
+                <div key={ws} className="group flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 rounded-full text-sm text-gray-700 hover:bg-gray-200 transition-colors">
+                  {status === 'loading' && <div className="w-2.5 h-2.5 border border-gray-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />}
+                  {status === 'loaded' && <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${count > 0 ? 'bg-green-500' : 'bg-gray-400'}`} />}
+                  {status === 'error' && <div className="w-2.5 h-2.5 rounded-full bg-red-400 flex-shrink-0" />}
+                  {!status && <div className="w-2.5 h-2.5 rounded-full bg-gray-300 flex-shrink-0" />}
+                  <span className="font-mono">{ws}</span>
+                  {ws === DEFAULT_PUBLIC_WORKSPACE && <span className="text-xs text-gray-400">(public)</span>}
+                  {isUserWs && ws !== DEFAULT_PUBLIC_WORKSPACE && <span className="text-xs text-blue-500">(you)</span>}
+                  {status === 'loaded' && <span className="text-xs text-gray-400">{count} worker{count !== 1 ? 's' : ''}</span>}
+                  {!isDefault && (
+                    <button onClick={() => removeObservedWorkspace(ws)} className="ml-0.5 opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all flex-shrink-0">
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
 
-        {/* Managers list */}
-        <div className="space-y-2">
-          {managers.map((manager) => {
-            const workerId = `${manager.workspace}::${manager.serviceId}`;
-            return (
-              <div key={workerId} className={`flex items-center justify-between p-4 rounded-lg ${manager.isConnected ? 'bg-gray-50' : 'bg-red-50 border border-red-200'}`}>
-                <div className="flex items-center">
-                  {manager.isConnected ? (
-                    <FaCheckCircle className="text-green-500 mr-3" />
-                  ) : (
-                    <FaTimesCircle className="text-red-500 mr-3" />
-                  )}
-                    <div>
-                    <div className="flex items-center gap-2">
-                      <p className="font-medium text-gray-900">{manager.workspace}</p>
-                      {!manager.isConnected && (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
-                          Disconnected
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-gray-500 break-all">Manager ID: {manager.serviceId}</p>
-                    {manager.workerInfo?.worker_info?.geo_location && (
-                      <div className="flex items-center mt-1 text-xs text-gray-500 gap-2">
-                        <CountryFlag countryName={manager.workerInfo.worker_info.geo_location.country_name} className="w-5 h-3 object-cover shadow-sm" />
-                        <span>
-                          {manager.workerInfo.worker_info.geo_location.country_code}, {manager.workerInfo.worker_info.geo_location.continent_code}
-                        </span>
+        {/* Worker cards */}
+        <div className="border-t border-gray-200/50 pt-4">
+          {!server ? (
+            <p className="text-gray-500 text-center py-6 text-sm">Please log in to discover BioEngine workers</p>
+          ) : Object.values(wsDiscoveryStatus).some(s => s === 'loading') && Object.values(discoveredWorkers).every(ws => ws.length === 0) ? (
+            <div className="flex flex-col items-center py-8">
+              <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mb-3" />
+              <p className="text-gray-500 text-sm animate-pulse">Discovering workers with Chiron Manager...</p>
+            </div>
+          ) : (
+            <>
+              {/* Connected managers */}
+              {managers.length > 0 && (
+                <div className="mb-4">
+                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Connected</h3>
+                  <div className="space-y-2">
+                    {managers.map(manager => (
+                      <div key={manager.serviceId} className={`flex items-center justify-between p-3 rounded-xl border ${manager.isConnected ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
+                        <div className="flex items-center gap-3">
+                          <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${manager.isConnected ? 'bg-green-500' : 'bg-red-400'}`} />
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <p className="font-medium text-gray-900 text-sm">{manager.workspace}</p>
+                              {!manager.isConnected && <span className="px-1.5 py-0.5 rounded text-xs bg-red-100 text-red-700">Disconnected</span>}
+                            </div>
+                            <p className="text-xs text-gray-500 font-mono">{manager.serviceId}</p>
+                            {manager.workerInfo?.worker_info?.geo_location && (
+                              <div className="flex items-center mt-0.5 text-xs text-gray-500 gap-1.5">
+                                <CountryFlag countryName={manager.workerInfo.worker_info.geo_location.country_name} className="w-4 h-3 object-cover" />
+                                <span>{manager.workerInfo.worker_info.geo_location.region}, {manager.workerInfo.worker_info.geo_location.country_name}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => showInfo('manager', `${manager.workspace}::${manager.serviceId}`)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg" title="Show info">
+                            <FaInfo size={12} />
+                          </button>
+                          <button onClick={() => removeManager(manager.serviceId)} className="p-1.5 text-orange-600 hover:bg-orange-50 rounded-lg" title="Disconnect">
+                            <FaUnlink size={12} />
+                          </button>
+                        </div>
                       </div>
-                    )}
+                    ))}
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => showInfo('manager', `${manager.workspace}::${manager.serviceId}`)}
-                    className="p-2 text-blue-600 hover:bg-blue-50 rounded"
-                    title="Show info"
-                  >
-                    <FaInfo />
-                  </button>
-                  <button
-                    onClick={() => removeManager(manager.serviceId)}
-                    className="p-2 text-orange-600 hover:bg-orange-50 rounded"
-                    title="Disconnect from worker"
-                  >
-                    <FaUnlink />
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-          {managers.length === 0 && (
-            <p className="text-gray-500 text-center py-4">No managers connected yet</p>
+              )}
+
+              {/* Available workers not yet connected */}
+              {(() => {
+                const allDiscovered = observedWorkspaces.flatMap(ws =>
+                  (discoveredWorkers[ws] || []).map(w => ({ ...w, workspace: ws }))
+                );
+                const available = allDiscovered.filter(w => !managers.find(m => m.serviceId === w.serviceId));
+                if (available.length === 0 && managers.length === 0) {
+                  return <p className="text-gray-500 text-center py-6 text-sm">No workers with Chiron Manager found in observed workspaces</p>;
+                }
+                if (available.length === 0) return null;
+                return (
+                  <div>
+                    <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Available</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {available.map(worker => (
+                        <div key={worker.serviceId} className="bg-white border border-gray-200 rounded-xl p-4 hover:border-blue-300 hover:shadow-sm transition-all duration-200">
+                          <div className="flex items-center mb-3">
+                            <img src="/bioengine-icon.svg" alt="BioEngine" className="w-7 h-7 mr-2" />
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium text-gray-800 text-sm truncate">{worker.name}</p>
+                              <p className="text-xs text-gray-400 font-mono truncate">{worker.workspace}</p>
+                            </div>
+                          </div>
+                          {worker.description && <p className="text-xs text-gray-500 mb-3 line-clamp-2">{worker.description}</p>}
+                          <button
+                            onClick={() => connectWorker(worker.serviceId, worker.workspace)}
+                            disabled={connectingServiceId === worker.serviceId}
+                            className="w-full px-3 py-2 bg-gradient-to-r from-blue-600 to-blue-700 text-white text-sm rounded-lg hover:from-blue-700 hover:to-blue-800 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed flex items-center justify-center transition-all duration-200"
+                          >
+                            {connectingServiceId === worker.serviceId ? (
+                              <><BiLoaderAlt className="mr-1.5 animate-spin" size={14} />Connecting...</>
+                            ) : (
+                              <><FaPlus className="mr-1.5" size={10} />Connect</>
+                            )}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+            </>
           )}
         </div>
       </div>
