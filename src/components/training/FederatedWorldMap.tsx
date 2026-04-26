@@ -34,7 +34,7 @@ const ROLE_LABELS: Record<MapWorkerRole, string> = {
   connected: 'Connected',
   orchestrator: 'Orchestrator',
   trainer: 'Trainer',
-  both: 'Orch + Trainer',
+  both: 'Orchestrator + Trainer',
 };
 
 export type MapLegendMode = 'setup' | 'select';

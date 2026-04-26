@@ -642,9 +642,11 @@ const Training: React.FC = () => {
   const performRemoveOrchestrator = async (managerId: string) => {
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
+    const orchestrator = orchestrators.find(o => o.managerId === managerId);
+    if (!orchestrator) return;
     setOrchestrators(prev => prev.map(o => o.managerId === managerId ? { ...o, status: 'DELETING' } : o));
     try {
-      await manager.service.remove_orchestrator();
+      await manager.service.remove_orchestrator({ application_id: orchestrator.appId, _rkwargs: true });
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
       setErrorPopupMessage('Failed to Remove Orchestrator');
