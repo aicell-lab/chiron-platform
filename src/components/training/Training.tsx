@@ -3,7 +3,7 @@ import { useHyphaStore } from '../../store/hyphaStore';
 import { FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
-import FederatedWorldMap, { MapWorker, MapLegend } from './FederatedWorldMap';
+import FederatedWorldMap, { MapWorker, MapLegend, MapLegendMode } from './FederatedWorldMap';
 
 const CountryFlag: React.FC<{ countryName?: string; className?: string }> = ({ countryName, className }) => {
   const [flagUrl, setFlagUrl] = useState<string | null>(null);
@@ -79,7 +79,7 @@ interface WorkerInfo {
   worker_info?: WorkerStatus;
   cluster_status?: ClusterStatus;
   datasets?: Record<string, any>;
-  orchestrator_status?: OrchestratorStatus;
+  orchestrators_status?: Record<string, OrchestratorStatus>;
   trainers_status?: Record<string, TrainerStatus>;
 }
 
@@ -127,13 +127,9 @@ interface TrainingHistory {
 
 interface ClusterStatus {
   total_cpu: number;
-  available_cpu: number;
+  used_cpu: number;
   total_gpu: number;
-  available_gpu: number;
-  total_memory: number;
-  available_memory: number;
-  total_object_store_memory: number;
-  available_object_store_memory: number;
+  used_gpu: number;
 }
 
 interface ManagerInfoModalData {
@@ -185,6 +181,7 @@ const Training: React.FC = () => {
   const [workerTimers, setWorkerTimers] = useState<Record<string, NodeJS.Timeout>>({});
 
   const [isTraining, setIsTraining] = useState(false);
+  const [trainingConfigCollapsed, setTrainingConfigCollapsed] = useState(false);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
   const [trainingHistory, setTrainingHistory] = useState<TrainingHistory | null>(null);
   const [registeredTrainers, setRegisteredTrainers] = useState<string[]>([]);
@@ -403,8 +400,24 @@ const Training: React.FC = () => {
       const newTrainers: TrainerApp[] = [];
 
       for (const serviceId of serviceIds) {
+        // If serviceId is a BioEngine worker (not a chiron-manager), resolve to the manager service ID
+        let managerServiceId = serviceId;
+        if (!serviceId.includes(':chiron-manager')) {
+          try {
+            const workerSvc = await server.getService(serviceId, { mode: 'random' });
+            const appStatus = await workerSvc.get_app_status({ _rkwargs: true });
+            const managerKey = appStatus && typeof appStatus === 'object'
+              ? Object.keys(appStatus).find((k: string) => k.includes('chiron-manager') || (appStatus[k]?.artifact_id || '').includes('chiron-manager'))
+              : undefined;
+            if (managerKey) {
+              const foundId = appStatus[managerKey]?.service_ids?.[0]?.websocket_service_id;
+              if (foundId) managerServiceId = foundId;
+            }
+          } catch { /* keep original serviceId if resolution fails */ }
+        }
+
         let managerService;
-        try { managerService = await server.getService(serviceId); } catch (serviceError) {
+        try { managerService = await server.getService(managerServiceId); } catch (serviceError) {
           throw new Error(`Failed to connect to manager service (${serviceId}). Error: ${serviceError instanceof Error ? serviceError.message : 'Connection error'}`);
         }
         let workerInfo;
@@ -425,9 +438,10 @@ const Training: React.FC = () => {
         }
         newManagers.push({ workspace, serviceId, service: managerService, isConnected: true, workerInfo });
         const managerId = serviceId;
-        if (workerInfo!.orchestrator_status && workerInfo!.orchestrator_status.status) {
-          const orchStatus = workerInfo!.orchestrator_status;
-          newOrchestrators.push({ managerId, appId: 'chiron-orchestrator', status: orchStatus.status, serviceIds: orchStatus.service_ids || [], artifactId: orchStatus.artifact_id || 'chiron-platform/chiron-orchestrator', displayName: orchStatus.display_name, applicationId: orchStatus.application_id });
+        if (workerInfo!.orchestrators_status) {
+          for (const [appId, orchStatus] of Object.entries(workerInfo!.orchestrators_status)) {
+            newOrchestrators.push({ managerId, appId, status: (orchStatus as any).status, serviceIds: (orchStatus as any).service_ids || [], artifactId: (orchStatus as any).artifact_id || 'chiron-platform/chiron-orchestrator', displayName: (orchStatus as any).display_name, applicationId: appId });
+          }
         }
         if (workerInfo!.trainers_status) {
           for (const [appId, trainerStatus] of Object.entries(workerInfo!.trainers_status)) {
@@ -526,11 +540,13 @@ const Training: React.FC = () => {
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: true, workerInfo } : m));
       setOrchestrators(prev => {
         const filtered = prev.filter(o => o.managerId !== managerId);
-        if (workerInfo.orchestrator_status && workerInfo.orchestrator_status.status) {
-          const orchStatus = workerInfo.orchestrator_status;
-          return [...filtered, { managerId, appId: 'chiron-orchestrator', status: orchStatus.status, serviceIds: orchStatus.service_ids || [], artifactId: orchStatus.artifact_id || 'chiron-platform/chiron-orchestrator', displayName: orchStatus.display_name, applicationId: orchStatus.application_id }];
+        const newO: OrchestratorApp[] = [];
+        if (workerInfo.orchestrators_status) {
+          for (const [appId, orchStatus] of Object.entries(workerInfo.orchestrators_status)) {
+            newO.push({ managerId, appId, status: (orchStatus as any).status, serviceIds: (orchStatus as any).service_ids || [], artifactId: (orchStatus as any).artifact_id || 'chiron-platform/chiron-orchestrator', displayName: (orchStatus as any).display_name, applicationId: appId });
+          }
         }
-        return filtered;
+        return [...filtered, ...newO];
       });
       setTrainers(prev => {
         const filtered = prev.filter(t => t.managerId !== managerId);
@@ -544,28 +560,28 @@ const Training: React.FC = () => {
       });
     } catch (error) {
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: false } : m));
-      setWorkerTimers(prev => {
-        const timer = prev[managerId];
-        if (timer) { clearTimeout(timer); const n = { ...prev }; delete n[managerId]; return n; }
-        return prev;
-      });
+      // Clear stale app data for this manager when it becomes unreachable
+      setOrchestrators(prev => prev.filter(o => o.managerId !== managerId));
+      setTrainers(prev => prev.filter(t => t.managerId !== managerId));
     }
   }, [managers]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const scheduleWorkerRefresh = useCallback((serviceId: string) => {
     const managerId = serviceId;
-    const timer = setTimeout(() => {
-      refreshWorkerInfo(serviceId).then(() => { scheduleWorkerRefresh(serviceId); }).catch(() => {});
-    }, 5000);
+    const timer = setTimeout(async () => {
+      try { await refreshWorkerInfo(serviceId); } finally { scheduleWorkerRefresh(serviceId); }
+    }, 10000);
     setWorkerTimers(prev => {
       if (prev[managerId]) clearTimeout(prev[managerId]);
       return { ...prev, [managerId]: timer };
     });
   }, [refreshWorkerInfo]);
 
+  const workerTimersRef = React.useRef(workerTimers);
+  workerTimersRef.current = workerTimers;
   useEffect(() => {
-    return () => { Object.values(workerTimers).forEach(timer => clearTimeout(timer)); };
-  }, [workerTimers]);
+    return () => { Object.values(workerTimersRef.current).forEach(timer => clearTimeout(timer)); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const createOrchestrator = async (managerId: string) => {
     const manager = managers.find(m => m.serviceId === managerId);
@@ -573,21 +589,10 @@ const Training: React.FC = () => {
     setIsCreatingOrchestrator(true);
     try {
       const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
-      await manager.service.create_orchestrator({ token: applicationToken, trainer_artifact_id: newOrchestratorArtifactId, _rkwargs: true });
-      let retries = 40;
-      let found = false;
-      while (retries > 0 && !found) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        try {
-          const wi = await manager.service.get_worker_info();
-          if (wi.orchestrator_status && wi.orchestrator_status.status) { found = true; }
-          else { retries--; }
-        } catch { retries--; }
-      }
-      if (!found) throw new Error('Orchestrator deployment timed out.');
+      await manager.service.create_orchestrator({ token: applicationToken, _rkwargs: true });
+      setShowCreateOrchestrator(false); setShowLaunchDialog(false); setCreatingFor(null); setIsCreatingOrchestrator(false);
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
-      setShowCreateOrchestrator(false); setShowLaunchDialog(false); setCreatingFor(null); setIsCreatingOrchestrator(false);
     } catch (error) {
       setErrorPopupMessage('Failed to Create Orchestrator');
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
@@ -602,21 +607,10 @@ const Training: React.FC = () => {
     setIsCreatingTrainer(true);
     try {
       const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
-      const createdTrainerId = await manager.service.create_trainer({ token: applicationToken, datasets: newTrainerDatasets, trainer_artifact_id: newTrainerArtifactId, _rkwargs: true });
-      let retries = 40;
-      let found = false;
-      while (retries > 0 && !found) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        try {
-          const wi = await manager.service.get_worker_info();
-          if (wi.trainers_status && wi.trainers_status[createdTrainerId]) { found = true; }
-          else { retries--; }
-        } catch { retries--; }
-      }
-      if (!found) throw new Error('Trainer deployment timed out.');
+      await manager.service.create_trainer({ token: applicationToken, datasets: newTrainerDatasets, trainer_artifact_id: newTrainerArtifactId, _rkwargs: true });
+      setShowCreateTrainer(false); setShowLaunchDialog(false); setCreatingFor(null); setNewTrainerDatasets([]); setIsCreatingTrainer(false);
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
-      setShowCreateTrainer(false); setShowLaunchDialog(false); setCreatingFor(null); setNewTrainerDatasets([]); setIsCreatingTrainer(false);
     } catch (error) {
       setErrorPopupMessage('Failed to Create Trainer');
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
@@ -705,7 +699,9 @@ const Training: React.FC = () => {
       if (type === 'manager') {
         setInfoModalData({ workspace: manager.workspace, clusterStatus: workerInfo.cluster_status || null, datasets: workerInfo.datasets || {}, location: workerInfo.worker_info?.geo_location ? { region: workerInfo.worker_info.geo_location.region, country_name: workerInfo.worker_info.geo_location.country_name, country_code: workerInfo.worker_info.geo_location.country_code, continent_code: workerInfo.worker_info.geo_location.continent_code, latitude: workerInfo.worker_info.geo_location.latitude, longitude: workerInfo.worker_info.geo_location.longitude } : undefined });
       } else if (type === 'orchestrator') {
-        setInfoModalData({ status: workerInfo.orchestrator_status?.status, artifactId: workerInfo.orchestrator_status?.artifact_id });
+        const orchAppId = id.split('::')[1];
+        const orchStatus = workerInfo.orchestrators_status?.[orchAppId];
+        setInfoModalData({ status: orchStatus?.status, artifactId: (orchStatus as any)?.artifact_id });
       } else if (type === 'trainer') {
         const appId = id.split('::')[1];
         const trainerStatus = workerInfo.trainers_status?.[appId];
@@ -828,7 +824,7 @@ const Training: React.FC = () => {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       const currentTrainers = await orchestratorService.list_trainers();
       if (currentTrainers.length === 0) throw new Error('No trainers available. Please select at least one trainer.');
-      setIsPreparingTraining(false); setIsTraining(true);
+      setIsPreparingTraining(false); setIsTraining(true); setTrainingConfigCollapsed(true);
       const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, _rkwargs: true };
       orchestratorService.start_training(trainingParams).catch((error: Error) => {
         setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true); setIsTraining(false);
@@ -927,22 +923,54 @@ const Training: React.FC = () => {
 
   // Compute map workers from discovered + connected state
   const mapWorkers = useMemo<MapWorker[]>(() => {
+    const appRole = (managerId: string): MapWorker['role'] => {
+      const hasOrch = orchestrators.some(o => o.managerId === managerId);
+      const hasTrainer = trainers.some(t => t.managerId === managerId);
+      return hasOrch && hasTrainer ? 'both' : hasOrch ? 'orchestrator' : hasTrainer ? 'trainer' : 'connected';
+    };
+
+    if (currentStep === 3) {
+      // Train stage: only workers involved in the selected session
+      const selectedOrchObj = selectedOrchestrator
+        ? orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator)
+        : null;
+      const selectedManagerIds = new Set<string>();
+      if (selectedOrchObj) selectedManagerIds.add(selectedOrchObj.managerId);
+      trainers.forEach(t => {
+        const svcId = t.serviceIds?.[0]?.websocket_service_id;
+        if (svcId && registeredTrainers.includes(svcId)) selectedManagerIds.add(t.managerId);
+      });
+      return managers
+        .filter(m => selectedManagerIds.has(m.serviceId))
+        .flatMap(manager => {
+          const geo = manager.workerInfo?.worker_info?.geo_location;
+          if (!geo?.latitude || !geo?.longitude) return [];
+          const orchCount = orchestrators.filter(o => o.managerId === manager.serviceId).length;
+          const trainerCount = trainers.filter(t => t.managerId === manager.serviceId).length;
+          return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: appRole(manager.serviceId), label: `${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` }];
+        });
+    }
+
+    if (currentStep === 2) {
+      // Select Apps stage: all connected workers, colored by available apps
+      return managers.flatMap(manager => {
+        const geo = manager.workerInfo?.worker_info?.geo_location;
+        if (!geo?.latitude || !geo?.longitude) return [];
+        const orchCount = orchestrators.filter(o => o.managerId === manager.serviceId).length;
+        const trainerCount = trainers.filter(t => t.managerId === manager.serviceId).length;
+        return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: appRole(manager.serviceId), label: `${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` }];
+      });
+    }
+
+    // Setup stage (step 1): connected + available discovered workers
     const result: MapWorker[] = [];
-    // Connected managers (with full info)
     managers.forEach(manager => {
       const geo = manager.workerInfo?.worker_info?.geo_location;
       if (!geo?.latitude || !geo?.longitude) return;
-      const hasOrch = orchestrators.some(o => o.managerId === manager.serviceId && o.status === 'RUNNING');
-      const hasTrainer = trainers.some(t => t.managerId === manager.serviceId && t.status === 'RUNNING');
-      let role: MapWorker['role'] = 'connected';
-      if (hasOrch && hasTrainer) role = 'both';
-      else if (hasOrch) role = 'orchestrator';
-      else if (hasTrainer) role = 'trainer';
       const orchCount = orchestrators.filter(o => o.managerId === manager.serviceId).length;
       const trainerCount = trainers.filter(t => t.managerId === manager.serviceId).length;
-      result.push({ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role, label: `${orchCount} orch, ${trainerCount} trainer(s)` });
+      result.push({ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: 'connected', label: `${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` });
     });
-    // Available (discovered but not connected)
     observedWorkspaces.forEach(ws => {
       (discoveredWorkers[ws] || []).forEach(worker => {
         if (managers.find(m => m.serviceId === worker.serviceId)) return;
@@ -951,7 +979,7 @@ const Training: React.FC = () => {
       });
     });
     return result;
-  }, [managers, orchestrators, trainers, discoveredWorkers, observedWorkspaces]);
+  }, [currentStep, managers, orchestrators, trainers, registeredTrainers, selectedOrchestrator, discoveredWorkers, observedWorkspaces]);
 
   // All discovered workers (flat list with workspace context)
   const allDiscoveredWorkers = useMemo(() => {
@@ -1032,15 +1060,12 @@ const Training: React.FC = () => {
         <div className="w-80 xl:w-96 flex-shrink-0 space-y-4 sticky top-6">
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
             <div className="px-4 pt-4 pb-2 flex items-center gap-2">
-              <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064" />
-              </svg>
               <span className="text-sm font-semibold text-gray-700">Federation Map</span>
               <span className="ml-auto text-xs text-gray-400">{mapWorkers.length} worker{mapWorkers.length !== 1 ? 's' : ''}</span>
             </div>
             <FederatedWorldMap workers={mapWorkers} style={{ height: 260, width: '100%' }} />
             <div className="px-4 py-3 border-t border-gray-50">
-              <MapLegend />
+              <MapLegend mode={currentStep >= 2 ? 'select' : 'setup'} />
             </div>
           </div>
 
@@ -1342,25 +1367,50 @@ const Training: React.FC = () => {
           {currentStep === 3 && (
             <div className="space-y-4">
               {/* Config + Controls */}
-              <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
-                <TrainingConfigPanel
-                  params={trainerParams}
-                  loading={trainerParamsLoading}
-                  error={trainerParamsError}
-                  onStart={startTraining}
-                  isPreparingTraining={isPreparingTraining}
-                  isTraining={isTraining}
-                />
-                <div className="mt-4 flex items-center gap-3">
-                  {isTraining && (
-                    <button onClick={stopTraining} disabled={isStoppingTraining} className="flex items-center gap-2 px-5 py-2.5 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                      {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping...</> : <><FaStop size={12} /> Stop Training</>}
+              <div className="bg-white rounded-2xl border border-gray-100 shadow-sm">
+                <button
+                  onClick={() => setTrainingConfigCollapsed(c => !c)}
+                  className="w-full flex items-center justify-between px-5 py-4 text-left"
+                >
+                  <span className="font-semibold text-gray-900 text-sm">Training Configuration</span>
+                  <svg className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${trainingConfigCollapsed ? '-rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {!trainingConfigCollapsed && (
+                  <div className="px-5 pb-5">
+                    <TrainingConfigPanel
+                      params={trainerParams}
+                      loading={trainerParamsLoading}
+                      error={trainerParamsError}
+                      onStart={startTraining}
+                      isPreparingTraining={isPreparingTraining}
+                      isTraining={isTraining}
+                    />
+                    <div className="mt-4 flex items-center gap-3">
+                      {isTraining && (
+                        <button onClick={stopTraining} disabled={isStoppingTraining} className="flex items-center gap-2 px-5 py-2.5 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                          {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping...</> : <><FaStop size={12} /> Stop Training</>}
+                        </button>
+                      )}
+                      <button onClick={resetTrainingState} disabled={isTraining} className="flex items-center gap-2 px-4 py-2.5 text-gray-600 text-sm font-medium border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
+                        <FaTrash size={12} /> Reset State
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {trainingConfigCollapsed && (
+                  <div className="px-5 pb-4 flex items-center gap-3 border-t border-gray-50">
+                    {isTraining && (
+                      <button onClick={stopTraining} disabled={isStoppingTraining} className="flex items-center gap-2 px-5 py-2 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all mt-3">
+                        {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping...</> : <><FaStop size={12} /> Stop Training</>}
+                      </button>
+                    )}
+                    <button onClick={resetTrainingState} disabled={isTraining} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all mt-3">
+                      <FaTrash size={12} /> Reset State
                     </button>
-                  )}
-                  <button onClick={resetTrainingState} disabled={isTraining} className="flex items-center gap-2 px-4 py-2.5 text-gray-600 text-sm font-medium border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
-                    <FaTrash size={12} /> Reset State
-                  </button>
-                </div>
+                  </div>
+                )}
               </div>
 
               {/* Training Status */}
@@ -1507,21 +1557,13 @@ const Training: React.FC = () => {
             <div className="p-6">
               {launchDialogTab === 'orchestrator' && (
                 <div className="space-y-4">
-                  {orchestrators.find(o => o.managerId === launchDialogManagerId) ? (
-                    <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
-                      This worker already has an orchestrator ({getStatusBadge(orchestrators.find(o => o.managerId === launchDialogManagerId)?.status)}). Only one orchestrator per worker is supported.
-                    </div>
-                  ) : (
-                    <>
-                      <div>
-                        <label className="block text-xs font-semibold text-gray-700 mb-1.5">Artifact ID</label>
-                        <input type="text" value={newOrchestratorArtifactId} onChange={e => setNewOrchestratorArtifactId(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="chiron-platform/chiron-orchestrator" />
-                      </div>
-                      <button onClick={() => { setCreatingFor(launchDialogManagerId); createOrchestrator(launchDialogManagerId); }} disabled={isCreatingOrchestrator || !newOrchestratorArtifactId.trim()} className="w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                        {isCreatingOrchestrator ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Orchestrator</>}
-                      </button>
-                    </>
-                  )}
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Artifact ID</label>
+                    <input type="text" value={newOrchestratorArtifactId} onChange={e => setNewOrchestratorArtifactId(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="chiron-platform/chiron-orchestrator" />
+                  </div>
+                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createOrchestrator(launchDialogManagerId); }} disabled={isCreatingOrchestrator || !newOrchestratorArtifactId.trim()} className="w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                    {isCreatingOrchestrator ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Orchestrator</>}
+                  </button>
                 </div>
               )}
               {launchDialogTab === 'trainer' && (
@@ -1590,12 +1632,14 @@ const Training: React.FC = () => {
                           <h5 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Cluster Resources</h5>
                           <div className="grid grid-cols-2 gap-3">
                             {[
-                              { label: 'CPU', val: `${infoModalData.clusterStatus.available_cpu?.toFixed(1)} / ${infoModalData.clusterStatus.total_cpu?.toFixed(1)} cores`, pct: (infoModalData.clusterStatus.available_cpu || 0) / (infoModalData.clusterStatus.total_cpu || 1), color: 'bg-blue-500' },
-                              ...(infoModalData.clusterStatus.total_gpu > 0 ? [{ label: 'GPU', val: `${infoModalData.clusterStatus.available_gpu} / ${infoModalData.clusterStatus.total_gpu}`, pct: (infoModalData.clusterStatus.available_gpu || 0) / (infoModalData.clusterStatus.total_gpu || 1), color: 'bg-emerald-500' }] : []),
-                              { label: 'Memory', val: `${(infoModalData.clusterStatus.available_memory / 1e9).toFixed(1)} / ${(infoModalData.clusterStatus.total_memory / 1e9).toFixed(1)} GB`, pct: (infoModalData.clusterStatus.available_memory || 0) / (infoModalData.clusterStatus.total_memory || 1), color: 'bg-purple-500' },
+                              { label: 'CPU', val: `${infoModalData.clusterStatus.used_cpu?.toFixed(1)} / ${infoModalData.clusterStatus.total_cpu?.toFixed(1)} cores`, pct: (infoModalData.clusterStatus.used_cpu || 0) / (infoModalData.clusterStatus.total_cpu || 1), color: 'bg-blue-500' },
+                              ...(infoModalData.clusterStatus.total_gpu > 0 ? [{ label: 'GPU', val: `${infoModalData.clusterStatus.used_gpu} / ${infoModalData.clusterStatus.total_gpu}`, pct: (infoModalData.clusterStatus.used_gpu || 0) / (infoModalData.clusterStatus.total_gpu || 1), color: 'bg-emerald-500' }] : []),
                             ].map(r => (
                               <div key={r.label} className="bg-gray-50 rounded-xl p-3">
-                                <p className="text-xs font-medium text-gray-500 mb-1">{r.label}</p>
+                                <div className="flex items-center justify-between mb-1">
+                                  <p className="text-xs font-medium text-gray-500">{r.label} used</p>
+                                  <p className="text-xs font-semibold text-gray-700">{Math.round(r.pct * 100)}%</p>
+                                </div>
                                 <p className="text-sm text-gray-900 mb-2">{r.val}</p>
                                 <div className="w-full bg-gray-200 rounded-full h-1.5"><div className={`${r.color} h-1.5 rounded-full`} style={{ width: `${r.pct * 100}%` }} /></div>
                               </div>

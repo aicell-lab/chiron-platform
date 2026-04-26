@@ -4,7 +4,7 @@ declare global {
   interface Window { L: any; }
 }
 
-export type MapWorkerRole = 'orchestrator' | 'trainer' | 'both' | 'connected' | 'available';
+export type MapWorkerRole = 'available' | 'connected' | 'orchestrator' | 'trainer' | 'both';
 
 export interface MapWorker {
   id: string;
@@ -22,25 +22,52 @@ interface FederatedWorldMapProps {
 }
 
 const ROLE_COLORS: Record<MapWorkerRole, string> = {
-  orchestrator: '#2563eb',
-  trainer: '#f97316',
-  both: '#7c3aed',
-  connected: '#22c55e',
   available: '#9ca3af',
+  connected: '#22c55e',
+  orchestrator: '#0ea5e9',
+  trainer: '#f59e0b',
+  both: '#ec4899',
 };
 
 const ROLE_LABELS: Record<MapWorkerRole, string> = {
-  orchestrator: 'Orchestrator Host',
-  trainer: 'Trainer Host',
-  both: 'Orch + Trainer',
-  connected: 'Connected',
   available: 'Available',
+  connected: 'Connected',
+  orchestrator: 'Orchestrator',
+  trainer: 'Trainer',
+  both: 'Orch + Trainer',
 };
 
-function makeIcon(L: any, color: string) {
+export type MapLegendMode = 'setup' | 'select';
+
+const LEGEND_ROLES: Record<MapLegendMode, MapWorkerRole[]> = {
+  setup: ['available', 'connected'],
+  select: ['orchestrator', 'trainer', 'both'],
+};
+
+// Server rack: three horizontal bars — represents orchestrator as a central server
+const ICON_ORCHESTRATOR = `
+  <rect x="8.5" y="9"   width="9" height="2"   rx="0.5" fill="white" opacity="0.95"/>
+  <rect x="8.5" y="12"  width="9" height="2"   rx="0.5" fill="white" opacity="0.95"/>
+  <rect x="8.5" y="15"  width="9" height="2"   rx="0.5" fill="white" opacity="0.95"/>`;
+
+// Lightning bolt: represents model training / gradient updates
+const ICON_TRAINER = `
+  <path d="M15.5 8L10 14h4.2L10.5 19 18 12.5h-4.3Z" fill="white" opacity="0.95"/>`;
+
+// Diamond / 4-pointed star: both roles present on worker
+const ICON_BOTH = `
+  <path d="M13 8.5L15 12.5L19 13L15 13.5L13 17.5L11 13.5L7 13L11 12.5Z" fill="white" opacity="0.95"/>`;
+
+function makeIcon(L: any, color: string, role: MapWorkerRole) {
+  const inner =
+    role === 'orchestrator' ? ICON_ORCHESTRATOR :
+    role === 'trainer'      ? ICON_TRAINER :
+    role === 'both'         ? ICON_BOTH :
+    `<circle cx="13" cy="13" r="5.5" fill="white" opacity="0.92"/>`;
+
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="38" viewBox="0 0 26 38">
     <path d="M13 0C5.82 0 0 5.82 0 13c0 8.9 11.65 22.9 12.16 23.49a1.03 1.03 0 001.68 0C14.35 35.9 26 21.9 26 13 26 5.82 20.18 0 13 0z" fill="${color}" stroke="white" stroke-width="1.5"/>
-    <circle cx="13" cy="13" r="5.5" fill="white" opacity="0.92"/>
+    ${inner}
   </svg>`;
   return L.divIcon({
     html: svg,
@@ -88,7 +115,7 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, classNam
     // Add / update markers
     workers.forEach(worker => {
       const color = ROLE_COLORS[worker.role];
-      const icon = makeIcon(L, color);
+      const icon = makeIcon(L, color, worker.role);
       const popupHtml = `<div style="font-size:12px;line-height:1.5">
         <b>${worker.name}</b><br/>
         <span style="color:${color};font-weight:600">${ROLE_LABELS[worker.role]}</span>
@@ -136,9 +163,9 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, classNam
   );
 };
 
-export const MapLegend: React.FC = () => (
+export const MapLegend: React.FC<{ mode?: MapLegendMode }> = ({ mode = 'setup' }) => (
   <div className="flex flex-wrap gap-x-3 gap-y-1">
-    {(Object.keys(ROLE_COLORS) as MapWorkerRole[]).map(role => (
+    {LEGEND_ROLES[mode].map(role => (
       <div key={role} className="flex items-center gap-1 text-xs text-gray-600">
         <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: ROLE_COLORS[role] }} />
         {ROLE_LABELS[role]}
