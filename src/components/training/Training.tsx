@@ -187,6 +187,7 @@ const Training: React.FC = () => {
   const [isLoadingRegisteredTrainers, setIsLoadingRegisteredTrainers] = useState(false);
   const [isPreparingTraining, setIsPreparingTraining] = useState(false);
   const [isStoppingTraining, setIsStoppingTraining] = useState(false);
+  const [resetStateSuccess, setResetStateSuccess] = useState(false);
 
   const [trainerParams, setTrainerParams] = useState<any>(null);
   const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
@@ -873,6 +874,8 @@ const Training: React.FC = () => {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       await orchestratorService.reset_training_state();
       setTrainingHistory(null); setTrainingStatus(null);
+      setResetStateSuccess(true);
+      setTimeout(() => setResetStateSuccess(false), 2000);
     } catch (error) {
       setErrorPopupMessage('Failed to Reset Training State');
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
@@ -1395,9 +1398,16 @@ const Training: React.FC = () => {
                           {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping...</> : <><FaStop size={12} /> Stop Training</>}
                         </button>
                       )}
-                      <button onClick={resetTrainingState} disabled={isTraining} className="flex items-center gap-2 px-4 py-2.5 text-gray-600 text-sm font-medium border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
-                        <FaTrash size={12} /> Reset State
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={resetTrainingState}
+                          disabled={isTraining || !(trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0))}
+                          title="Clear the training history stored in the orchestrator so you can start a fresh training run"
+                          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border rounded-xl transition-all ${resetStateSuccess ? 'text-emerald-700 border-emerald-300 bg-emerald-50' : 'text-gray-600 border-gray-200 hover:bg-gray-50'} disabled:opacity-40 disabled:cursor-not-allowed`}
+                        >
+                          {resetStateSuccess ? <><FaCheckCircle size={12} /> History Cleared</> : <><FaTrash size={12} /> Clear Training History</>}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1408,9 +1418,16 @@ const Training: React.FC = () => {
                         {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping...</> : <><FaStop size={12} /> Stop Training</>}
                       </button>
                     )}
-                    <button onClick={resetTrainingState} disabled={isTraining} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all mt-3">
-                      <FaTrash size={12} /> Reset State
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={resetTrainingState}
+                        disabled={isTraining || !(trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0))}
+                        title="Clear the training history stored in the orchestrator so you can start a fresh training run"
+                        className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border rounded-xl transition-all mt-3 ${resetStateSuccess ? 'text-emerald-700 border-emerald-300 bg-emerald-50' : 'text-gray-600 border-gray-200 hover:bg-gray-50'} disabled:opacity-40 disabled:cursor-not-allowed`}
+                      >
+                        {resetStateSuccess ? <><FaCheckCircle size={12} /> History Cleared</> : <><FaTrash size={12} /> Clear Training History</>}
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
