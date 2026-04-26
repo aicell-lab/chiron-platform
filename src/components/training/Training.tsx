@@ -657,10 +657,7 @@ const Training: React.FC = () => {
     }
   };
 
-  const removeTrainer = async (managerId: string, appId: string) => {
-    if (isTraining) {
-      setErrorPopupMessage('Cannot Delete Trainer'); setErrorPopupDetails('Stop training first.'); setShowErrorPopup(true); return;
-    }
+  const performRemoveTrainer = async (managerId: string, appId: string) => {
     const trainerId = `${managerId}::${appId}`;
     const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
     if (trainer) {
@@ -679,6 +676,16 @@ const Training: React.FC = () => {
       setShowErrorPopup(true);
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     }
+  };
+
+  const removeTrainer = (managerId: string, appId: string) => {
+    if (isTraining) {
+      setErrorPopupMessage('Cannot Delete Trainer'); setErrorPopupDetails('Stop training first.'); setShowErrorPopup(true); return;
+    }
+    setConfirmModalTitle('Delete Trainer');
+    setConfirmModalMessage('Are you sure you want to delete this trainer?');
+    setConfirmModalAction(() => async () => { await performRemoveTrainer(managerId, appId); });
+    setShowConfirmModal(true);
   };
 
   const showInfo = async (type: 'manager' | 'orchestrator' | 'trainer', id: string) => {
