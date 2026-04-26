@@ -98,6 +98,7 @@ interface OrchestratorApp {
   artifactId: string;
   displayName?: string;
   applicationId?: string;
+  isBusy?: boolean;
 }
 
 interface TrainerApp {
@@ -109,6 +110,7 @@ interface TrainerApp {
   artifactId: string;
   displayName?: string;
   applicationId?: string;
+  isBusy?: boolean;
 }
 
 interface TrainingStatus {
@@ -201,6 +203,7 @@ const Training: React.FC = () => {
   const [confirmModalTitle, setConfirmModalTitle] = useState<string>('');
   const [confirmModalMessage, setConfirmModalMessage] = useState<string>('');
   const [confirmModalAction, setConfirmModalAction] = useState<(() => void) | null>(null);
+  const [confirmModalDanger, setConfirmModalDanger] = useState(false);
 
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [infoModalData, setInfoModalData] = useState<InfoModalData | null>(null);
@@ -543,7 +546,7 @@ const Training: React.FC = () => {
         const newO: OrchestratorApp[] = [];
         if (workerInfo.orchestrators_status) {
           for (const [appId, orchStatus] of Object.entries(workerInfo.orchestrators_status)) {
-            newO.push({ managerId, appId, status: (orchStatus as any).status, serviceIds: (orchStatus as any).service_ids || [], artifactId: (orchStatus as any).artifact_id || 'chiron-platform/chiron-orchestrator', displayName: (orchStatus as any).display_name, applicationId: appId });
+            newO.push({ managerId, appId, status: (orchStatus as any).status, serviceIds: (orchStatus as any).service_ids || [], artifactId: (orchStatus as any).artifact_id || 'chiron-platform/chiron-orchestrator', displayName: (orchStatus as any).display_name, applicationId: appId, isBusy: (orchStatus as any).is_busy ?? false });
           }
         }
         return [...filtered, ...newO];
@@ -553,7 +556,7 @@ const Training: React.FC = () => {
         const newT: TrainerApp[] = [];
         if (workerInfo.trainers_status) {
           for (const [appId, trainerStatus] of Object.entries(workerInfo.trainers_status)) {
-            newT.push({ managerId, appId, status: (trainerStatus as any).status, serviceIds: (trainerStatus as any).service_ids || [], datasets: (trainerStatus as any).datasets || {}, artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer', displayName: (trainerStatus as any).display_name, applicationId: appId });
+            newT.push({ managerId, appId, status: (trainerStatus as any).status, serviceIds: (trainerStatus as any).service_ids || [], datasets: (trainerStatus as any).datasets || {}, artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer', displayName: (trainerStatus as any).display_name, applicationId: appId, isBusy: (trainerStatus as any).is_busy ?? false });
           }
         }
         return [...filtered, ...newT];
@@ -589,7 +592,8 @@ const Training: React.FC = () => {
     setIsCreatingOrchestrator(true);
     try {
       const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
-      await manager.service.create_orchestrator({ token: applicationToken, _rkwargs: true });
+      const ownerId = user?.id as string | undefined;
+      await manager.service.create_orchestrator({ token: applicationToken, owner_id: ownerId, _rkwargs: true });
       setShowCreateOrchestrator(false); setShowLaunchDialog(false); setCreatingFor(null); setIsCreatingOrchestrator(false);
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
@@ -607,7 +611,8 @@ const Training: React.FC = () => {
     setIsCreatingTrainer(true);
     try {
       const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
-      await manager.service.create_trainer({ token: applicationToken, datasets: newTrainerDatasets, trainer_artifact_id: newTrainerArtifactId, _rkwargs: true });
+      const ownerId = user?.id as string | undefined;
+      await manager.service.create_trainer({ token: applicationToken, datasets: newTrainerDatasets, trainer_artifact_id: newTrainerArtifactId, owner_id: ownerId, _rkwargs: true });
       setShowCreateTrainer(false); setShowLaunchDialog(false); setCreatingFor(null); setNewTrainerDatasets([]); setIsCreatingTrainer(false);
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
@@ -619,35 +624,60 @@ const Training: React.FC = () => {
     }
   };
 
+  const showConfirmDialog = (title: string, message: string, action: () => void, danger = false) => {
+    setConfirmModalTitle(title);
+    setConfirmModalMessage(message);
+    setConfirmModalAction(() => action);
+    setConfirmModalDanger(danger);
+    setShowConfirmModal(true);
+  };
+
   const removeOrchestrator = async (managerId: string) => {
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
-    const orchestratorId = `${managerId}::chiron-orchestrator`;
+    const orchestrator = orchestrators.find(o => o.managerId === managerId);
+    if (!orchestrator) return;
+
+    if (orchestrator.isBusy) {
+      showConfirmDialog(
+        'Force Delete Busy Orchestrator',
+        'This orchestrator is currently running a training session.\n\nForce-deleting it will abort the session and may leave trainers in an inconsistent state. Are you sure?',
+        async () => { await performRemoveOrchestrator(managerId, true); },
+        true
+      );
+      return;
+    }
+
+    const orchestratorId = `${managerId}::${orchestrator.appId}`;
     const isSelected = orchestratorId === selectedOrchestrator;
     if (isSelected && trainingHistory && ((trainingHistory.training_losses?.length > 0) || (trainingHistory.validation_losses?.length > 0))) {
-      setConfirmModalTitle('Delete Orchestrator with History');
-      setConfirmModalMessage('This orchestrator has training history that will be permanently lost. Continue?');
-      setConfirmModalAction(() => async () => { await performRemoveOrchestrator(managerId); });
-      setShowConfirmModal(true); return;
+      showConfirmDialog(
+        'Delete Orchestrator with History',
+        'This orchestrator has training history that will be permanently lost. Continue?',
+        async () => { await performRemoveOrchestrator(managerId, false); }
+      );
+      return;
     }
-    const orchestrator = orchestrators.find(o => o.managerId === managerId);
-    if (orchestrator && orchestrator.status === 'RUNNING') {
-      setConfirmModalTitle('Delete Orchestrator');
-      setConfirmModalMessage('Are you sure you want to delete this orchestrator? Training history will be lost.');
-      setConfirmModalAction(() => async () => { await performRemoveOrchestrator(managerId); });
-      setShowConfirmModal(true); return;
+    if (orchestrator.status === 'RUNNING') {
+      showConfirmDialog(
+        'Delete Orchestrator',
+        'Are you sure you want to delete this orchestrator? Training history will be lost.',
+        async () => { await performRemoveOrchestrator(managerId, false); }
+      );
+      return;
     }
-    await performRemoveOrchestrator(managerId);
+    await performRemoveOrchestrator(managerId, false);
   };
 
-  const performRemoveOrchestrator = async (managerId: string) => {
+  const performRemoveOrchestrator = async (managerId: string, force: boolean) => {
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
     const orchestrator = orchestrators.find(o => o.managerId === managerId);
     if (!orchestrator) return;
     setOrchestrators(prev => prev.map(o => o.managerId === managerId ? { ...o, status: 'DELETING' } : o));
     try {
-      await manager.service.remove_orchestrator({ application_id: orchestrator.appId, _rkwargs: true });
+      const callerId = user?.id as string | undefined;
+      await manager.service.remove_orchestrator({ application_id: orchestrator.appId, force, caller_id: callerId, _rkwargs: true });
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
       setErrorPopupMessage('Failed to Remove Orchestrator');
@@ -657,7 +687,7 @@ const Training: React.FC = () => {
     }
   };
 
-  const performRemoveTrainer = async (managerId: string, appId: string) => {
+  const performRemoveTrainer = async (managerId: string, appId: string, force: boolean) => {
     const trainerId = `${managerId}::${appId}`;
     const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
     if (trainer) {
@@ -668,7 +698,8 @@ const Training: React.FC = () => {
     if (!manager) return;
     setTrainers(prev => prev.map(t => t.managerId === managerId && t.appId === appId ? { ...t, status: 'DELETING' } : t));
     try {
-      await manager.service.remove_trainer(appId);
+      const callerId = user?.id as string | undefined;
+      await manager.service.remove_trainer({ application_id: appId, force, caller_id: callerId, _rkwargs: true });
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
       setErrorPopupMessage('Failed to Remove Trainer');
@@ -682,10 +713,21 @@ const Training: React.FC = () => {
     if (isTraining) {
       setErrorPopupMessage('Cannot Delete Trainer'); setErrorPopupDetails('Stop training first.'); setShowErrorPopup(true); return;
     }
-    setConfirmModalTitle('Delete Trainer');
-    setConfirmModalMessage('Are you sure you want to delete this trainer?');
-    setConfirmModalAction(() => async () => { await performRemoveTrainer(managerId, appId); });
-    setShowConfirmModal(true);
+    const trainer = trainers.find(t => t.managerId === managerId && t.appId === appId);
+    if (trainer?.isBusy) {
+      showConfirmDialog(
+        'Force Delete Busy Trainer',
+        'This trainer is currently in an active training session.\n\nForce-deleting it will interrupt the session. Are you sure?',
+        async () => { await performRemoveTrainer(managerId, appId, true); },
+        true
+      );
+      return;
+    }
+    showConfirmDialog(
+      'Delete Trainer',
+      'Are you sure you want to delete this trainer?',
+      async () => { await performRemoveTrainer(managerId, appId, false); }
+    );
   };
 
   const showInfo = async (type: 'manager' | 'orchestrator' | 'trainer', id: string) => {
@@ -932,6 +974,13 @@ const Training: React.FC = () => {
       </span>
     );
   };
+
+  const BusyBadge = () => (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700 ml-1" title="Currently in an active training session">
+      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+      In Training
+    </span>
+  );
 
   // Compute map workers from discovered + connected state
   const mapWorkers = useMemo<MapWorker[]>(() => {
@@ -1195,8 +1244,9 @@ const Training: React.FC = () => {
                                   orchCount > 0 ? (
                                     <div className="flex flex-col gap-1 items-center">
                                       {orchestrators.filter(o => o.managerId === worker.serviceId).map(o => (
-                                        <div key={o.appId} className="flex items-center gap-1">
+                                        <div key={o.appId} className="flex items-center gap-1 flex-wrap justify-center">
                                           {getStatusBadge(o.status)}
+                                          {o.isBusy && <BusyBadge />}
                                           <button onClick={() => removeOrchestrator(worker.serviceId)} className="text-red-400 hover:text-red-600 ml-0.5" title="Remove"><FaTrash size={10} /></button>
                                         </div>
                                       ))}
@@ -1209,8 +1259,9 @@ const Training: React.FC = () => {
                                   trainerCount > 0 ? (
                                     <div className="flex flex-col gap-1 items-center">
                                       {trainers.filter(t => t.managerId === worker.serviceId).map(t => (
-                                        <div key={t.appId} className="flex items-center gap-1">
+                                        <div key={t.appId} className="flex items-center gap-1 flex-wrap justify-center">
                                           {getStatusBadge(t.status)}
+                                          {t.isBusy && <BusyBadge />}
                                           <button onClick={() => removeTrainer(worker.serviceId, t.appId)} className="text-red-400 hover:text-red-600 ml-0.5" title="Remove"><FaTrash size={10} /></button>
                                         </div>
                                       ))}
@@ -1286,15 +1337,21 @@ const Training: React.FC = () => {
                       orchestrators.filter(o => o.status === 'RUNNING').map(orch => {
                         const orchestratorId = `${orch.managerId}::${orch.appId}`;
                         const isSelected = selectedOrchestrator === orchestratorId;
+                        const isBusyElsewhere = orch.isBusy && !isSelected;
+                        const isDisabled = isTraining || isBusyElsewhere;
                         const manager = managers.find(m => m.serviceId === orch.managerId);
                         const geo = manager?.workerInfo?.worker_info?.geo_location;
                         return (
-                          <label key={orchestratorId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 cursor-pointer transition-all ${isSelected ? 'border-blue-500 bg-blue-50/60' : 'border-transparent bg-gray-50 hover:border-gray-200'} ${isTraining ? 'cursor-not-allowed opacity-60' : ''}`}>
-                            <input type="radio" name="orchestrator" checked={isSelected} onChange={() => handleOrchestratorSelectionChange(orchestratorId)} disabled={isTraining} className="mt-0.5 accent-blue-600" />
+                          <label key={orchestratorId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${isSelected ? 'border-blue-500 bg-blue-50/60' : isBusyElsewhere ? 'border-amber-200 bg-amber-50/40' : 'border-transparent bg-gray-50 hover:border-gray-200'}`}>
+                            <input type="radio" name="orchestrator" checked={isSelected} onChange={() => handleOrchestratorSelectionChange(orchestratorId)} disabled={isDisabled} className="mt-0.5 accent-blue-600" />
                             <div className="flex-1 min-w-0">
-                              <p className="font-medium text-gray-900 text-sm leading-tight">{orch.displayName || 'Chiron Orchestrator'}</p>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <p className="font-medium text-gray-900 text-sm leading-tight">{orch.displayName || 'Chiron Orchestrator'}</p>
+                                {orch.isBusy && <BusyBadge />}
+                              </div>
                               {geo && <p className="text-xs text-gray-500 mt-0.5">{geo.region}, {geo.country_name}</p>}
                               <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{orch.managerId.split('/')[1]?.split(':')[0] || orch.managerId}</p>
+                              {isBusyElsewhere && <p className="text-xs text-amber-600 mt-0.5">Currently running a training session</p>}
                             </div>
                             {isSelected && <FaCheckCircle className="text-blue-500 flex-shrink-0 mt-0.5" size={14} />}
                           </label>
@@ -1331,16 +1388,23 @@ const Training: React.FC = () => {
                       const trainerId = `${trainer.managerId}::${trainer.appId}`;
                       const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
                       const isRegistered = registeredTrainers.includes(trainerServiceId);
+                      // Busy in another session = busy but not already registered here
+                      const isBusyElsewhere = trainer.isBusy && !isRegistered;
+                      const isDisabled = !selectedOrchestrator || isLoadingRegisteredTrainers || isBusyElsewhere;
                       const manager = managers.find(m => m.serviceId === trainer.managerId);
                       const geo = manager?.workerInfo?.worker_info?.geo_location;
                       const datasetNames = Object.values(trainer.datasets).map((d: any) => d.name || Object.keys(trainer.datasets).find(k => trainer.datasets[k] === d)).filter(Boolean);
                       return (
-                        <label key={trainerId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${!selectedOrchestrator ? 'cursor-not-allowed opacity-40 border-transparent bg-gray-50' : isRegistered ? 'border-emerald-400 bg-emerald-50/60 cursor-pointer' : 'border-transparent bg-gray-50 hover:border-gray-200 cursor-pointer'}`}>
-                          <input type="checkbox" checked={isRegistered} disabled={!selectedOrchestrator || isLoadingRegisteredTrainers} onChange={async e => { e.target.checked ? await registerTrainer(trainerId) : await unregisterTrainer(trainerId); }} className="mt-0.5 accent-emerald-600" />
+                        <label key={trainerId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${isRegistered ? 'border-emerald-400 bg-emerald-50/60' : isBusyElsewhere ? 'border-amber-200 bg-amber-50/40' : 'border-transparent bg-gray-50 hover:border-gray-200'}`}>
+                          <input type="checkbox" checked={isRegistered} disabled={isDisabled} onChange={async e => { e.target.checked ? await registerTrainer(trainerId) : await unregisterTrainer(trainerId); }} className="mt-0.5 accent-emerald-600" />
                           <div className="flex-1 min-w-0">
-                            <p className="font-medium text-gray-900 text-sm leading-tight">{trainer.displayName || 'Tabula Trainer'}</p>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <p className="font-medium text-gray-900 text-sm leading-tight">{trainer.displayName || 'Tabula Trainer'}</p>
+                              {trainer.isBusy && <BusyBadge />}
+                            </div>
                             {geo && <p className="text-xs text-gray-500 mt-0.5">{geo.region}, {geo.country_name}</p>}
                             {datasetNames.length > 0 && <p className="text-xs text-gray-400 mt-0.5 truncate">{datasetNames.join(', ')}</p>}
+                            {isBusyElsewhere && <p className="text-xs text-amber-600 mt-0.5">In an active training session</p>}
                           </div>
                           {isRegistered && <FaCheckCircle className="text-emerald-500 flex-shrink-0 mt-0.5" size={14} />}
                         </label>
@@ -1769,8 +1833,8 @@ const Training: React.FC = () => {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
             <div className="flex items-start gap-4 mb-5">
-              <div className="w-10 h-10 bg-amber-100 rounded-full flex items-center justify-center flex-shrink-0">
-                <svg className="w-5 h-5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+              <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${confirmModalDanger ? 'bg-red-100' : 'bg-amber-100'}`}>
+                <svg className={`w-5 h-5 ${confirmModalDanger ? 'text-red-600' : 'text-amber-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
               </div>
               <div>
                 <h3 className="font-semibold text-gray-900 mb-1">{confirmModalTitle}</h3>
@@ -1778,8 +1842,8 @@ const Training: React.FC = () => {
               </div>
             </div>
             <div className="flex gap-3">
-              <button onClick={() => { setShowConfirmModal(false); setConfirmModalAction(null); }} className="flex-1 py-2.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors">Cancel</button>
-              <button onClick={() => { confirmModalAction && confirmModalAction(); setShowConfirmModal(false); setConfirmModalAction(null); }} className="flex-1 py-2.5 bg-amber-600 text-white text-sm font-medium rounded-xl hover:bg-amber-700 transition-colors">Continue</button>
+              <button onClick={() => { setShowConfirmModal(false); setConfirmModalAction(null); setConfirmModalDanger(false); }} className="flex-1 py-2.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors">Cancel</button>
+              <button onClick={() => { confirmModalAction && confirmModalAction(); setShowConfirmModal(false); setConfirmModalAction(null); setConfirmModalDanger(false); }} className={`flex-1 py-2.5 text-white text-sm font-medium rounded-xl transition-colors ${confirmModalDanger ? 'bg-red-600 hover:bg-red-700' : 'bg-amber-600 hover:bg-amber-700'}`}>{confirmModalDanger ? 'Force Delete' : 'Continue'}</button>
             </div>
           </div>
         </div>
