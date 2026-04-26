@@ -33,7 +33,6 @@ interface GeoLocation {
   region: string;
   country_name: string;
   country_code: string;
-  continent_code: string;
   timezone: string;
   latitude: number;
   longitude: number;
@@ -136,7 +135,7 @@ interface ManagerInfoModalData {
   workspace: string;
   clusterStatus: ClusterStatus | null;
   datasets: Record<string, any>;
-  location?: { region: string; country_name: string; country_code: string; continent_code: string; latitude: number; longitude: number; };
+  location?: { region: string; country_name: string; country_code: string; latitude: number; longitude: number; };
 }
 interface OrchestratorInfoModalData { status?: string; artifactId?: string; }
 interface TrainerInfoModalData { appId: string; status?: string; datasets: Record<string, any>; artifactId?: string; }
@@ -697,7 +696,7 @@ const Training: React.FC = () => {
       }
       if (!workerInfo) throw new Error('Could not retrieve worker information');
       if (type === 'manager') {
-        setInfoModalData({ workspace: manager.workspace, clusterStatus: workerInfo.cluster_status || null, datasets: workerInfo.datasets || {}, location: workerInfo.worker_info?.geo_location ? { region: workerInfo.worker_info.geo_location.region, country_name: workerInfo.worker_info.geo_location.country_name, country_code: workerInfo.worker_info.geo_location.country_code, continent_code: workerInfo.worker_info.geo_location.continent_code, latitude: workerInfo.worker_info.geo_location.latitude, longitude: workerInfo.worker_info.geo_location.longitude } : undefined });
+        setInfoModalData({ workspace: manager.workspace, clusterStatus: workerInfo.cluster_status || null, datasets: workerInfo.datasets || {}, location: workerInfo.worker_info?.geo_location ? { region: workerInfo.worker_info.geo_location.region, country_name: workerInfo.worker_info.geo_location.country_name, country_code: workerInfo.worker_info.geo_location.country_code, latitude: workerInfo.worker_info.geo_location.latitude, longitude: workerInfo.worker_info.geo_location.longitude } : undefined });
       } else if (type === 'orchestrator') {
         const orchAppId = id.split('::')[1];
         const orchStatus = workerInfo.orchestrators_status?.[orchAppId];
@@ -825,6 +824,7 @@ const Training: React.FC = () => {
       const currentTrainers = await orchestratorService.list_trainers();
       if (currentTrainers.length === 0) throw new Error('No trainers available. Please select at least one trainer.');
       setIsPreparingTraining(false); setIsTraining(true); setTrainingConfigCollapsed(true);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
       const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, _rkwargs: true };
       orchestratorService.start_training(trainingParams).catch((error: Error) => {
         setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true); setIsTraining(false);
