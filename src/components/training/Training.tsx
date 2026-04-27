@@ -5,28 +5,13 @@ import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
 import FederatedWorldMap, { MapWorker, MapLegend, MapLegendMode } from './FederatedWorldMap';
 
-const CountryFlag: React.FC<{ countryName?: string; className?: string }> = ({ countryName, className }) => {
-  const [flagUrl, setFlagUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!countryName) return;
-    const cacheKey = `country_flag_${countryName}`;
-    const cached = sessionStorage.getItem(cacheKey);
-    if (cached) { setFlagUrl(cached); return; }
-    fetch(`https://restcountries.com/v3.1/name/${encodeURIComponent(countryName)}?fields=flags`)
-      .then(res => res.json())
-      .then(data => {
-        if (Array.isArray(data) && data.length > 0 && data[0].flags) {
-          const url = data[0].flags.png || data[0].flags.svg;
-          setFlagUrl(url);
-          sessionStorage.setItem(cacheKey, url);
-        }
-      })
-      .catch(() => {});
-  }, [countryName]);
+const CountryFlag: React.FC<{ countryName?: string; countryCode?: string; className?: string }> = ({ countryName, countryCode, className }) => {
+  const flagUrl = countryCode
+    ? `https://flagcdn.com/w40/${countryCode.toLowerCase()}.png`
+    : null;
 
   if (!flagUrl) return null;
-  return <img src={flagUrl} alt={`${countryName} flag`} className={className || 'w-5 h-auto inline-block'} />;
+  return <img src={flagUrl} alt={`${countryName ?? countryCode} flag`} className={className || 'w-5 h-auto inline-block'} />;
 };
 
 interface GeoLocation {
@@ -1008,7 +993,8 @@ const Training: React.FC = () => {
           if (!geo?.latitude || !geo?.longitude) return [];
           const orchCount = orchestrators.filter(o => o.managerId === manager.serviceId).length;
           const trainerCount = trainers.filter(t => t.managerId === manager.serviceId).length;
-          return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: appRole(manager.serviceId), label: `${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` }];
+          const datasetCount = manager.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0;
+          return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: appRole(manager.serviceId), label: `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}, ${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` }];
         });
     }
 
@@ -1019,7 +1005,8 @@ const Training: React.FC = () => {
         if (!geo?.latitude || !geo?.longitude) return [];
         const orchCount = orchestrators.filter(o => o.managerId === manager.serviceId).length;
         const trainerCount = trainers.filter(t => t.managerId === manager.serviceId).length;
-        return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: appRole(manager.serviceId), label: `${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` }];
+        const datasetCount = manager.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0;
+        return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: appRole(manager.serviceId), label: `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}, ${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` }];
       });
     }
 
@@ -1030,13 +1017,14 @@ const Training: React.FC = () => {
       if (!geo?.latitude || !geo?.longitude) return;
       const orchCount = orchestrators.filter(o => o.managerId === manager.serviceId).length;
       const trainerCount = trainers.filter(t => t.managerId === manager.serviceId).length;
-      result.push({ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: 'connected', label: `${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` });
+      const datasetCount = manager.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0;
+      result.push({ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: 'connected', label: `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}, ${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` });
     });
     observedWorkspaces.forEach(ws => {
       (discoveredWorkers[ws] || []).forEach(worker => {
         if (managers.find(m => m.serviceId === worker.serviceId)) return;
         if (!worker.geo_location?.latitude || !worker.geo_location?.longitude) return;
-        result.push({ id: worker.serviceId, name: worker.name, lat: worker.geo_location.latitude, lng: worker.geo_location.longitude, role: 'available', label: `${worker.datasetCount ?? 0} dataset(s)` });
+        result.push({ id: worker.serviceId, name: worker.name, lat: worker.geo_location.latitude, lng: worker.geo_location.longitude, role: 'available', label: '' });
       });
     });
     return result;
@@ -1118,7 +1106,7 @@ const Training: React.FC = () => {
       {/* Main content: map left + step content right */}
       <div className="flex gap-6 items-start">
         {/* Left: World Map */}
-        <div className="w-80 xl:w-96 flex-shrink-0 space-y-4 sticky top-6">
+        <div className="w-72 xl:w-[346px] flex-shrink-0 space-y-4 sticky top-6">
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
             <div className="px-4 pt-4 pb-2 flex items-center gap-2">
               <span className="text-sm font-semibold text-gray-700">Federation Map</span>
@@ -1226,13 +1214,13 @@ const Training: React.FC = () => {
                               <td className="px-4 py-3.5">
                                 {geo ? (
                                   <div className="flex items-center gap-1.5">
-                                    <CountryFlag countryName={geo.country_name} className="w-4 h-3 object-cover rounded-sm flex-shrink-0" />
+                                    <CountryFlag countryName={geo.country_name} countryCode={geo.country_code} className="w-4 h-3 object-cover rounded-sm flex-shrink-0" />
                                     <span className="text-gray-600 text-xs">{geo.region}, {geo.country_name}</span>
                                   </div>
                                 ) : <span className="text-gray-300 text-xs">—</span>}
                               </td>
                               <td className="px-4 py-3.5 text-center">
-                                {datasetCount !== undefined ? (
+                                {isConnected && datasetCount !== undefined ? (
                                   <span className="inline-flex items-center gap-1 text-xs font-medium text-gray-700">
                                     <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" /></svg>
                                     {datasetCount}
