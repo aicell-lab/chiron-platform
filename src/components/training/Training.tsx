@@ -179,8 +179,10 @@ const Training: React.FC = () => {
 
   // Save model weights
   const [isSavingModel, setIsSavingModel] = useState(false);
+  const [isSavingGlobal, setIsSavingGlobal] = useState(false);
   const [saveModelDescription, setSaveModelDescription] = useState('');
   const [savedModelArtifactIds, setSavedModelArtifactIds] = useState<Record<string, string> | null>(null);
+  const [savedGlobalArtifactId, setSavedGlobalArtifactId] = useState<string | null>(null);
 
   const [trainerParams, setTrainerParams] = useState<any>(null);
   const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
@@ -873,6 +875,7 @@ const Training: React.FC = () => {
       setIsPreparingTraining(false); setIsTraining(true); setTrainingConfigCollapsed(true);
       window.scrollTo({ top: 0, behavior: 'smooth' });
       setSavedModelArtifactIds(null);
+      setSavedGlobalArtifactId(null);
       const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, _rkwargs: true };
       if (config.initial_weights) trainingParams.initial_weights = config.initial_weights;
       orchestratorService.start_training(trainingParams).catch((error: Error) => {
@@ -948,6 +951,27 @@ const Training: React.FC = () => {
       setShowErrorPopup(true);
     } finally {
       setIsSavingModel(false);
+    }
+  };
+
+  const saveGlobalWeights = async () => {
+    if (!selectedOrchestrator) return;
+    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+    setIsSavingGlobal(true);
+    try {
+      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+      const artifactId = await orchestratorService.save_global_weights({
+        description: saveModelDescription.trim() || undefined,
+        _rkwargs: true,
+      });
+      setSavedGlobalArtifactId(artifactId);
+    } catch (error) {
+      setErrorPopupMessage('Failed to Save Global Weights');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setShowErrorPopup(true);
+    } finally {
+      setIsSavingGlobal(false);
     }
   };
 
@@ -1680,25 +1704,46 @@ const Training: React.FC = () => {
                         className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500"
                       />
                     </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={saveGlobalWeights}
+                        disabled={isSavingGlobal || isSavingModel}
+                        title="Save aggregated transformer weights from the orchestrator — portable across clients"
+                        className="flex items-center gap-2 px-4 py-2 bg-violet-600 text-white text-sm font-semibold rounded-xl hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                      >
+                        {isSavingGlobal ? (
+                          <><div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" /> Saving...</>
+                        ) : (
+                          <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg> Save Global Transformer</>
+                        )}
+                      </button>
+                      <button
+                        onClick={saveModelWeights}
+                        disabled={isSavingModel || isSavingGlobal}
+                        title="Save full model checkpoint (transformer + embedder) for each client — client-specific"
+                        className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 text-sm font-semibold rounded-xl hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all border border-gray-200"
+                      >
+                        {isSavingModel ? (
+                          <><div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-gray-500" /> Saving...</>
+                        ) : (
+                          <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg> Save All Clients</>
+                        )}
+                      </button>
+                    </div>
+                    {savedGlobalArtifactId && (
+                      <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3">
+                        <p className="text-xs font-semibold text-emerald-800 mb-0.5">Global transformer saved</p>
+                        <p className="text-xs text-emerald-700 font-mono">{savedGlobalArtifactId}</p>
+                      </div>
+                    )}
                     {savedModelArtifactIds && (
                       <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 space-y-1">
-                        <p className="text-xs font-semibold text-emerald-800 mb-1">Saved successfully</p>
+                        <p className="text-xs font-semibold text-emerald-800 mb-1">Client checkpoints saved</p>
                         {Object.entries(savedModelArtifactIds).map(([cid, id]) => (
                           <p key={cid} className="text-xs text-emerald-700 font-mono">{cid}: {id}</p>
                         ))}
                       </div>
                     )}
-                    <button
-                      onClick={saveModelWeights}
-                      disabled={isSavingModel}
-                      className="flex items-center gap-2 px-4 py-2 bg-violet-600 text-white text-sm font-semibold rounded-xl hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                    >
-                      {isSavingModel ? (
-                        <><div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" /> Saving...</>
-                      ) : (
-                        <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg> Save All Clients</>
-                      )}
-                    </button>
                   </div>
                 </div>
               )}
