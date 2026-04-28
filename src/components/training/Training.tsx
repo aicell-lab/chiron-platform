@@ -177,6 +177,11 @@ const Training: React.FC = () => {
   const [isStoppingTraining, setIsStoppingTraining] = useState(false);
   const [resetStateSuccess, setResetStateSuccess] = useState(false);
 
+  // Save model weights
+  const [isSavingModel, setIsSavingModel] = useState(false);
+  const [saveModelDescription, setSaveModelDescription] = useState('');
+  const [savedModelArtifactIds, setSavedModelArtifactIds] = useState<Record<string, string> | null>(null);
+
   const [trainerParams, setTrainerParams] = useState<any>(null);
   const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
   const [trainerParamsError, setTrainerParamsError] = useState<string | null>(null);
@@ -856,7 +861,7 @@ const Training: React.FC = () => {
     return () => clearInterval(historyInterval);
   }, [isTraining, selectedOrchestrator]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const startTraining = async (config: { num_rounds: number; fit_config: Record<string, any>; eval_config: Record<string, any>; per_round_timeout: number; }) => {
+  const startTraining = async (config: { num_rounds: number; fit_config: Record<string, any>; eval_config: Record<string, any>; per_round_timeout: number; initial_weights: { artifact_id: string; file_path: string } | null; }) => {
     if (!selectedOrchestrator) return;
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
@@ -867,7 +872,9 @@ const Training: React.FC = () => {
       if (currentTrainers.length === 0) throw new Error('No trainers available. Please select at least one trainer.');
       setIsPreparingTraining(false); setIsTraining(true); setTrainingConfigCollapsed(true);
       window.scrollTo({ top: 0, behavior: 'smooth' });
+      setSavedModelArtifactIds(null);
       const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, _rkwargs: true };
+      if (config.initial_weights) trainingParams.initial_weights = config.initial_weights;
       orchestratorService.start_training(trainingParams).catch((error: Error) => {
         setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true); setIsTraining(false);
       });
@@ -919,6 +926,28 @@ const Training: React.FC = () => {
       setErrorPopupMessage('Failed to Reset Training State');
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
       setShowErrorPopup(true);
+    }
+  };
+
+  const saveModelWeights = async () => {
+    if (!selectedOrchestrator) return;
+    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+    setIsSavingModel(true);
+    try {
+      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+      const artifactIds = await orchestratorService.save_model_weights({
+        client_ids: 'all',
+        description: saveModelDescription.trim() || undefined,
+        _rkwargs: true,
+      });
+      setSavedModelArtifactIds(artifactIds);
+    } catch (error) {
+      setErrorPopupMessage('Failed to Save Model Weights');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setShowErrorPopup(true);
+    } finally {
+      setIsSavingModel(false);
     }
   };
 
@@ -1624,6 +1653,52 @@ const Training: React.FC = () => {
                         </div>
                       );
                     })}
+                  </div>
+                </div>
+              )}
+
+              {/* Save Model Weights — shown when there is training history and not currently training */}
+              {!isTraining && trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0) && (
+                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+                  <div className="flex items-center gap-2 mb-4">
+                    <div className="w-7 h-7 bg-violet-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                      <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-sm text-gray-900">Save Model Weights</p>
+                      <p className="text-xs text-gray-400 mt-0.5">Publish the trained weights from all clients to the artifact hub.</p>
+                    </div>
+                  </div>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Description <span className="text-gray-400 font-normal">(optional)</span></label>
+                      <input
+                        type="text"
+                        value={saveModelDescription}
+                        onChange={e => setSaveModelDescription(e.target.value)}
+                        placeholder="e.g. Round 10 checkpoint — liver + kidney datasets"
+                        className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500"
+                      />
+                    </div>
+                    {savedModelArtifactIds && (
+                      <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 space-y-1">
+                        <p className="text-xs font-semibold text-emerald-800 mb-1">Saved successfully</p>
+                        {Object.entries(savedModelArtifactIds).map(([cid, id]) => (
+                          <p key={cid} className="text-xs text-emerald-700 font-mono">{cid}: {id}</p>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      onClick={saveModelWeights}
+                      disabled={isSavingModel}
+                      className="flex items-center gap-2 px-4 py-2 bg-violet-600 text-white text-sm font-semibold rounded-xl hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                    >
+                      {isSavingModel ? (
+                        <><div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" /> Saving...</>
+                      ) : (
+                        <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg> Save All Clients</>
+                      )}
+                    </button>
                   </div>
                 </div>
               )}

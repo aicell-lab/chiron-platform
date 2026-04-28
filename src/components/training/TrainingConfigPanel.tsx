@@ -26,6 +26,7 @@ interface TrainingConfigPanelProps {
     fit_config: Record<string, any>;
     eval_config: Record<string, any>;
     per_round_timeout: number;
+    initial_weights: { artifact_id: string; file_path: string } | null;
   }) => void;
   isPreparingTraining: boolean;
   isTraining: boolean;
@@ -45,11 +46,16 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   // Top-level parameters
   const [numRounds, setNumRounds] = useState(5);
   const [perRoundTimeoutMinutes, setPerRoundTimeoutMinutes] = useState(20);
-  
+
+  // Pretrained weights
+  const [usePretrainedWeights, setUsePretrainedWeights] = useState(false);
+  const [pretrainedArtifactId, setPretrainedArtifactId] = useState('chiron-platform/tabula-pretrained-weights');
+  const [pretrainedFilePath, setPretrainedFilePath] = useState('avg.pth');
+
   // Parameter values
   const [fitValues, setFitValues] = useState<Record<string, any>>({});
   const [evalValues, setEvalValues] = useState<Record<string, any>>({});
-  
+
   // Accordion state
   const [fitAdvancedExpanded, setFitAdvancedExpanded] = useState(false);
   const [evalAdvancedExpanded, setEvalAdvancedExpanded] = useState(false);
@@ -261,6 +267,9 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
       fit_config,
       eval_config,
       per_round_timeout: perRoundTimeoutMinutes * 60,
+      initial_weights: usePretrainedWeights && pretrainedArtifactId.trim() && pretrainedFilePath.trim()
+        ? { artifact_id: pretrainedArtifactId.trim(), file_path: pretrainedFilePath.trim() }
+        : null,
     });
   };
 
@@ -326,6 +335,47 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
             <p className="mt-1 text-xs text-gray-400">Maximum time allowed for a single round (fit + evaluate). If exceeded, the round is aborted.</p>
           </div>
         </div>
+      </div>
+
+      {/* Pretrained weights */}
+      <div className="mb-6 pb-6 border-b border-gray-200">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <label className="block text-sm font-medium text-gray-700">Start from Pretrained Weights</label>
+            <p className="text-xs text-gray-400 mt-0.5">Load transformer weights from a prior training run or a published checkpoint before round 1.</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setUsePretrainedWeights(v => !v)}
+            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${usePretrainedWeights ? 'bg-emerald-500' : 'bg-gray-200'}`}
+          >
+            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ${usePretrainedWeights ? 'translate-x-4' : 'translate-x-0'}`} />
+          </button>
+        </div>
+        {usePretrainedWeights && (
+          <div className="space-y-3 mt-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Artifact ID</label>
+              <input
+                type="text"
+                value={pretrainedArtifactId}
+                onChange={e => setPretrainedArtifactId(e.target.value)}
+                placeholder="workspace/artifact-alias"
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">File Path</label>
+              <input
+                type="text"
+                value={pretrainedFilePath}
+                onChange={e => setPretrainedFilePath(e.target.value)}
+                placeholder="avg.pth or round_10/model_weights-round=10.pth"
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Fit parameters */}
