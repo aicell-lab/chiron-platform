@@ -43,6 +43,7 @@ export interface HyphaState {
   login: (username: string, password: string) => Promise<void>;
   isLoggedIn: boolean;
   setLoggedIn: (status: boolean) => void;
+  logout: () => void;
   selectedResource: Resource | null;
   setSelectedResource: (resource: Resource | null) => void;
   fetchResource: (id: string) => Promise<void>;
@@ -86,6 +87,15 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
   },
   setTotalItems: (total) => set({ totalItems: total }),
   setLoggedIn: (status: boolean) => set({ isLoggedIn: status }),
+  logout: () => set({
+    server: null,
+    user: null,
+    artifactManager: null,
+    isConnected: false,
+    isAuthenticated: false,
+    isLoggedIn: false,
+    isInitialized: false,
+  }),
   setSelectedResource: (resource) => set({ selectedResource: resource }),
   connect: async (config: ConnectionConfig) => {
     try {

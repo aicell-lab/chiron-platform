@@ -32,7 +32,7 @@ const getSavedToken = () => {
 export default function LoginButton({ className = '' }: LoginButtonProps) {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
-  const { client, user, connect, setUser, server, isConnected, isLoggedIn } = useHyphaStore();
+  const { client, user, connect, setUser, server, isConnected, isLoggedIn, logout } = useHyphaStore();
   const { hyphaClient, setHyphaClient } = useHyphaContext();
   const navigate = useNavigate();
   const location = useLocation();
@@ -56,15 +56,19 @@ export default function LoginButton({ className = '' }: LoginButtonProps) {
         await hyphaClient.disconnect();
         setHyphaClient(null);
       }
+      if (server) {
+        try { await server.disconnect(); } catch { /* ignore */ }
+      }
+    } catch (error) {
+      console.error('Error during logout:', error);
+    } finally {
       localStorage.removeItem('token');
       localStorage.removeItem('tokenExpiry');
       localStorage.removeItem('user');
       sessionStorage.removeItem(REDIRECT_PATH_KEY);
-      setUser(null);
+      logout();
       setIsDropdownOpen(false);
       navigate('/');
-    } catch (error) {
-      console.error('Error during logout:', error);
     }
   };
 
