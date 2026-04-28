@@ -1496,13 +1496,29 @@ const Training: React.FC = () => {
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{trainingStatus.stage || 'Idle'}</span>
-                      <span className="text-xs text-gray-500">Round {trainingStatus.current_training_round} / {trainingStatus.target_round}</span>
+                      {(() => {
+                        const r = trainingStatus.current_training_round;
+                        const total = trainingStatus.target_round;
+                        // completed = rounds where both fit and evaluate are done
+                        // fit started → r-1 completed; evaluate started → r-1 completed; between rounds (stage null, still running) → r completed
+                        const completed = trainingStatus.stage === null && trainingStatus.is_running
+                          ? r
+                          : Math.max(0, r - 1);
+                        return <span className="text-xs text-gray-500">Round {completed} / {total}</span>;
+                      })()}
                     </div>
                   </div>
                   {/* Overall round progress */}
                   <div className="mb-4">
                     <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
-                      <div className="bg-blue-500 h-2 rounded-full transition-all duration-500" style={{ width: `${(trainingStatus.current_training_round / Math.max(trainingStatus.target_round, 1)) * 100}%` }} />
+                      {(() => {
+                        const r = trainingStatus.current_training_round;
+                        const total = Math.max(trainingStatus.target_round, 1);
+                        // Each round contributes 0.5 per phase (fit=0.5, evaluate=0.5)
+                        const phaseOffset = trainingStatus.stage === 'fit' ? 0 : trainingStatus.stage === 'evaluate' ? 0.5 : 1;
+                        const pct = ((r - 1 + phaseOffset) / total) * 100;
+                        return <div className="bg-blue-500 h-2 rounded-full transition-all duration-500" style={{ width: `${Math.max(0, pct)}%` }} />;
+                      })()}
                     </div>
                   </div>
                   <div className="space-y-3">
