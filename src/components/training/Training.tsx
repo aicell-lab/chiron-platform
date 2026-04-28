@@ -129,7 +129,7 @@ interface TrainerInfoModalData { appId: string; status?: string; datasets: Recor
 type InfoModalData = ManagerInfoModalData | OrchestratorInfoModalData | TrainerInfoModalData;
 
 const Training: React.FC = () => {
-  const { server, isLoggedIn, user } = useHyphaStore();
+  const { server, isLoggedIn, user, artifactManager } = useHyphaStore();
 
   const [managers, setManagers] = useState<ManagerConnection[]>([]);
   const [connectingWorkspace, setConnectingWorkspace] = useState<string | null>(null);
@@ -1524,6 +1524,7 @@ const Training: React.FC = () => {
                         params={trainerParams}
                         loading={trainerParamsLoading}
                         error={trainerParamsError}
+                        artifactManager={artifactManager}
                         onStart={startTraining}
                         isPreparingTraining={isPreparingTraining}
                         isTraining={isTraining}
