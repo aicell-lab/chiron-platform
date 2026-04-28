@@ -1037,7 +1037,9 @@ const Training: React.FC = () => {
 
   // All discovered workers (flat list with workspace context)
   const allDiscoveredWorkers = useMemo(() => {
-    return observedWorkspaces.flatMap(ws => (discoveredWorkers[ws] || []).map(w => ({ ...w, workspace: ws })));
+    return observedWorkspaces
+      .flatMap(ws => (discoveredWorkers[ws] || []).map(w => ({ ...w, workspace: ws })))
+      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
   }, [observedWorkspaces, discoveredWorkers]);
 
   const stepEnabled = (step: number) => {
