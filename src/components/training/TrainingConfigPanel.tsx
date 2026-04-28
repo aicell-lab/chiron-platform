@@ -42,7 +42,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   
   // Top-level parameters
   const [numRounds, setNumRounds] = useState(5);
-  const [perRoundTimeout, setPerRoundTimeout] = useState(600);
+  const [perRoundTimeoutMinutes, setPerRoundTimeoutMinutes] = useState(20);
   
   // Parameter values
   const [fitValues, setFitValues] = useState<Record<string, any>>({});
@@ -253,7 +253,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
       num_rounds: numRounds,
       fit_config,
       eval_config,
-      per_round_timeout: perRoundTimeout,
+      per_round_timeout: perRoundTimeoutMinutes * 60,
     });
   };
 
@@ -311,20 +311,22 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
               onChange={(e) => setNumRounds(parseInt(e.target.value, 10) || 1)}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
+            <p className="mt-1 text-xs text-gray-400">One round = all clients train locally, then the server aggregates their weights (FedAvg).</p>
           </div>
-          
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Per Round Timeout (seconds)
+              Per Round Timeout (minutes)
             </label>
             <input
               type="number"
               min="1"
               step="1"
-              value={perRoundTimeout}
-              onChange={(e) => setPerRoundTimeout(parseInt(e.target.value, 10) || 600)}
+              value={perRoundTimeoutMinutes}
+              onChange={(e) => setPerRoundTimeoutMinutes(parseInt(e.target.value, 10) || 20)}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
+            <p className="mt-1 text-xs text-gray-400">Maximum time allowed for a single round (fit + evaluate). If exceeded, the round is aborted.</p>
           </div>
         </div>
       </div>
