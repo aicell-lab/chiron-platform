@@ -29,6 +29,7 @@ interface TrainingConfigPanelProps {
   }) => void;
   isPreparingTraining: boolean;
   isTraining: boolean;
+  onConfigChange?: (numRounds: number, perRoundTimeoutMinutes: number) => void;
 }
 
 const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
@@ -38,8 +39,9 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   onStart,
   isPreparingTraining,
   isTraining,
+  onConfigChange,
 }) => {
-  
+
   // Top-level parameters
   const [numRounds, setNumRounds] = useState(5);
   const [perRoundTimeoutMinutes, setPerRoundTimeoutMinutes] = useState(20);
@@ -51,6 +53,11 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   // Accordion state
   const [fitAdvancedExpanded, setFitAdvancedExpanded] = useState(false);
   const [evalAdvancedExpanded, setEvalAdvancedExpanded] = useState(false);
+
+  // Notify parent of config changes for header display
+  useEffect(() => {
+    onConfigChange?.(numRounds, perRoundTimeoutMinutes);
+  }, [numRounds, perRoundTimeoutMinutes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Initialize values with defaults when params change
   useEffect(() => {
@@ -259,23 +266,17 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
 
   if (loading) {
     return (
-      <div className="bg-white p-6 rounded-lg shadow-md">
-        <h3 className="text-xl font-semibold mb-4">Start Federated Training</h3>
-        <div className="flex items-center justify-center py-8">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-          <span className="ml-3 text-gray-600">Loading parameters...</span>
-        </div>
+      <div className="flex items-center justify-center py-8">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        <span className="ml-3 text-gray-600">Loading parameters...</span>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-white p-6 rounded-lg shadow-md">
-        <h3 className="text-xl font-semibold mb-4">Start Federated Training</h3>
-        <div className="bg-red-50 border border-red-200 rounded-md p-4">
-          <p className="text-red-800">Failed to load training parameters: {error}</p>
-        </div>
+      <div className="bg-red-50 border border-red-200 rounded-md p-4">
+        <p className="text-red-800">Failed to load training parameters: {error}</p>
       </div>
     );
   }
@@ -283,18 +284,14 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   // Show message when no params are available (no trainers selected)
   if (!params) {
     return (
-      <div className="bg-white p-6 rounded-lg shadow-md">
-        <h3 className="text-xl font-semibold mb-4">Start Federated Training</h3>
-        <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
-          <p className="text-blue-800">Please select at least one trainer to configure training parameters.</p>
-        </div>
+      <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
+        <p className="text-blue-800">Please select at least one trainer to configure training parameters.</p>
       </div>
     );
   }
 
   return (
-    <div className="bg-white p-6 rounded-lg shadow-md">
-      <h3 className="text-xl font-semibold mb-4">Start Federated Training</h3>
+    <div>
       
       {/* Top-level parameters */}
       <div className="mb-6 pb-6 border-b border-gray-200">
@@ -355,15 +352,18 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
       <button
         onClick={handleStartTraining}
         disabled={isPreparingTraining || isTraining}
-        className="w-full bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center"
+        className="w-full bg-emerald-600 text-white px-4 py-3 rounded-xl hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-semibold text-sm shadow-sm transition-all"
       >
         {isPreparingTraining ? (
           <>
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
             Preparing Training...
           </>
         ) : (
-          'Start Training'
+          <>
+            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+            Start Training · {numRounds} round{numRounds !== 1 ? 's' : ''} · {perRoundTimeoutMinutes} min timeout
+          </>
         )}
       </button>
     </div>

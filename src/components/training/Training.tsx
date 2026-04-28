@@ -168,6 +168,7 @@ const Training: React.FC = () => {
 
   const [isTraining, setIsTraining] = useState(false);
   const [trainingConfigCollapsed, setTrainingConfigCollapsed] = useState(false);
+  const [trainingConfigSummary, setTrainingConfigSummary] = useState({ numRounds: 5, perRoundTimeoutMinutes: 20 });
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
   const [trainingHistory, setTrainingHistory] = useState<TrainingHistory | null>(null);
   const [registeredTrainers, setRegisteredTrainers] = useState<string[]>([]);
@@ -1426,64 +1427,74 @@ const Training: React.FC = () => {
           {currentStep === 3 && (
             <div className="space-y-4">
               {/* Config + Controls */}
-              <div className="bg-white rounded-2xl border border-gray-100 shadow-sm">
+              <div className={`rounded-2xl border shadow-sm transition-colors ${isTraining ? 'bg-blue-50 border-blue-200' : 'bg-white border-emerald-200'}`}>
+                {/* Header — always visible, acts as the primary CTA */}
                 <button
                   onClick={() => setTrainingConfigCollapsed(c => !c)}
-                  className="w-full flex items-center justify-between px-5 py-4 text-left"
+                  className="w-full flex items-center justify-between px-5 py-4 text-left group"
                 >
-                  <span className="font-semibold text-gray-900 text-sm">Training Configuration</span>
-                  <svg className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${trainingConfigCollapsed ? '-rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <div className="flex items-center gap-3">
+                    {isTraining ? (
+                      <div className="w-7 h-7 bg-blue-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                        <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
+                      </div>
+                    ) : (
+                      <div className="w-7 h-7 bg-emerald-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                        <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+                      </div>
+                    )}
+                    <div>
+                      <p className={`font-semibold text-sm leading-tight ${isTraining ? 'text-blue-900' : 'text-gray-900'}`}>
+                        {isTraining ? 'Training Running' : 'Start Training'}
+                      </p>
+                      <p className="text-xs text-gray-400 leading-tight mt-0.5">
+                        {trainingConfigSummary.numRounds} round{trainingConfigSummary.numRounds !== 1 ? 's' : ''} · {trainingConfigSummary.perRoundTimeoutMinutes} min timeout
+                      </p>
+                    </div>
+                  </div>
+                  <svg className={`w-4 h-4 text-gray-400 transition-transform duration-200 flex-shrink-0 ${trainingConfigCollapsed ? '-rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                   </svg>
                 </button>
+
+                {/* Expanded body */}
                 {!trainingConfigCollapsed && (
-                  <div className="px-5 pb-5">
-                    <TrainingConfigPanel
-                      params={trainerParams}
-                      loading={trainerParamsLoading}
-                      error={trainerParamsError}
-                      onStart={startTraining}
-                      isPreparingTraining={isPreparingTraining}
-                      isTraining={isTraining}
-                    />
-                    <div className="mt-4 flex items-center gap-3">
-                      {isTraining && (
-                        <button onClick={stopTraining} disabled={isStoppingTraining} className="flex items-center gap-2 px-5 py-2.5 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                          {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping...</> : <><FaStop size={12} /> Stop Training</>}
-                        </button>
-                      )}
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={resetTrainingState}
-                          disabled={isTraining || !(trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0))}
-                          title="Clear the training history stored in the orchestrator so you can start a fresh training run"
-                          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border rounded-xl transition-all ${resetStateSuccess ? 'text-emerald-700 border-emerald-300 bg-emerald-50' : 'text-gray-600 border-gray-200 hover:bg-gray-50'} disabled:opacity-40 disabled:cursor-not-allowed`}
-                        >
-                          {resetStateSuccess ? <><FaCheckCircle size={12} /> History Cleared</> : <><FaTrash size={12} /> Clear Training History</>}
-                        </button>
-                      </div>
+                  <div className="px-5 pb-5 border-t border-gray-100">
+                    <div className="pt-4">
+                      <TrainingConfigPanel
+                        params={trainerParams}
+                        loading={trainerParamsLoading}
+                        error={trainerParamsError}
+                        onStart={startTraining}
+                        isPreparingTraining={isPreparingTraining}
+                        isTraining={isTraining}
+                        onConfigChange={(numRounds, perRoundTimeoutMinutes) => setTrainingConfigSummary({ numRounds, perRoundTimeoutMinutes })}
+                      />
                     </div>
                   </div>
                 )}
-                {trainingConfigCollapsed && (
-                  <div className="px-5 pb-4 flex items-center gap-3 border-t border-gray-50">
-                    {isTraining && (
-                      <button onClick={stopTraining} disabled={isStoppingTraining} className="flex items-center gap-2 px-5 py-2 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all mt-3">
-                        {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping...</> : <><FaStop size={12} /> Stop Training</>}
-                      </button>
+
+                {/* Always-visible action strip */}
+                <div className={`px-5 py-3 flex items-center gap-3 ${trainingConfigCollapsed ? '' : 'border-t border-gray-100'}`}>
+                  {isTraining && (
+                    <button onClick={stopTraining} disabled={isStoppingTraining} className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                      {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping...</> : <><FaStop size={12} /> Stop Training</>}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => showConfirmDialog(
+                      'Clear Training History',
+                      'This will permanently delete all training history (losses, round data) stored in the orchestrator. You will need to start a new training run from scratch.\n\nAre you sure?',
+                      resetTrainingState,
+                      true
                     )}
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={resetTrainingState}
-                        disabled={isTraining || !(trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0))}
-                        title="Clear the training history stored in the orchestrator so you can start a fresh training run"
-                        className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border rounded-xl transition-all mt-3 ${resetStateSuccess ? 'text-emerald-700 border-emerald-300 bg-emerald-50' : 'text-gray-600 border-gray-200 hover:bg-gray-50'} disabled:opacity-40 disabled:cursor-not-allowed`}
-                      >
-                        {resetStateSuccess ? <><FaCheckCircle size={12} /> History Cleared</> : <><FaTrash size={12} /> Clear Training History</>}
-                      </button>
-                    </div>
-                  </div>
-                )}
+                    disabled={isTraining || !(trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0))}
+                    title="Clear the training history stored in the orchestrator so you can start a fresh training run"
+                    className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border rounded-xl transition-all ${resetStateSuccess ? 'text-emerald-700 border-emerald-300 bg-emerald-50' : 'text-gray-600 border-gray-200 hover:bg-gray-50'} disabled:opacity-40 disabled:cursor-not-allowed`}
+                  >
+                    {resetStateSuccess ? <><FaCheckCircle size={12} /> History Cleared</> : <><FaTrash size={12} /> Clear Training History</>}
+                  </button>
+                </div>
               </div>
 
               {/* Training Status */}
