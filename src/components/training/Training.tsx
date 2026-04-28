@@ -190,6 +190,7 @@ const Training: React.FC = () => {
   const [confirmModalMessage, setConfirmModalMessage] = useState<string>('');
   const [confirmModalAction, setConfirmModalAction] = useState<(() => void) | null>(null);
   const [confirmModalDanger, setConfirmModalDanger] = useState(false);
+  const [confirmModalConfirmLabel, setConfirmModalConfirmLabel] = useState<string>('Continue');
 
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [infoModalData, setInfoModalData] = useState<InfoModalData | null>(null);
@@ -610,11 +611,12 @@ const Training: React.FC = () => {
     }
   };
 
-  const showConfirmDialog = (title: string, message: string, action: () => void, danger = false) => {
+  const showConfirmDialog = (title: string, message: string, action: () => void, danger = false, confirmLabel?: string) => {
     setConfirmModalTitle(title);
     setConfirmModalMessage(message);
     setConfirmModalAction(() => action);
     setConfirmModalDanger(danger);
+    setConfirmModalConfirmLabel(confirmLabel ?? (danger ? 'Delete' : 'Continue'));
     setShowConfirmModal(true);
   };
 
@@ -626,10 +628,11 @@ const Training: React.FC = () => {
 
     if (orchestrator.isBusy) {
       showConfirmDialog(
-        'Force Delete Busy Orchestrator',
-        'This orchestrator is currently running a training session.\n\nForce-deleting it will abort the session and may leave trainers in an inconsistent state. Are you sure?',
+        'Delete Busy Orchestrator',
+        'This orchestrator is currently running a training session.\n\nDeleting it will abort the session and may leave trainers in an inconsistent state. Are you sure?',
         async () => { await performRemoveOrchestrator(managerId, true); },
-        true
+        true,
+        'Delete'
       );
       return;
     }
@@ -702,10 +705,11 @@ const Training: React.FC = () => {
     const trainer = trainers.find(t => t.managerId === managerId && t.appId === appId);
     if (trainer?.isBusy) {
       showConfirmDialog(
-        'Force Delete Busy Trainer',
-        'This trainer is currently in an active training session.\n\nForce-deleting it will interrupt the session. Are you sure?',
+        'Delete Busy Trainer',
+        'This trainer is currently in an active training session.\n\nDeleting it will interrupt the session. Are you sure?',
         async () => { await performRemoveTrainer(managerId, appId, true); },
-        true
+        true,
+        'Delete'
       );
       return;
     }
@@ -1852,8 +1856,8 @@ const Training: React.FC = () => {
               </div>
             </div>
             <div className="flex gap-3">
-              <button onClick={() => { setShowConfirmModal(false); setConfirmModalAction(null); setConfirmModalDanger(false); }} className="flex-1 py-2.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors">Cancel</button>
-              <button onClick={() => { confirmModalAction && confirmModalAction(); setShowConfirmModal(false); setConfirmModalAction(null); setConfirmModalDanger(false); }} className={`flex-1 py-2.5 text-white text-sm font-medium rounded-xl transition-colors ${confirmModalDanger ? 'bg-red-600 hover:bg-red-700' : 'bg-amber-600 hover:bg-amber-700'}`}>{confirmModalDanger ? 'Force Delete' : 'Continue'}</button>
+              <button onClick={() => { setShowConfirmModal(false); setConfirmModalAction(null); setConfirmModalDanger(false); setConfirmModalConfirmLabel('Continue'); }} className="flex-1 py-2.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors">Cancel</button>
+              <button onClick={() => { const action = confirmModalAction; setShowConfirmModal(false); setConfirmModalAction(null); setConfirmModalDanger(false); setConfirmModalConfirmLabel('Continue'); action?.(); }} className={`flex-1 py-2.5 text-white text-sm font-medium rounded-xl transition-colors ${confirmModalDanger ? 'bg-red-600 hover:bg-red-700' : 'bg-amber-600 hover:bg-amber-700'}`}>{confirmModalConfirmLabel}</button>
             </div>
           </div>
         </div>
