@@ -1146,17 +1146,6 @@ const Training: React.FC = () => {
     return false;
   };
 
-  if (!isLoggedIn) {
-    return (
-      <div className="flex items-center justify-center min-h-[60vh]">
-        <div className="text-center max-w-md">
-          <h2 className="text-2xl font-bold text-gray-900 mb-2">Federated Training</h2>
-          <p className="text-gray-500">Please log in to access federated training across BioEngine workers.</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="max-w-screen-xl mx-auto px-4 py-6">
       {/* Header */}
@@ -1390,6 +1379,20 @@ const Training: React.FC = () => {
                   </div>
                 )}
               </div>
+
+              {!server && (
+                <div className="flex justify-center items-center h-40">
+                  <div className="text-center">
+                    <div className="w-16 h-16 bg-gradient-to-r from-blue-100 to-purple-100 rounded-xl flex items-center justify-center mx-auto mb-4">
+                      <svg className="w-8 h-8 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                      </svg>
+                    </div>
+                    <p className="text-gray-600 font-medium mb-1">Not connected</p>
+                    <p className="text-gray-500 text-sm">Please log in to view BioEngine instances</p>
+                  </div>
+                </div>
+              )}
 
               {managers.length > 0 && (
                 <div className="flex justify-end">

@@ -104,8 +104,8 @@ function makeIcon(L: any, color: string, role: MapWorkerRole, active: boolean) {
     return L.divIcon({ html, className: '', iconSize: [32, 47], iconAnchor: [16, 47], popupAnchor: [0, -50] });
   }
 
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="38" viewBox="0 0 26 38">
-    <path d="M13 0C5.82 0 0 5.82 0 13c0 8.9 11.65 22.9 12.16 23.49a1.03 1.03 0 001.68 0C14.35 35.9 26 21.9 26 13 26 5.82 20.18 0 13 0z" fill="${color}" stroke="white" stroke-width="1.5"/>
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="38" viewBox="0 0 30 44">
+    <path d="M15 0C6.72 0 0 6.72 0 15c0 10.3 13.5 26.5 14.07 27.18a1.2 1.2 0 001.86 0C16.5 41.5 30 25.3 30 15 30 6.72 23.28 0 15 0z" fill="${color}" stroke="white" stroke-width="1.5"/>
     ${inner}
   </svg>`;
   return L.divIcon({ html: svg, className: '', iconSize: [26, 38], iconAnchor: [13, 38], popupAnchor: [0, -40] });
