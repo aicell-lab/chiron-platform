@@ -1259,7 +1259,19 @@ const Training: React.FC = () => {
                   )}
                 </div>
 
-                {allDiscoveredWorkers.length === 0 && !Object.values(wsDiscoveryStatus).some(s => s === 'loading') ? (
+                {!server ? (
+                  <div className="flex justify-center items-center h-40">
+                    <div className="text-center">
+                      <div className="w-16 h-16 bg-gradient-to-r from-blue-100 to-purple-100 rounded-xl flex items-center justify-center mx-auto mb-4">
+                        <svg className="w-8 h-8 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                        </svg>
+                      </div>
+                      <p className="text-gray-600 font-medium mb-1">Not connected</p>
+                      <p className="text-gray-500 text-sm">Please log in to view BioEngine instances</p>
+                    </div>
+                  </div>
+                ) : allDiscoveredWorkers.length === 0 && !Object.values(wsDiscoveryStatus).some(s => s === 'loading') ? (
                   <div className="text-center py-12 text-gray-400">
                     <svg className="w-10 h-10 mx-auto mb-3 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
                     <p className="text-sm">No workers with Chiron Manager found</p>
@@ -1379,20 +1391,6 @@ const Training: React.FC = () => {
                   </div>
                 )}
               </div>
-
-              {!server && (
-                <div className="flex justify-center items-center h-40">
-                  <div className="text-center">
-                    <div className="w-16 h-16 bg-gradient-to-r from-blue-100 to-purple-100 rounded-xl flex items-center justify-center mx-auto mb-4">
-                      <svg className="w-8 h-8 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                      </svg>
-                    </div>
-                    <p className="text-gray-600 font-medium mb-1">Not connected</p>
-                    <p className="text-gray-500 text-sm">Please log in to view BioEngine instances</p>
-                  </div>
-                </div>
-              )}
 
               {managers.length > 0 && (
                 <div className="flex justify-end">
