@@ -3,7 +3,7 @@ import { useHyphaStore } from '../../store/hyphaStore';
 import { FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
-import FederatedWorldMap, { MapWorker, MapLegend, MapLegendMode } from './FederatedWorldMap';
+import FederatedWorldMap, { MapWorker, MapConnection, MapLegend, MapLegendMode } from './FederatedWorldMap';
 
 const CountryFlag: React.FC<{ countryName?: string; countryCode?: string; className?: string }> = ({ countryName, countryCode, className }) => {
   const flagUrl = countryCode
@@ -98,13 +98,22 @@ interface TrainerApp {
   isBusy?: boolean;
 }
 
+type TrainingStage = 'fit' | 'evaluate' | 'aggregation' | 'distribution' | null;
+
 interface TrainingStatus {
   is_running: boolean;
   current_training_round: number;
   target_round: number;
-  stage: string | null;
+  stage: TrainingStage;
   trainers_progress: Record<string, { current_batch: number; total_batches: number; progress: number; error?: string; }>;
 }
+
+const STAGE_LABELS: Record<NonNullable<TrainingStage>, string> = {
+  fit:          'Fit',
+  evaluate:     'Evaluate',
+  aggregation:  'Aggregation',
+  distribution: 'Distribution',
+};
 
 interface TrainingHistory {
   training_losses: [number, number][];
@@ -1088,6 +1097,41 @@ const Training: React.FC = () => {
     return result;
   }, [currentStep, managers, orchestrators, trainers, registeredTrainers, selectedOrchestrator, discoveredWorkers, observedWorkspaces]);
 
+  // Annotate mapWorkers with active flag (depends on trainingStatus, kept separate)
+  const mapWorkersWithActive = useMemo<MapWorker[]>(() => {
+    if (!isTraining || !trainingStatus?.stage) return mapWorkers;
+    const orchObj = selectedOrchestrator
+      ? orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator)
+      : null;
+    const orchManagerId = orchObj?.managerId;
+    const stage = trainingStatus.stage;
+    const activeIds = new Set<string>();
+    if (stage === 'aggregation' || stage === 'distribution') {
+      if (orchManagerId) activeIds.add(orchManagerId);
+    } else {
+      if (orchManagerId) activeIds.add(orchManagerId);
+      trainers
+        .filter(t => { const s = t.serviceIds?.[0]?.websocket_service_id; return s && registeredTrainers.includes(s); })
+        .forEach(t => activeIds.add(t.managerId));
+    }
+    return mapWorkers.map(w => activeIds.has(w.id) ? { ...w, active: true } : w);
+  }, [mapWorkers, isTraining, trainingStatus, selectedOrchestrator, orchestrators, trainers, registeredTrainers]);
+
+  // Connection lines: orchestrator ↔ each registered trainer (step 3 only)
+  const mapConnections = useMemo<MapConnection[]>(() => {
+    if (currentStep !== 3 || !selectedOrchestrator) return [];
+    const orchObj = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    if (!orchObj) return [];
+    const orchManagerId = orchObj.managerId;
+    return trainers
+      .filter(t => {
+        const svcId = t.serviceIds?.[0]?.websocket_service_id;
+        return svcId && registeredTrainers.includes(svcId);
+      })
+      .filter(t => t.managerId !== orchManagerId) // skip same-worker deployments
+      .map(t => ({ from: orchManagerId, to: t.managerId }));
+  }, [currentStep, selectedOrchestrator, orchestrators, trainers, registeredTrainers]);
+
   // All discovered workers (flat list with workspace context)
   const allDiscoveredWorkers = useMemo(() => {
     return observedWorkspaces
@@ -1167,7 +1211,7 @@ const Training: React.FC = () => {
               <span className="text-sm font-semibold text-gray-700">Federation Map</span>
               <span className="ml-auto text-xs text-gray-400">{mapWorkers.length} worker{mapWorkers.length !== 1 ? 's' : ''}</span>
             </div>
-            <FederatedWorldMap workers={mapWorkers} style={{ height: 260, width: '100%' }} />
+            <FederatedWorldMap workers={mapWorkersWithActive} connections={mapConnections} style={{ height: 260, width: '100%' }} />
             <div className="px-4 py-3 border-t border-gray-50">
               <MapLegend mode={currentStep >= 2 ? 'select' : 'setup'} />
             </div>
@@ -1566,7 +1610,7 @@ const Training: React.FC = () => {
                       <h3 className="font-semibold text-gray-900 text-sm">Training in Progress</h3>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{trainingStatus.stage || 'Idle'}</span>
+                      <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{trainingStatus.stage ? STAGE_LABELS[trainingStatus.stage] : 'Idle'}</span>
                       {(() => {
                         const r = trainingStatus.current_training_round;
                         const total = trainingStatus.target_round;
@@ -1605,7 +1649,7 @@ const Training: React.FC = () => {
                             <span className="text-gray-400">{progress.current_batch}/{progress.total_batches} batches</span>
                           </div>
                           <div className="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
-                            <div className={`h-1.5 rounded-full transition-all duration-300 ${hasError ? 'bg-red-500' : trainingStatus.stage === 'fit' ? 'bg-blue-500' : 'bg-emerald-500'}`} style={{ width: `${progress.progress * 100}%` }} />
+                            <div className={`h-1.5 rounded-full transition-all duration-300 ${hasError ? 'bg-red-500' : trainingStatus.stage === 'fit' ? 'bg-blue-500' : trainingStatus.stage === 'aggregation' || trainingStatus.stage === 'distribution' ? 'bg-violet-400' : 'bg-emerald-500'}`} style={{ width: `${progress.progress * 100}%` }} />
                           </div>
                         </div>
                       );
