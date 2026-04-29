@@ -27,6 +27,7 @@ const BioEngineGuide: React.FC = () => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showTroubleshooting, setShowTroubleshooting] = useState(false);
+  const [showDataExample, setShowDataExample] = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
   const [timezone, setTimezone] = useState('');
 
@@ -375,11 +376,44 @@ ${getRunCommand()}
               <svg className="w-4 h-4 text-blue-500 mr-2 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              <div className="text-sm text-blue-800">
+              <div className="text-sm text-blue-800 flex-1">
                 <span className="font-medium">Data Import Directory</span>
                 <span className="text-blue-700 text-xs block mt-1">
-                  A <strong>Tabula Trainer</strong> requires a local directory of single-cell datasets (<code className="bg-blue-100 px-1 rounded">.h5ad</code> or <code className="bg-blue-100 px-1 rounded">.zarr</code>). An <strong>Orchestrator</strong> coordinates training across sites without local data — leave the field empty. Each dataset folder must contain a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>; if only <code className="bg-blue-100 px-1 rounded">.h5ad</code> files are present, a Zarr conversion is generated automatically on first start. See the <a href="https://github.com/aicell-lab/bioengine-worker/blob/main/bioengine/datasets/README.md" target="_blank" rel="noopener noreferrer" className="underline hover:text-blue-900">Datasets Documentation</a> for manifest options.
+                  A <strong>Tabula Trainer</strong> requires a local directory of single-cell datasets (<code className="bg-blue-100 px-1 rounded">.h5ad</code> or <code className="bg-blue-100 px-1 rounded">.zarr</code>). An <strong>Orchestrator</strong> coordinates training across sites without local data — leave the field empty. Each dataset folder must contain a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>; if only <code className="bg-blue-100 px-1 rounded">.h5ad</code> files are present, a Zarr conversion is generated automatically on first start.
                 </span>
+                <button
+                  onClick={() => setShowDataExample(!showDataExample)}
+                  className="flex items-center text-xs text-blue-600 hover:text-blue-900 transition-colors mt-2"
+                >
+                  <svg className={`w-3 h-3 mr-1 transition-transform ${showDataExample ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                  {showDataExample ? 'Hide' : 'Show'} example data structure
+                </button>
+                {showDataExample && (
+                  <div className="mt-3 space-y-3">
+                    <div className="bg-gray-900 rounded-lg p-3">
+                      <pre className="text-green-400 text-xs font-mono overflow-x-auto whitespace-pre">{`/path/to/data/
+├── dataset1/
+│   ├── anndata1.h5ad
+│   ├── anndata2.h5ad
+│   └── manifest.yaml         # Required: dataset metadata
+└── dataset2/
+    ├── data1.zarr/
+    ├── data2.zarr/
+    └── manifest.yaml         # Required: dataset metadata`}</pre>
+                    </div>
+                    <div className="bg-white rounded-lg p-3 border border-blue-100">
+                      <p className="text-xs font-semibold text-gray-800 mb-2">Minimal manifest.yaml</p>
+                      <pre className="text-gray-700 text-xs font-mono overflow-x-auto whitespace-pre bg-gray-50 p-2 rounded">{`id: my-dataset
+name: My Dataset
+description: Brief description of the dataset.
+authorized_users:
+  - user@example.com
+  - "*"  # Use "*" for public access`}</pre>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>
