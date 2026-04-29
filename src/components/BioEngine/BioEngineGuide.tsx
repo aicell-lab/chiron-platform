@@ -379,7 +379,7 @@ ${getRunCommand()}
               <div className="text-sm text-blue-800 flex-1">
                 <span className="font-medium">Data Import Directory</span>
                 <span className="text-blue-700 text-xs block mt-1">
-                  A <strong>Tabula Trainer</strong> requires a local directory of single-cell datasets (<code className="bg-blue-100 px-1 rounded">.h5ad</code> or <code className="bg-blue-100 px-1 rounded">.zarr</code>). An <strong>Orchestrator</strong> coordinates training across sites without local data — leave the field empty. Each dataset folder must contain a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>; if only <code className="bg-blue-100 px-1 rounded">.h5ad</code> files are present, a Zarr conversion is generated automatically on first start.
+                  A <strong>Tabula Trainer</strong> requires a local directory of single-cell datasets (<code className="bg-blue-100 px-1 rounded">.h5ad</code> or <code className="bg-blue-100 px-1 rounded">.zarr</code>). An <strong>Orchestrator</strong> coordinates training across sites without local data, so the field can be left empty. Each dataset folder must contain a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>. If only <code className="bg-blue-100 px-1 rounded">.h5ad</code> files are present, a Zarr conversion is generated automatically on first start.
                 </span>
                 <button
                   onClick={() => setShowDataExample(!showDataExample)}
@@ -542,7 +542,7 @@ authorized_users:
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    Path to your local single-cell datasets for model training. Required for a <strong>Tabula Trainer</strong>; leave empty if hosting an <strong>Orchestrator</strong> only.
+                    Path to your local single-cell datasets for model training. Required for a <strong>Tabula Trainer</strong>. Leave empty if hosting an <strong>Orchestrator</strong> only.
                   </p>
                 </div>
 
@@ -616,13 +616,13 @@ authorized_users:
                       type="password"
                       value={token}
                       onChange={(e) => { setToken(e.target.value); setTokenIsManual(true); }}
-                      placeholder={isLoggedIn ? (isGeneratingToken ? 'Generating…' : 'Auto-generated — paste to override') : 'Paste your Hypha token'}
+                      placeholder={isLoggedIn ? (isGeneratingToken ? 'Generating…' : 'Auto-generated. Paste to override.') : 'Paste your Hypha token'}
                       autoComplete="new-password"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                     {tokenError && <p className="text-xs text-red-600 mt-1">{tokenError}</p>}
                     {isLoggedIn && !tokenIsManual && token && (
-                      <p className="text-xs text-green-600 mt-1">Auto-generated 30-day admin token — regenerate when it expires using the button above.</p>
+                      <p className="text-xs text-green-600 mt-1">Auto-generated 30-day admin token. Regenerate when it expires using the button above.</p>
                     )}
                     <p className="text-xs text-gray-500 mt-1">Required. Manually provided tokens must have <strong>Permission Level: Admin</strong>.</p>
                   </div>
