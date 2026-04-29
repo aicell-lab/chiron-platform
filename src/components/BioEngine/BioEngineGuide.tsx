@@ -394,14 +394,18 @@ ${getRunCommand()}
                   <div className="mt-3 space-y-3">
                     <div className="bg-gray-900 rounded-lg p-3">
                       <pre className="text-green-400 text-xs font-mono overflow-x-auto whitespace-pre">{`/path/to/data/
-├── dataset1/
-│   ├── anndata1.h5ad
-│   ├── anndata2.h5ad
-│   └── manifest.yaml         # Required: dataset metadata
-└── dataset2/
-    ├── data1.zarr/
-    ├── data2.zarr/
-    └── manifest.yaml         # Required: dataset metadata`}</pre>
+├── liver/
+│   ├── liver_healthy.h5ad
+│   ├── liver_disease.h5ad
+│   └── manifest.yaml
+├── blood/
+│   ├── pbmc_10k.zarr/
+│   └── manifest.yaml
+└── thymus/
+    ├── thymus_adult.h5ad
+    ├── thymus_fetal.zarr/
+    ├── thymus_child.zarr/
+    └── manifest.yaml`}</pre>
                     </div>
                     <div className="bg-white rounded-lg p-3 border border-blue-100">
                       <p className="text-xs font-semibold text-gray-800 mb-2">Minimal manifest.yaml</p>
