@@ -170,7 +170,7 @@ const BioEngineGuide: React.FC = () => {
 
     // Data import
     const dataImportVolume = dataDir ? `\n      - ${dataDir}:/data` : '';
-    const dataImportCommand = dataDir ? '\n      --data-import-dir /data' : '';
+    const dataImportCommand = dataDir ? '\n      --data-dir /data' : '';
 
     // Worker command arguments
     const workerArgs = [
@@ -201,11 +201,10 @@ services:
       - TZ=${timezone || 'UTC'}
     command: >
       python -m tabula.datasets${dataImportCommand}
-      --workspace-dir /home/.bioengine
-      --server-port 9527
+      --log-file off
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9527/health/liveness"]
+      test: ["CMD", "curl", "-f", "http://localhost:39527/health/liveness"]
       start_period: 60s
       start_interval: 5s
       interval: 30s
