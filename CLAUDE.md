@@ -131,7 +131,7 @@ pip install "git+https://github.com/aicell-lab/bioengine-worker.git@8ad5177#egg=
 pip install -r tabula/requirements.txt && pip install -e tabula/
 
 # Start dataset server
-python -m tabula.datasets --data-dir /path/to/data --log-file off
+python -m tabula.datasets --data-dir /path/to/data
 
 # Start BioEngine Worker (loads chiron-manager on startup)
 python -m bioengine.worker \

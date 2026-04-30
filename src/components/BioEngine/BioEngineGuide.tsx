@@ -201,7 +201,6 @@ services:
       - TZ=${timezone || 'UTC'}
     command: >
       python -m tabula.datasets${dataImportCommand}
-      --log-file off
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:39527/health/liveness"]
