@@ -226,6 +226,7 @@ const Training: React.FC = () => {
 
   // Step navigation
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
+  useEffect(() => { window.scrollTo({ top: 0, behavior: 'smooth' }); }, [currentStep]);
 
   // Launch app dialog
   const [showLaunchDialog, setShowLaunchDialog] = useState(false);
