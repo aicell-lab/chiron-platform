@@ -74,6 +74,7 @@ interface ManagerConnection {
   service: any;
   isConnected: boolean;
   workerInfo?: WorkerInfo;
+  datasetsInfo?: Record<string, any>;
 }
 
 interface OrchestratorApp {
@@ -177,6 +178,7 @@ const Training: React.FC = () => {
   const [newTrainerArtifactId, setNewTrainerArtifactId] = useState('chiron-platform/tabula-trainer');
 
   const [workerTimers, setWorkerTimers] = useState<Record<string, NodeJS.Timeout>>({});
+  const [datasetTimers, setDatasetTimers] = useState<Record<string, NodeJS.Timeout>>({});
 
   const [isTraining, setIsTraining] = useState(false);
   const [trainingOrchestratorId, setTrainingOrchestratorId] = useState<string | null>(null);
@@ -459,6 +461,8 @@ const Training: React.FC = () => {
           }
         }
         scheduleWorkerRefresh(serviceId);
+        refreshDatasetInfo(serviceId).catch(() => {});
+        scheduleDatasetRefresh(serviceId);
       }
       setManagers(prev => [...prev, ...newManagers]);
       setOrchestrators(prev => [...prev, ...newOrchestrators]);
@@ -519,6 +523,11 @@ const Training: React.FC = () => {
     }
     setManagers(prev => prev.filter(m => m.serviceId !== serviceId));
     setWorkerTimers(prev => {
+      const timer = prev[managerId];
+      if (timer) { clearTimeout(timer); const n = { ...prev }; delete n[managerId]; return n; }
+      return prev;
+    });
+    setDatasetTimers(prev => {
       const timer = prev[managerId];
       if (timer) { clearTimeout(timer); const n = { ...prev }; delete n[managerId]; return n; }
       return prev;
@@ -587,10 +596,34 @@ const Training: React.FC = () => {
     });
   }, [refreshWorkerInfo]);
 
+  const refreshDatasetInfo = useCallback(async (serviceId: string) => {
+    const manager = managers.find(m => m.serviceId === serviceId);
+    if (!manager || !manager.isConnected) return;
+    try {
+      const datasetsInfo = await manager.service.get_datasets_info();
+      setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, datasetsInfo } : m));
+    } catch { /* get_datasets_info may not be available on older managers */ }
+  }, [managers]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const scheduleDatasetRefresh = useCallback((serviceId: string) => {
+    const timer = setTimeout(async () => {
+      try { await refreshDatasetInfo(serviceId); } finally { scheduleDatasetRefresh(serviceId); }
+    }, 60000);
+    setDatasetTimers(prev => {
+      if (prev[serviceId]) clearTimeout(prev[serviceId]);
+      return { ...prev, [serviceId]: timer };
+    });
+  }, [refreshDatasetInfo]);
+
   const workerTimersRef = React.useRef(workerTimers);
   workerTimersRef.current = workerTimers;
+  const datasetTimersRef = React.useRef(datasetTimers);
+  datasetTimersRef.current = datasetTimers;
   useEffect(() => {
-    return () => { Object.values(workerTimersRef.current).forEach(timer => clearTimeout(timer)); };
+    return () => {
+      Object.values(workerTimersRef.current).forEach(timer => clearTimeout(timer));
+      Object.values(datasetTimersRef.current).forEach(timer => clearTimeout(timer));
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const createOrchestrator = async (managerId: string) => {
@@ -758,7 +791,8 @@ const Training: React.FC = () => {
       }
       if (!workerInfo) throw new Error('Could not retrieve worker information');
       if (type === 'manager') {
-        setInfoModalData({ workspace: manager.workspace, clusterStatus: workerInfo.cluster_status || null, datasets: workerInfo.datasets || {}, location: workerInfo.worker_info?.geo_location ? { region: workerInfo.worker_info.geo_location.region, country_name: workerInfo.worker_info.geo_location.country_name, country_code: workerInfo.worker_info.geo_location.country_code, latitude: workerInfo.worker_info.geo_location.latitude, longitude: workerInfo.worker_info.geo_location.longitude } : undefined });
+        const datasetsToShow = manager.datasetsInfo || workerInfo.datasets || {};
+        setInfoModalData({ workspace: manager.workspace, clusterStatus: workerInfo.cluster_status || null, datasets: datasetsToShow, location: workerInfo.worker_info?.geo_location ? { region: workerInfo.worker_info.geo_location.region, country_name: workerInfo.worker_info.geo_location.country_name, country_code: workerInfo.worker_info.geo_location.country_code, latitude: workerInfo.worker_info.geo_location.latitude, longitude: workerInfo.worker_info.geo_location.longitude } : undefined });
       } else if (type === 'orchestrator') {
         const orchAppId = id.split('::')[1];
         const orchStatus = workerInfo.orchestrators_status?.[orchAppId];
@@ -1292,7 +1326,7 @@ const Training: React.FC = () => {
                         <tr className="bg-gray-50/70 text-xs font-semibold text-gray-500 uppercase tracking-wide">
                           <th className="text-left px-6 py-3">Worker</th>
                           <th className="text-left px-4 py-3">Location</th>
-                          <th className="text-center px-4 py-3">Datasets</th>
+                          <th className="text-left px-4 py-3">Datasets</th>
                           <th className="text-center px-4 py-3">Orchestrator</th>
                           <th className="text-center px-4 py-3">Trainers</th>
                           <th className="text-right px-6 py-3">Actions</th>
@@ -1307,6 +1341,7 @@ const Training: React.FC = () => {
                           const trainerCount = trainers.filter(t => t.managerId === worker.serviceId).length;
                           const geo = isConnected ? manager?.workerInfo?.worker_info?.geo_location : worker.geo_location;
                           const datasetCount = isConnected ? (manager?.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0) : worker.datasetCount;
+                          const datasetEntries = isConnected && manager?.workerInfo?.datasets ? Object.entries(manager.workerInfo.datasets) : [];
 
                           return (
                             <tr key={worker.serviceId} className={`hover:bg-gray-50/50 transition-colors ${isConnected ? '' : 'opacity-80'}`}>
@@ -1327,12 +1362,17 @@ const Training: React.FC = () => {
                                   </div>
                                 ) : <span className="text-gray-300 text-xs">—</span>}
                               </td>
-                              <td className="px-4 py-3.5 text-center">
-                                {isConnected && datasetCount !== undefined ? (
-                                  <span className="inline-flex items-center gap-1 text-xs font-medium text-gray-700">
-                                    <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" /></svg>
-                                    {datasetCount}
-                                  </span>
+                              <td className="px-4 py-3.5">
+                                {isConnected ? (
+                                  datasetEntries.length > 0 ? (
+                                    <div className="flex flex-col gap-0.5">
+                                      {datasetEntries.map(([dsId, ds]: [string, any]) => (
+                                        <span key={dsId} className="text-xs text-gray-600 leading-tight">{ds.name || dsId}</span>
+                                      ))}
+                                    </div>
+                                  ) : <span className="text-gray-300 text-xs">None</span>
+                                ) : datasetCount !== undefined ? (
+                                  <span className="text-xs text-gray-400">{datasetCount} dataset{datasetCount !== 1 ? 's' : ''}</span>
                                 ) : <span className="text-gray-300 text-xs">—</span>}
                               </td>
                               <td className="px-4 py-3.5 text-center">
@@ -1912,13 +1952,26 @@ const Training: React.FC = () => {
                                   <p className="font-medium text-sm text-gray-900">{manifest.name || datasetId}</p>
                                   {!hasAccess && <span className="text-xs text-red-600 font-medium">No Access</span>}
                                 </div>
-                                {manifest.description && <p className="text-xs text-gray-500">{manifest.description}</p>}
-                                {manifest.files && (
-                                  <div className="mt-2 flex flex-wrap gap-1.5">
-                                    {Object.entries(manifest.files).map(([fn, fi]: [string, any]) => (
-                                      <span key={fn} className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">{fn} ({fi.n_samples} samples)</span>
-                                    ))}
-                                  </div>
+                                {manifest.description && <p className="text-xs text-gray-500 mb-1.5">{manifest.description}</p>}
+                                {manifest.zarr_files && manifest.zarr_files.length > 0 && (
+                                  <table className="w-full text-xs mt-1.5">
+                                    <thead>
+                                      <tr className="text-gray-400">
+                                        <th className="text-left font-medium pb-0.5">File</th>
+                                        <th className="text-right font-medium pb-0.5">Cells</th>
+                                        <th className="text-right font-medium pb-0.5">Genes</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {manifest.zarr_files.map((f: any) => (
+                                        <tr key={f.name} className="border-t border-gray-200">
+                                          <td className="py-0.5 font-mono text-gray-600 text-xs">{f.name}</td>
+                                          <td className="py-0.5 text-right text-gray-600">{f.n_samples?.toLocaleString() ?? '—'}</td>
+                                          <td className="py-0.5 text-right text-gray-600">{f.n_vars?.toLocaleString() ?? '—'}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
                                 )}
                               </div>
                             );
