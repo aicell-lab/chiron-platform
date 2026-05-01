@@ -1090,25 +1090,33 @@ const Training: React.FC = () => {
     };
 
     if (currentStep === 3) {
-      // Train stage: only workers involved in the selected session
+      // Train stage: only workers with selected orchestrator or registered trainers,
+      // and their role reflects only the selected/registered apps (not all apps on the worker).
       const selectedOrchObj = selectedOrchestrator
         ? orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator)
         : null;
+      const registeredTrainerManagerIds = new Set(
+        trainers
+          .filter(t => { const svcId = t.serviceIds?.[0]?.websocket_service_id; return svcId && registeredTrainers.includes(svcId); })
+          .map(t => t.managerId)
+      );
       const selectedManagerIds = new Set<string>();
       if (selectedOrchObj) selectedManagerIds.add(selectedOrchObj.managerId);
-      trainers.forEach(t => {
-        const svcId = t.serviceIds?.[0]?.websocket_service_id;
-        if (svcId && registeredTrainers.includes(svcId)) selectedManagerIds.add(t.managerId);
-      });
+      registeredTrainerManagerIds.forEach(id => selectedManagerIds.add(id));
+
+      const sessionRole = (managerId: string): MapWorker['role'] => {
+        const isOrch = selectedOrchObj?.managerId === managerId;
+        const isTrainer = registeredTrainerManagerIds.has(managerId);
+        return isOrch && isTrainer ? 'both' : isOrch ? 'orchestrator' : isTrainer ? 'trainer' : 'connected';
+      };
+
       return managers
         .filter(m => selectedManagerIds.has(m.serviceId))
         .flatMap(manager => {
           const geo = manager.workerInfo?.worker_info?.geo_location;
           if (!geo?.latitude || !geo?.longitude) return [];
-          const orchCount = orchestrators.filter(o => o.managerId === manager.serviceId).length;
-          const trainerCount = trainers.filter(t => t.managerId === manager.serviceId).length;
           const datasetCount = manager.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0;
-          return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: appRole(manager.serviceId), label: `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}, ${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` }];
+          return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: sessionRole(manager.serviceId), label: `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}` }];
         });
     }
 
