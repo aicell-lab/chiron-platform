@@ -179,6 +179,7 @@ const Training: React.FC = () => {
   const [workerTimers, setWorkerTimers] = useState<Record<string, NodeJS.Timeout>>({});
 
   const [isTraining, setIsTraining] = useState(false);
+  const [trainingOrchestratorId, setTrainingOrchestratorId] = useState<string | null>(null);
   const [trainingConfigCollapsed, setTrainingConfigCollapsed] = useState(false);
   const [trainingConfigSummary, setTrainingConfigSummary] = useState({ numRounds: 5, perRoundTimeoutMinutes: 20 });
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
@@ -859,9 +860,10 @@ const Training: React.FC = () => {
   }, [selectedOrchestrator, server]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!selectedOrchestrator || !isTraining) return;
+    // Poll the orchestrator that is actively training (not the currently viewed one)
+    if (!trainingOrchestratorId || !isTraining) return;
     const fetchHistoryPeriodically = async () => {
-      const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+      const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === trainingOrchestratorId);
       if (!orchestrator || orchestrator.status !== 'RUNNING') return;
       try {
         const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
@@ -873,7 +875,7 @@ const Training: React.FC = () => {
     };
     const historyInterval = setInterval(fetchHistoryPeriodically, 2000);
     return () => clearInterval(historyInterval);
-  }, [isTraining, selectedOrchestrator]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isTraining, trainingOrchestratorId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startTraining = async (config: { num_rounds: number; fit_config: Record<string, any>; eval_config: Record<string, any>; per_round_timeout: number; initial_weights: { artifact_id: string; file_path: string } | null; }) => {
     if (!selectedOrchestrator) return;
@@ -884,21 +886,23 @@ const Training: React.FC = () => {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       const currentTrainers = await orchestratorService.list_trainers();
       if (currentTrainers.length === 0) throw new Error('No trainers available. Please select at least one trainer.');
-      setIsPreparingTraining(false); setIsTraining(true); setTrainingConfigCollapsed(true);
+      const launchedFrom = selectedOrchestrator!;
+      setIsPreparingTraining(false); setIsTraining(true); setTrainingOrchestratorId(launchedFrom); setTrainingConfigCollapsed(true);
       window.scrollTo({ top: 0, behavior: 'smooth' });
       setSavedModelArtifactIds(null);
       setSavedGlobalArtifactId(null);
       const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, _rkwargs: true };
       if (config.initial_weights) trainingParams.initial_weights = config.initial_weights;
       orchestratorService.start_training(trainingParams).catch((error: Error) => {
-        setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true); setIsTraining(false);
+        setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true);
+        setIsTraining(false); setTrainingOrchestratorId(null);
       });
       const statusInterval = setInterval(async () => {
         try {
           const status = await orchestratorService.get_training_status();
           setTrainingStatus(status);
           if (!status.is_running) {
-            setIsTraining(false); clearInterval(statusInterval);
+            setIsTraining(false); setTrainingOrchestratorId(null); clearInterval(statusInterval);
             const history = await orchestratorService.get_training_history();
             setTrainingHistory(history);
           }
@@ -907,7 +911,7 @@ const Training: React.FC = () => {
     } catch (error) {
       setErrorPopupMessage('Failed to Start Training');
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
-      setShowErrorPopup(true); setIsPreparingTraining(false); setIsTraining(false);
+      setShowErrorPopup(true); setIsPreparingTraining(false); setIsTraining(false); setTrainingOrchestratorId(null);
     }
   };
 
@@ -919,7 +923,7 @@ const Training: React.FC = () => {
     try {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       await orchestratorService.stop_training();
-      setIsTraining(false); setTrainingStatus(null);
+      setIsTraining(false); setTrainingOrchestratorId(null); setTrainingStatus(null);
     } catch (error) {
       setErrorPopupMessage('Failed to Stop Training');
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
@@ -988,14 +992,12 @@ const Training: React.FC = () => {
   };
 
   const handleOrchestratorSelectionChange = (newOrchestratorId: string) => {
-    if (isTraining) { setErrorPopupMessage('Cannot Change Orchestrator'); setErrorPopupDetails('Stop training first.'); setShowErrorPopup(true); return; }
-    if (selectedOrchestrator && selectedOrchestrator !== newOrchestratorId && trainingHistory && ((trainingHistory.training_losses?.length > 0) || (trainingHistory.validation_losses?.length > 0))) {
-      setConfirmModalTitle('Switch Orchestrator');
-      setConfirmModalMessage('The current orchestrator has training history. Switching will clear the displayed history. Continue?');
-      setConfirmModalAction(() => () => { setSelectedOrchestrator(newOrchestratorId); });
-      setShowConfirmModal(true); return;
-    }
     setSelectedOrchestrator(newOrchestratorId);
+  };
+
+  const handleOrchestratorDeselect = () => {
+    // Purely local UI change — does not unregister trainers or stop any running training
+    setSelectedOrchestrator(null);
   };
 
   const hasDatasetAccess = (dataset: any) => {
@@ -1148,6 +1150,9 @@ const Training: React.FC = () => {
     if (step === 3) return !!selectedOrchestrator;
     return false;
   };
+
+  // True only when training is running for the currently viewed orchestrator
+  const isActivelyTraining = isTraining && selectedOrchestrator === trainingOrchestratorId;
 
   return (
     <div className="max-w-screen-xl mx-auto px-4 py-6">
@@ -1415,7 +1420,6 @@ const Training: React.FC = () => {
                   <div className="px-5 py-4 border-b border-gray-50">
                     <h2 className="text-base font-semibold text-gray-900">Orchestrator</h2>
                     <p className="text-xs text-gray-500 mt-0.5">Select one orchestrator to coordinate training</p>
-                    {isTraining && <span className="text-xs text-amber-600 mt-1 block">Cannot change during training</span>}
                   </div>
                   <div className="p-4 space-y-2">
                     {orchestrators.filter(o => o.status === 'RUNNING').length === 0 ? (
@@ -1429,12 +1433,19 @@ const Training: React.FC = () => {
                         const orchestratorId = `${orch.managerId}::${orch.appId}`;
                         const isSelected = selectedOrchestrator === orchestratorId;
                         const isBusyElsewhere = orch.isBusy && !isSelected;
-                        const isDisabled = isTraining || isBusyElsewhere;
+                        // Only block selection while async prepare is in flight; never block on isTraining
+                        const isDisabled = isPreparingTraining || isBusyElsewhere;
                         const manager = managers.find(m => m.serviceId === orch.managerId);
                         const geo = manager?.workerInfo?.worker_info?.geo_location;
+                        const isRunningHere = isTraining && trainingOrchestratorId === orchestratorId;
                         return (
                           <label key={orchestratorId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${isSelected ? 'border-blue-500 bg-blue-50/60' : isBusyElsewhere ? 'border-amber-200 bg-amber-50/40' : 'border-transparent bg-gray-50 hover:border-gray-200'}`}>
-                            <input type="radio" name="orchestrator" checked={isSelected} onChange={() => handleOrchestratorSelectionChange(orchestratorId)} disabled={isDisabled} className="mt-0.5 accent-blue-600" />
+                            <input
+                              type="radio" name="orchestrator" checked={isSelected}
+                              onChange={() => handleOrchestratorSelectionChange(orchestratorId)}
+                              onClick={() => { if (isSelected && !isDisabled) handleOrchestratorDeselect(); }}
+                              disabled={isDisabled} className="mt-0.5 accent-blue-600"
+                            />
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <p className="font-medium text-gray-900 text-sm leading-tight">{orch.displayName || 'Chiron Orchestrator'}</p>
@@ -1443,8 +1454,18 @@ const Training: React.FC = () => {
                               {geo && <p className="text-xs text-gray-500 mt-0.5">{geo.region}, {geo.country_name}</p>}
                               <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{orch.managerId.split('/')[1]?.split(':')[0] || orch.managerId}</p>
                               {isBusyElsewhere && <p className="text-xs text-amber-600 mt-0.5">Currently running a training session</p>}
+                              {isRunningHere && <p className="text-xs text-blue-600 mt-0.5">Training in progress</p>}
                             </div>
-                            {isSelected && <FaCheckCircle className="text-blue-500 flex-shrink-0 mt-0.5" size={14} />}
+                            {isSelected ? (
+                              <button
+                                type="button"
+                                onClick={e => { e.preventDefault(); if (!isDisabled) handleOrchestratorDeselect(); }}
+                                className="text-blue-400 hover:text-blue-600 flex-shrink-0 mt-0.5 p-0.5"
+                                title="Deselect orchestrator"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                              </button>
+                            ) : null}
                           </label>
                         );
                       })
@@ -1534,14 +1555,14 @@ const Training: React.FC = () => {
           {currentStep === 3 && (
             <div className="space-y-4">
               {/* Config + Controls */}
-              <div className={`rounded-2xl border shadow-sm transition-colors ${isTraining ? 'bg-blue-50 border-blue-200' : 'bg-white border-emerald-200'}`}>
+              <div className={`rounded-2xl border shadow-sm transition-colors ${isActivelyTraining ? 'bg-blue-50 border-blue-200' : 'bg-white border-emerald-200'}`}>
                 {/* Header — always visible, acts as the primary CTA */}
                 <button
                   onClick={() => setTrainingConfigCollapsed(c => !c)}
                   className="w-full flex items-center justify-between px-5 py-4 text-left group"
                 >
                   <div className="flex items-center gap-3">
-                    {isTraining ? (
+                    {isActivelyTraining ? (
                       <div className="w-7 h-7 bg-blue-500 rounded-lg flex items-center justify-center flex-shrink-0">
                         <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
                       </div>
@@ -1551,8 +1572,8 @@ const Training: React.FC = () => {
                       </div>
                     )}
                     <div>
-                      <p className={`font-semibold text-sm leading-tight ${isTraining ? 'text-blue-900' : 'text-gray-900'}`}>
-                        {isTraining ? 'Training Running' : 'Start Training'}
+                      <p className={`font-semibold text-sm leading-tight ${isActivelyTraining ? 'text-blue-900' : 'text-gray-900'}`}>
+                        {isActivelyTraining ? 'Training Running' : 'Start Training'}
                       </p>
                       <p className="text-xs text-gray-400 leading-tight mt-0.5">
                         {trainingConfigSummary.numRounds} round{trainingConfigSummary.numRounds !== 1 ? 's' : ''} · {trainingConfigSummary.perRoundTimeoutMinutes} min timeout
@@ -1575,7 +1596,7 @@ const Training: React.FC = () => {
                         artifactManager={artifactManager}
                         onStart={startTraining}
                         isPreparingTraining={isPreparingTraining}
-                        isTraining={isTraining}
+                        isTraining={isActivelyTraining}
                         onConfigChange={(numRounds, perRoundTimeoutMinutes) => setTrainingConfigSummary({ numRounds, perRoundTimeoutMinutes })}
                       />
                     </div>
@@ -1584,7 +1605,7 @@ const Training: React.FC = () => {
 
                 {/* Always-visible action strip */}
                 <div className={`px-5 py-3 flex items-center gap-3 ${trainingConfigCollapsed ? '' : 'border-t border-gray-100'}`}>
-                  {isTraining && (
+                  {isActivelyTraining && (
                     <button onClick={stopTraining} disabled={isStoppingTraining} className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                       {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping...</> : <><FaStop size={12} /> Stop Training</>}
                     </button>
@@ -1596,7 +1617,7 @@ const Training: React.FC = () => {
                       resetTrainingState,
                       true
                     )}
-                    disabled={isTraining || !(trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0))}
+                    disabled={isActivelyTraining || !(trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0))}
                     title="Clear the training history stored in the orchestrator so you can start a fresh training run"
                     className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border rounded-xl transition-all ${resetStateSuccess ? 'text-emerald-700 border-emerald-300 bg-emerald-50' : 'text-gray-600 border-gray-200 hover:bg-gray-50'} disabled:opacity-40 disabled:cursor-not-allowed`}
                   >
@@ -1606,7 +1627,7 @@ const Training: React.FC = () => {
               </div>
 
               {/* Training Status */}
-              {isTraining && trainingStatus && (
+              {isActivelyTraining && trainingStatus && (
                 <div className="bg-white rounded-2xl border border-blue-100 shadow-sm p-5">
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
@@ -1689,8 +1710,8 @@ const Training: React.FC = () => {
                 </div>
               )}
 
-              {/* Save Model Weights — shown when there is training history and not currently training */}
-              {!isTraining && trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0) && (
+              {/* Save Model Weights — shown when there is training history and not actively training on this orchestrator */}
+              {!isActivelyTraining && trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0) && (
                 <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
                   <div className="flex items-center gap-2 mb-4">
                     <div className="w-7 h-7 bg-violet-500 rounded-lg flex items-center justify-center flex-shrink-0">
@@ -1757,7 +1778,7 @@ const Training: React.FC = () => {
               )}
 
               <div className="flex justify-start">
-                <button onClick={() => setCurrentStep(2)} disabled={isTraining} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                <button onClick={() => setCurrentStep(2)} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
                   Back to Selection
                 </button>
