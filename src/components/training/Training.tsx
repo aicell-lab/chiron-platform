@@ -231,7 +231,8 @@ const Training: React.FC = () => {
   const [highlightedWorkerIds, setHighlightedWorkerIds] = useState<string[]>([]);
   useEffect(() => {
     if (highlightedWorkerIds.length === 0) return;
-    const el = document.querySelector(`[data-workerid="${highlightedWorkerIds[0]}"]`);
+    const id = highlightedWorkerIds[0];
+    const el = document.querySelector(`[data-workerid="${id}"]`) ?? document.querySelector(`[data-managerid="${id}"]`);
     el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [highlightedWorkerIds]);
 
@@ -1495,8 +1496,9 @@ const Training: React.FC = () => {
                         const manager = managers.find(m => m.serviceId === orch.managerId);
                         const geo = manager?.workerInfo?.worker_info?.geo_location;
                         const isRunningHere = isTraining && trainingOrchestratorId === orchestratorId;
+                        const isHighlighted = highlightedWorkerIds.includes(orch.managerId);
                         return (
-                          <label key={orchestratorId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${isSelected ? 'border-blue-500 bg-blue-50/60' : isBusyElsewhere ? 'border-amber-200 bg-amber-50/40' : 'border-transparent bg-gray-50 hover:border-gray-200'}`}>
+                          <label key={orchestratorId} data-managerid={orch.managerId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${isSelected ? 'border-blue-500 bg-blue-50/60' : isBusyElsewhere ? 'border-amber-200 bg-amber-50/40' : 'border-transparent bg-gray-50 hover:border-gray-200'} ${isHighlighted ? 'ring-2 ring-blue-400 ring-offset-1' : ''}`}>
                             <input
                               type="radio" name="orchestrator" checked={isSelected}
                               onChange={() => handleOrchestratorSelectionChange(orchestratorId)}
@@ -1563,8 +1565,9 @@ const Training: React.FC = () => {
                       const manager = managers.find(m => m.serviceId === trainer.managerId);
                       const geo = manager?.workerInfo?.worker_info?.geo_location;
                       const datasetNames = Object.values(trainer.datasets).map((d: any) => d.name || Object.keys(trainer.datasets).find(k => trainer.datasets[k] === d)).filter(Boolean);
+                      const isTrainerHighlighted = highlightedWorkerIds.includes(trainer.managerId);
                       return (
-                        <label key={trainerId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${isRegistered ? 'border-emerald-400 bg-emerald-50/60' : isBusyElsewhere ? 'border-amber-200 bg-amber-50/40' : 'border-transparent bg-gray-50 hover:border-gray-200'}`}>
+                        <label key={trainerId} data-managerid={trainer.managerId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${isRegistered ? 'border-emerald-400 bg-emerald-50/60' : isBusyElsewhere ? 'border-amber-200 bg-amber-50/40' : 'border-transparent bg-gray-50 hover:border-gray-200'} ${isTrainerHighlighted ? 'ring-2 ring-blue-400 ring-offset-1' : ''}`}>
                           <input type="checkbox" checked={isRegistered} disabled={isDisabled} onChange={async e => { e.target.checked ? await registerTrainer(trainerId) : await unregisterTrainer(trainerId); }} className="mt-0.5 accent-emerald-600" />
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-1.5 flex-wrap">
