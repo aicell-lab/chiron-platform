@@ -1362,7 +1362,7 @@ const Training: React.FC = () => {
 
                           const isHighlighted = highlightedWorkerIds.includes(worker.serviceId);
                           return (
-                            <tr key={worker.serviceId} data-workerid={worker.serviceId} className={`hover:bg-gray-50/50 transition-colors ${isConnected ? '' : 'opacity-80'} ${isHighlighted ? 'ring-2 ring-inset ring-blue-400 bg-blue-50/60' : ''}`}>
+                            <tr key={worker.serviceId} data-workerid={worker.serviceId} className={`hover:bg-gray-50/50 transition-colors ${isConnected ? '' : 'opacity-80'} ${isHighlighted ? 'ring-2 ring-inset ring-violet-400 bg-violet-50/60' : ''}`}>
                               <td className="px-6 py-3.5">
                                 <div className="flex items-center gap-2.5">
                                   <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? (manager?.isConnected ? 'bg-emerald-500' : 'bg-red-400') : 'bg-gray-300'}`} />
@@ -1497,8 +1497,8 @@ const Training: React.FC = () => {
                         const geo = manager?.workerInfo?.worker_info?.geo_location;
                         const isRunningHere = isTraining && trainingOrchestratorId === orchestratorId;
                         const isHighlighted = highlightedWorkerIds.includes(orch.managerId);
-                        const orchBorder = isSelected ? 'border-blue-500' : isBusyElsewhere ? 'border-amber-200' : isHighlighted ? 'border-blue-400' : 'border-transparent hover:border-gray-200';
-                        const orchBg = isSelected ? (isHighlighted ? 'bg-blue-100' : 'bg-blue-50/60') : isBusyElsewhere ? 'bg-amber-50/40' : isHighlighted ? 'bg-blue-50' : 'bg-gray-50';
+                        const orchBorder = isSelected ? 'border-blue-500' : isBusyElsewhere ? 'border-amber-200' : isHighlighted ? 'border-violet-400' : 'border-transparent hover:border-gray-200';
+                        const orchBg = isSelected ? (isHighlighted ? 'bg-violet-50' : 'bg-blue-50/60') : isBusyElsewhere ? 'bg-amber-50/40' : isHighlighted ? 'bg-violet-50' : 'bg-gray-50';
                         return (
                           <label key={orchestratorId} data-managerid={orch.managerId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${orchBorder} ${orchBg}`}>
                             <input
@@ -1568,8 +1568,8 @@ const Training: React.FC = () => {
                       const geo = manager?.workerInfo?.worker_info?.geo_location;
                       const datasetNames = Object.values(trainer.datasets).map((d: any) => d.name || Object.keys(trainer.datasets).find(k => trainer.datasets[k] === d)).filter(Boolean);
                       const isTrainerHighlighted = highlightedWorkerIds.includes(trainer.managerId);
-                      const trainerBorder = isRegistered ? 'border-emerald-400' : isBusyElsewhere ? 'border-amber-200' : isTrainerHighlighted ? 'border-blue-400' : 'border-transparent hover:border-gray-200';
-                      const trainerBg = isRegistered ? (isTrainerHighlighted ? 'bg-blue-50' : 'bg-emerald-50/60') : isBusyElsewhere ? 'bg-amber-50/40' : isTrainerHighlighted ? 'bg-blue-50' : 'bg-gray-50';
+                      const trainerBorder = isRegistered ? 'border-emerald-400' : isBusyElsewhere ? 'border-amber-200' : isTrainerHighlighted ? 'border-violet-400' : 'border-transparent hover:border-gray-200';
+                      const trainerBg = isRegistered ? (isTrainerHighlighted ? 'bg-violet-50' : 'bg-emerald-50/60') : isBusyElsewhere ? 'bg-amber-50/40' : isTrainerHighlighted ? 'bg-violet-50' : 'bg-gray-50';
                       return (
                         <label key={trainerId} data-managerid={trainer.managerId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${trainerBorder} ${trainerBg}`}>
                           <input type="checkbox" checked={isRegistered} disabled={isDisabled} onChange={async e => { e.target.checked ? await registerTrainer(trainerId) : await unregisterTrainer(trainerId); }} className="mt-0.5 accent-emerald-600" />
