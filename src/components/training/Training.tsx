@@ -228,6 +228,13 @@ const Training: React.FC = () => {
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
   useEffect(() => { window.scrollTo({ top: 0, behavior: 'smooth' }); }, [currentStep]);
 
+  const [highlightedWorkerIds, setHighlightedWorkerIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (highlightedWorkerIds.length === 0) return;
+    const el = document.querySelector(`[data-workerid="${highlightedWorkerIds[0]}"]`);
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [highlightedWorkerIds]);
+
   // Launch app dialog
   const [showLaunchDialog, setShowLaunchDialog] = useState(false);
   const [launchDialogManagerId, setLaunchDialogManagerId] = useState<string | null>(null);
@@ -1251,7 +1258,7 @@ const Training: React.FC = () => {
               <span className="text-sm font-semibold text-gray-700">Federation Map</span>
               <span className="ml-auto text-xs text-gray-400">{mapWorkers.length} worker{mapWorkers.length !== 1 ? 's' : ''}</span>
             </div>
-            <FederatedWorldMap workers={mapWorkersWithActive} connections={mapConnections} style={{ height: 260, width: '100%' }} />
+            <FederatedWorldMap workers={mapWorkersWithActive} connections={mapConnections} style={{ height: 260, width: '100%' }} onSelect={setHighlightedWorkerIds} />
             <div className="px-4 py-3 border-t border-gray-50">
               <MapLegend mode={currentStep >= 2 ? 'select' : 'setup'} />
             </div>
@@ -1352,8 +1359,9 @@ const Training: React.FC = () => {
                           const datasetCount = isConnected ? (manager?.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0) : worker.datasetCount;
                           const datasetEntries = isConnected && manager?.workerInfo?.datasets ? Object.entries(manager.workerInfo.datasets) : [];
 
+                          const isHighlighted = highlightedWorkerIds.includes(worker.serviceId);
                           return (
-                            <tr key={worker.serviceId} className={`hover:bg-gray-50/50 transition-colors ${isConnected ? '' : 'opacity-80'}`}>
+                            <tr key={worker.serviceId} data-workerid={worker.serviceId} className={`hover:bg-gray-50/50 transition-colors ${isConnected ? '' : 'opacity-80'} ${isHighlighted ? 'ring-2 ring-inset ring-blue-400 bg-blue-50/60' : ''}`}>
                               <td className="px-6 py-3.5">
                                 <div className="flex items-center gap-2.5">
                                   <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? (manager?.isConnected ? 'bg-emerald-500' : 'bg-red-400') : 'bg-gray-300'}`} />

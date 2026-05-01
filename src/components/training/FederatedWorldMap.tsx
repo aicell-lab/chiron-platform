@@ -26,6 +26,7 @@ interface FederatedWorldMapProps {
   connections?: MapConnection[];
   className?: string;
   style?: React.CSSProperties;
+  onSelect?: (workerIds: string[]) => void;
 }
 
 const ROLE_COLORS: Record<MapWorkerRole, string> = {
@@ -188,7 +189,7 @@ function makePopupHtml(group: WorkerGroup): string {
   </div>`;
 }
 
-const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connections = [], className, style }) => {
+const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connections = [], className, style, onSelect }) => {
   const mapRef      = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
   const markersRef  = useRef<Map<string, any>>(new Map());
@@ -242,6 +243,9 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
         m.setZIndexOffset(zIndexOffset);
       } else {
         const m = L.marker([group.lat, group.lng], { icon, zIndexOffset }).addTo(map).bindPopup(popupHtml);
+        if (onSelect) {
+          m.on('click', () => onSelect(group.workers.map((w: MapWorker) => w.id)));
+        }
         markersRef.current.set(group.key, m);
       }
     });
