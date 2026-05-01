@@ -1253,7 +1253,7 @@ const Training: React.FC = () => {
       {/* Main content: map left + step content right */}
       <div className="flex gap-6 items-start">
         {/* Left: World Map */}
-        <div className="w-80 xl:w-[400px] flex-shrink-0 space-y-4 sticky top-6">
+        <div className="w-72 xl:w-[360px] flex-shrink-0 space-y-4 sticky top-6">
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
             <div className="px-4 pt-4 pb-2 flex items-center gap-2">
               <span className="text-sm font-semibold text-gray-700">Federation Map</span>
