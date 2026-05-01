@@ -1757,7 +1757,7 @@ const Training: React.FC = () => {
               )}
 
               <div className="flex justify-start">
-                <button onClick={() => setCurrentStep(2)} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors">
+                <button onClick={() => setCurrentStep(2)} disabled={isTraining} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
                   Back to Selection
                 </button>
@@ -1791,11 +1791,10 @@ const Training: React.FC = () => {
             <div className="p-6">
               {launchDialogTab === 'orchestrator' && (
                 <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Artifact ID</label>
-                    <input type="text" value={newOrchestratorArtifactId} onChange={e => setNewOrchestratorArtifactId(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="chiron-platform/chiron-orchestrator" />
+                  <div className="text-xs text-gray-500 bg-gray-50 rounded-lg p-3">
+                    Deploys a <strong>Chiron Orchestrator</strong> on this worker. The orchestrator coordinates FedAvg aggregation across registered trainers without accessing raw data.
                   </div>
-                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createOrchestrator(launchDialogManagerId); }} disabled={isCreatingOrchestrator || !newOrchestratorArtifactId.trim()} className="w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createOrchestrator(launchDialogManagerId!); }} disabled={isCreatingOrchestrator} className="w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                     {isCreatingOrchestrator ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Orchestrator</>}
                   </button>
                 </div>

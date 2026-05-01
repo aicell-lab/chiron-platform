@@ -195,11 +195,11 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     const inputValue = value === null || value === undefined ? '' : value;
 
     return (
-      <div key={key} className="mb-4">
-        <label className="block text-sm font-medium text-gray-700 mb-1">
+      <div key={key} className="mb-3">
+        <label className="block text-xs font-semibold text-gray-700 mb-0.5">
           {key.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')}
         </label>
-        <p className="text-xs text-gray-500 mb-2">{config.description}</p>
+        <p className="text-xs text-gray-400 mb-1.5">{config.description}</p>
         
         {config.type === 'boolean' ? (
           <input
@@ -215,7 +215,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
             value={inputValue}
             onChange={handleChange}
             placeholder={config.default !== null && config.default !== undefined ? String(config.default) : 'Optional'}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         ) : config.type === 'number' ? (
           <input
@@ -224,7 +224,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
             value={inputValue}
             onChange={handleChange}
             placeholder={config.default !== null && config.default !== undefined ? String(config.default) : 'Optional'}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         ) : (
           <input
@@ -232,7 +232,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
             value={inputValue}
             onChange={handleChange}
             placeholder={config.default !== null && config.default !== undefined ? String(config.default) : 'Optional'}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         )}
       </div>
@@ -250,9 +250,9 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   ) => {
     if (!section) {
       return (
-        <div className="mb-6">
-          <h4 className="text-lg font-semibold mb-3">{title}</h4>
-          <p className="text-sm text-gray-500 italic">No parameters to configure</p>
+        <div className="mb-5">
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">{title}</h4>
+          <p className="text-xs text-gray-400 italic">No parameters to configure</p>
         </div>
       );
     }
@@ -261,37 +261,31 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     const hasAdvanced = section.advanced && Object.keys(section.advanced).length > 0;
 
     return (
-      <div className="mb-6">
-        <h4 className="text-lg font-semibold mb-3">{title}</h4>
-        
-        {/* Standard parameters */}
+      <div className="mb-5">
+        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">{title}</h4>
+
         {hasStandard ? (
-          <div className="mb-4">
+          <div className="mb-3">
             {Object.entries(section.standard).map(([key, config]) =>
               renderInput(key, config, values[key], onChange)
             )}
           </div>
         ) : (
-          <p className="text-sm text-gray-500 italic mb-4">No standard parameters to configure</p>
+          <p className="text-xs text-gray-400 italic mb-3">No standard parameters to configure</p>
         )}
-        
-        {/* Advanced parameters */}
+
         {hasAdvanced && (
-          <div className="border-t border-gray-200 pt-4">
+          <div className="border-t border-gray-100 pt-3">
             <button
               onClick={() => setAdvancedExpanded(!advancedExpanded)}
-              className="flex items-center text-sm font-medium text-gray-700 hover:text-gray-900 mb-3"
+              className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700 mb-3 transition-colors"
             >
-              {advancedExpanded ? (
-                <FaChevronDown className="mr-2" />
-              ) : (
-                <FaChevronRight className="mr-2" />
-              )}
+              {advancedExpanded ? <FaChevronDown size={10} /> : <FaChevronRight size={10} />}
               Advanced Parameters
             </button>
-            
+
             {advancedExpanded && (
-              <div className="ml-4 pl-4 border-l-2 border-gray-200">
+              <div className="ml-3 pl-3 border-l-2 border-gray-100">
                 {Object.entries(section.advanced).map(([key, config]) =>
                   renderInput(key, config, values[key], onChange)
                 )}
@@ -369,46 +363,41 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     <div>
       
       {/* Top-level parameters */}
-      <div className="mb-6 pb-6 border-b border-gray-200">
+      <div className="mb-5 pb-5 border-b border-gray-100">
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Number of Rounds
-            </label>
+            <label className="block text-xs font-semibold text-gray-700 mb-0.5">Number of Rounds</label>
             <input
               type="number"
               min="1"
               step="1"
               value={numRounds}
               onChange={(e) => setNumRounds(parseInt(e.target.value, 10) || 1)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
-            <p className="mt-1 text-xs text-gray-400">One round = all clients train locally, then the server aggregates their weights (FedAvg).</p>
+            <p className="mt-1 text-xs text-gray-400">All clients train locally, then the server aggregates (FedAvg).</p>
           </div>
-
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Per Round Timeout (minutes)
-            </label>
+            <label className="block text-xs font-semibold text-gray-700 mb-0.5">Per Round Timeout (minutes)</label>
             <input
               type="number"
               min="1"
               step="1"
               value={perRoundTimeoutMinutes}
               onChange={(e) => setPerRoundTimeoutMinutes(parseInt(e.target.value, 10) || 20)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
-            <p className="mt-1 text-xs text-gray-400">Maximum time allowed for a single round (fit + evaluate). If exceeded, the round is aborted.</p>
+            <p className="mt-1 text-xs text-gray-400">Maximum time for fit + evaluate per round. Aborts if exceeded.</p>
           </div>
         </div>
       </div>
 
       {/* Pretrained weights */}
-      <div className="mb-6 pb-6 border-b border-gray-200">
+      <div className="mb-5 pb-5 border-b border-gray-100">
         <div className="flex items-center justify-between mb-3">
           <div>
-            <label className="block text-sm font-medium text-gray-700">Start from Pretrained Weights</label>
-            <p className="text-xs text-gray-400 mt-0.5">Load transformer weights from a prior training run or a published checkpoint before round 1.</p>
+            <label className="block text-xs font-semibold text-gray-700">Start from Pretrained Weights</label>
+            <p className="text-xs text-gray-400 mt-0.5">Load transformer weights from a prior run or published checkpoint before round 1.</p>
           </div>
           <button
             type="button"
@@ -435,11 +424,11 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
             ) : (
               <>
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Checkpoint artifact</label>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Checkpoint artifact</label>
                   <select
                     value={selectedArtifactId}
                     onChange={e => setSelectedArtifactId(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                    className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
                   >
                     {artifacts.map(a => (
                       <option key={a.id} value={a.id}>
@@ -449,7 +438,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Weights file</label>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Weights file</label>
                   {filesLoading ? (
                     <div className="flex items-center gap-2 text-xs text-gray-400">
                       <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-400" />
@@ -461,7 +450,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
                     <select
                       value={selectedFilePath}
                       onChange={e => setSelectedFilePath(e.target.value)}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
                     >
                       {weightFiles.map(f => (
                         <option key={f} value={f}>{f}</option>
