@@ -83,13 +83,17 @@ function ensurePulseStyle() {
   document.head.appendChild(style);
 }
 
-// Role precedence for multi-worker groups (most specific wins)
-const ROLE_PRECEDENCE: MapWorkerRole[] = ['both', 'orchestrator', 'trainer', 'connected', 'available'];
-
+// Compute the combined role for a group of co-located workers.
+// A worker with role 'both', 'orchestrator', or 'trainer' contributes its
+// capability to the group; if the group has both orchestrator-side and
+// trainer-side capability (from any combination of workers) it becomes 'both'.
 function dominantRole(roles: MapWorkerRole[]): MapWorkerRole {
-  for (const r of ROLE_PRECEDENCE) {
-    if (roles.includes(r)) return r;
-  }
+  const hasOrch    = roles.some(r => r === 'orchestrator' || r === 'both');
+  const hasTrainer = roles.some(r => r === 'trainer'      || r === 'both');
+  if (hasOrch && hasTrainer) return 'both';
+  if (hasOrch)               return 'orchestrator';
+  if (hasTrainer)            return 'trainer';
+  if (roles.some(r => r === 'connected')) return 'connected';
   return 'available';
 }
 
