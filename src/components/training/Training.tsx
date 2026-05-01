@@ -448,7 +448,9 @@ const Training: React.FC = () => {
             } else { throw new Error(`Failed to retrieve worker information: ${errorMessage}`); }
           }
         }
-        newManagers.push({ workspace, serviceId, service: managerService, isConnected: true, workerInfo });
+        let datasetsInfo: Record<string, any> | undefined;
+        try { datasetsInfo = await managerService.get_datasets_info(); } catch { /* not critical */ }
+        newManagers.push({ workspace, serviceId, service: managerService, isConnected: true, workerInfo, datasetsInfo });
         const managerId = serviceId;
         if (workerInfo!.orchestrators_status) {
           for (const [appId, orchStatus] of Object.entries(workerInfo!.orchestrators_status)) {
@@ -461,7 +463,6 @@ const Training: React.FC = () => {
           }
         }
         scheduleWorkerRefresh(serviceId);
-        refreshDatasetInfo(serviceId).catch(() => {});
         scheduleDatasetRefresh(serviceId);
       }
       setManagers(prev => [...prev, ...newManagers]);
