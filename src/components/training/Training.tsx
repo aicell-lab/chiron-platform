@@ -1205,7 +1205,7 @@ const Training: React.FC = () => {
   const isActivelyTraining = isTraining && selectedOrchestrator === trainingOrchestratorId;
 
   return (
-    <div className="max-w-screen-xl mx-auto px-4 py-6">
+    <div className="max-w-screen-2xl mx-auto px-4 py-6">
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-gray-900 mb-1">Federated Training</h1>
@@ -1252,7 +1252,7 @@ const Training: React.FC = () => {
       {/* Main content: map left + step content right */}
       <div className="flex gap-6 items-start">
         {/* Left: World Map */}
-        <div className="w-72 xl:w-[346px] flex-shrink-0 space-y-4 sticky top-6">
+        <div className="w-80 xl:w-[400px] flex-shrink-0 space-y-4 sticky top-6">
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
             <div className="px-4 pt-4 pb-2 flex items-center gap-2">
               <span className="text-sm font-semibold text-gray-700">Federation Map</span>
@@ -1343,8 +1343,8 @@ const Training: React.FC = () => {
                           <th className="text-left px-6 py-3">Worker</th>
                           <th className="text-left px-4 py-3">Location</th>
                           <th className="text-left px-4 py-3">Datasets</th>
-                          <th className="text-center px-4 py-3">Orchestrator</th>
-                          <th className="text-center px-4 py-3">Trainers</th>
+                          <th className="text-center px-4 py-3 w-36">Orchestrators</th>
+                          <th className="text-center px-4 py-3 w-36">Trainers</th>
                           <th className="text-right px-6 py-3">Actions</th>
                         </tr>
                       </thead>
@@ -1392,7 +1392,7 @@ const Training: React.FC = () => {
                                   <span className="text-xs text-gray-400">{datasetCount} dataset{datasetCount !== 1 ? 's' : ''}</span>
                                 ) : <span className="text-gray-300 text-xs">—</span>}
                               </td>
-                              <td className="px-4 py-3.5 text-center">
+                              <td className="px-4 py-3.5 text-center w-36">
                                 {isConnected ? (
                                   orchCount > 0 ? (
                                     <div className="flex flex-col gap-1 items-center">
@@ -1407,7 +1407,7 @@ const Training: React.FC = () => {
                                   ) : <span className="text-gray-300 text-xs">None</span>
                                 ) : <span className="text-gray-300 text-xs">—</span>}
                               </td>
-                              <td className="px-4 py-3.5 text-center">
+                              <td className="px-4 py-3.5 text-center w-36">
                                 {isConnected ? (
                                   trainerCount > 0 ? (
                                     <div className="flex flex-col gap-1 items-center">
