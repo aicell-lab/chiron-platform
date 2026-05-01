@@ -1156,21 +1156,17 @@ const Training: React.FC = () => {
     return mapWorkers.map(w => activeIds.has(w.id) ? { ...w, active: true } : w);
   }, [mapWorkers, isTraining, trainingStatus, selectedOrchestrator, orchestrators, trainers, registeredTrainers]);
 
-  // Connection lines: orchestrator ↔ trainers
-  // Step 2: all connected trainers when an orchestrator is selected
-  // Step 3: registered trainers only
+  // Connection lines: selected orchestrator ↔ registered trainers (steps 2 and 3)
   const mapConnections = useMemo<MapConnection[]>(() => {
     if (!selectedOrchestrator) return [];
     const orchObj = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchObj) return [];
     const orchManagerId = orchObj.managerId;
-    const eligibleTrainers = currentStep === 3
-      ? trainers.filter(t => { const svcId = t.serviceIds?.[0]?.websocket_service_id; return svcId && registeredTrainers.includes(svcId); })
-      : trainers;
-    return eligibleTrainers
+    return trainers
+      .filter(t => { const svcId = t.serviceIds?.[0]?.websocket_service_id; return svcId && registeredTrainers.includes(svcId); })
       .filter(t => t.managerId !== orchManagerId)
       .map(t => ({ from: orchManagerId, to: t.managerId }));
-  }, [currentStep, selectedOrchestrator, orchestrators, trainers, registeredTrainers]);
+  }, [selectedOrchestrator, orchestrators, trainers, registeredTrainers]);
 
   // All discovered workers (flat list with workspace context)
   const allDiscoveredWorkers = useMemo(() => {
