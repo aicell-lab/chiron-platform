@@ -3,7 +3,7 @@ import { hyphaWebsocketClient } from 'hypha-rpc';
 import { useHyphaStore } from '../../store/hyphaStore';
 
 type OSType = 'linux' | 'macos' | 'windows';
-type ContainerRuntimeType = 'docker' | 'podman';
+type ContainerRuntimeType = 'docker' | 'podman' | 'singularity' | 'apptainer';
 
 const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.3.0';
 
@@ -231,8 +231,23 @@ services:
 `;
   };
 
-  const getRunCommand = () =>
-    containerRuntime === 'docker' ? 'docker compose up' : 'podman-compose up';
+  const isComposeRuntime = () => containerRuntime === 'docker' || containerRuntime === 'podman';
+
+  const getRunCommand = () => {
+    if (containerRuntime === 'docker') return 'docker compose up';
+    if (containerRuntime === 'podman') return 'podman-compose up';
+    const bin = containerRuntime; // singularity or apptainer
+    const image = `docker://${customImage || DEFAULT_IMAGE}`;
+    const gpuFlag = gpus > 0 ? '--nv ' : '';
+    const binds = [
+      `${getWorkspaceDirPath()}:/home/.bioengine`,
+      ...(dataDir ? [`${dataDir}:/data`] : []),
+    ].join(',');
+    const dataCmd = dataDir
+      ? `# Start data server\n${bin} exec ${gpuFlag}--bind ${binds} --env HOME=/home ${image} \\\n  python -m tabula.datasets --data-dir /data &\nsleep 10\n\n`
+      : '';
+    return `${dataCmd}# Start BioEngine worker\n${bin} exec ${gpuFlag}--bind ${getWorkspaceDirPath()}:/home/.bioengine --env HOME=/home --env HYPHA_TOKEN=$HYPHA_TOKEN ${image} \\\n  python -m bioengine.worker --mode single-machine --head-num-cpus ${cpus} --head-num-gpus ${gpus} --head-memory-in-gb ${memory} --startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}' --dashboard-url https://chiron.aicell.io/#/worker --worker-name "${workerName || 'Chiron Platform Worker'}"`;
+  };
 
   const getEnvSetupCommands = () => {
     const dirPath = getWorkspaceDirPath();
@@ -356,7 +371,7 @@ ${getRunCommand()}
           <div className="p-4 bg-orange-50 rounded-xl border border-orange-200">
             <p className="text-sm font-semibold text-orange-800 mb-1">Container runtime required</p>
             <p className="text-sm text-orange-700">
-              The Chiron worker stack runs inside containers managed by Docker Compose. Install <strong>Docker</strong> (most common) or <strong>Podman</strong> (rootless alternative) along with the corresponding Compose plugin. The image is ~1.1 GB and will be pulled automatically on first run.
+              The Chiron worker runs inside containers. Install <strong>Docker</strong> (most common), <strong>Podman</strong> (rootless alternative), <strong>Singularity</strong>, or <strong>Apptainer</strong>. Docker and Podman use Docker Compose. Singularity and Apptainer run two containers separately. The image is ~10 GB and will be pulled automatically on first run.
             </p>
             {gpus > 0 && (
               <p className="text-sm text-orange-700 mt-2">
@@ -430,7 +445,7 @@ authorized_users:
                 <span className="font-medium">BioEngine Workspace Directory: </span>
                 <code className="bg-blue-100 px-1 rounded">{getWorkspaceDirPath()}</code>
                 <span className="text-blue-700 text-xs block mt-1">
-                  This directory is created on the host and mounted into both containers. It stores app data, S3-compatible dataset files, logs, and temporary files. Change it under Advanced Options below.
+                  This directory is created on the host and mounted into both containers. It stores worker app data, Ray state, logs, and temporary files. Change it under Advanced Options below.
                 </span>
               </p>
             </div>
@@ -488,9 +503,14 @@ authorized_users:
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
                     <option value="docker">Docker</option>
                     <option value="podman">Podman</option>
+                    <option value="singularity">Singularity</option>
+                    <option value="apptainer">Apptainer</option>
                   </select>
                   <p className="text-xs text-gray-500 mt-1">
-                    {containerRuntime === 'docker' ? 'Most common runtime' : 'Rootless Docker alternative'}
+                    {containerRuntime === 'docker' ? 'Most common runtime, uses Docker Compose' :
+                     containerRuntime === 'podman' ? 'Rootless Docker alternative, uses Podman Compose' :
+                     containerRuntime === 'singularity' ? 'HPC-compatible, starts containers separately' :
+                     'Singularity successor, starts containers separately'}
                   </p>
                 </div>
 
@@ -700,10 +720,12 @@ authorized_users:
           {/* ── Steps 1–3 ── */}
           <div className="space-y-3">
 
-            {/* Step 1: docker-compose.yaml */}
+            {/* Step 1: docker-compose.yaml or singularity startup script */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <p className="text-sm text-gray-700 font-medium">1. Download docker-compose.yaml</p>
+                <p className="text-sm text-gray-700 font-medium">
+                  {isComposeRuntime() ? '1. Download docker-compose.yaml' : '1. Prepare startup commands'}
+                </p>
                 <div className="flex items-center space-x-2">
                   <button
                     onClick={async () => {
@@ -717,22 +739,27 @@ authorized_users:
                       <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
                     )}
                   </button>
-                  <button
-                    onClick={downloadDockerCompose}
-                    className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
-                  >
-                    <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                    Download
-                  </button>
+                  {isComposeRuntime() && (
+                    <button
+                      onClick={downloadDockerCompose}
+                      className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
+                    >
+                      <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                      Download
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="bg-gray-900 rounded-lg p-3 overflow-x-auto">
                 <pre className="text-green-400 text-xs font-mono whitespace-pre">{getDockerComposeContent()}</pre>
               </div>
               <p className="text-xs text-gray-500 mt-1">
-                Two-service stack: <strong>data-server</strong> (local S3-compatible dataset storage) + <strong>worker</strong> (BioEngine + Ray). The data-server must pass its health check before the worker starts.
+                {isComposeRuntime()
+                  ? <>Two-service stack: <strong>data-server</strong> (serves datasets directly from disk) + <strong>worker</strong> (BioEngine + Ray). The data-server must pass its health check before the worker starts.</>
+                  : <>Run these commands to start the data server and worker as separate {containerRuntime} containers. The data server starts in the background; the worker starts after a short wait.</>
+                }
               </p>
             </div>
 
@@ -761,30 +788,32 @@ authorized_users:
               </p>
             </div>
 
-            {/* Step 3: Start */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <p className="text-sm text-gray-700 font-medium">3. Start BioEngine</p>
-                <button
-                  onClick={async () => {
-                    try { await navigator.clipboard.writeText(getRunCommand()); setCopiedStep3(true); setTimeout(() => setCopiedStep3(false), 2000); } catch (_) {}
-                  }}
-                  className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
-                >
-                  {copiedStep3 ? (
-                    <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
-                  ) : (
-                    <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
-                  )}
-                </button>
+            {/* Step 3: Start (compose runtimes only) */}
+            {isComposeRuntime() && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-sm text-gray-700 font-medium">3. Start BioEngine</p>
+                  <button
+                    onClick={async () => {
+                      try { await navigator.clipboard.writeText(getRunCommand()); setCopiedStep3(true); setTimeout(() => setCopiedStep3(false), 2000); } catch (_) {}
+                    }}
+                    className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
+                  >
+                    {copiedStep3 ? (
+                      <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
+                    ) : (
+                      <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
+                    )}
+                  </button>
+                </div>
+                <div className="bg-gray-900 rounded-lg p-3 overflow-x-auto">
+                  <pre className="text-green-400 text-xs font-mono whitespace-pre">{getRunCommand()}</pre>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  Add <code className="bg-gray-100 px-1 rounded">-d</code> to run in the background. View logs with <code className="bg-gray-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose logs -f' : 'podman-compose logs -f'}</code>. Stop with <code className="bg-gray-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose down' : 'podman-compose down'}</code>.
+                </p>
               </div>
-              <div className="bg-gray-900 rounded-lg p-3 overflow-x-auto">
-                <pre className="text-green-400 text-xs font-mono whitespace-pre">{getRunCommand()}</pre>
-              </div>
-              <p className="text-xs text-gray-500 mt-1">
-                Run in background: <code className="bg-gray-100 px-1 rounded">{getRunCommand()} -d</code>. View logs: <code className="bg-gray-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose logs -f' : 'podman-compose logs -f'}</code>. Stop: <code className="bg-gray-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose down' : 'podman-compose down'}</code>.
-              </p>
-            </div>
+            )}
 
           </div>
 
