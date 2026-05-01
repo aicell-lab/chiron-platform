@@ -310,7 +310,7 @@ until curl -sf http://localhost:39527/health/liveness > /dev/null; do sleep 2; d
 
 ` : '';
 
-    return `${dataServerBlock}# Start BioEngine worker (foreground — Ctrl+C to stop)
+    return `${dataServerBlock}# Start BioEngine worker (foreground, Ctrl+C to stop)
 ${bin} exec ${gpuFlag}\\
   ${bindStr} \\
   --env HOME=/home \\
@@ -355,19 +355,19 @@ ${adminUsers ? `- **Admin Users**: ${adminUsers}` : '- **Admin Users**: Default 
 ${dataDir ? `- **Data Directory**: ${dataDir}` : '- **Data Directory**: Not set (Orchestrator-only)'}
 ${customImage ? `- **Custom Image**: ${customImage}` : ''}
 
-## Step 1 — ${isComposeRuntime() ? 'docker-compose.yaml' : 'Pull command'}
+## Step 1: ${isComposeRuntime() ? 'docker-compose.yaml' : 'Pull command'}
 
 \`\`\`${isComposeRuntime() ? 'yaml' : 'bash'}
 ${step1Content}
 \`\`\`
 
-## Step 2 — Environment variables
+## Step 2: Environment variables
 
 \`\`\`bash
 ${getEnvSetupCommands()}
 \`\`\`
 
-## Step 3 — Run command
+## Step 3: Run command
 
 \`\`\`bash
 ${getRunCommand()}
@@ -389,10 +389,10 @@ ${getRunCommand()}
   };
 
   const runtimeSubtitle = () => {
-    if (containerRuntime === 'docker') return 'Docker Compose — desktop, workstation, or server';
-    if (containerRuntime === 'podman') return 'Podman Compose — rootless alternative to Docker';
-    if (containerRuntime === 'singularity') return 'Singularity — HPC clusters and shared systems';
-    return 'Apptainer — HPC clusters and shared systems';
+    if (containerRuntime === 'docker') return 'Docker Compose: desktop, workstation, or server';
+    if (containerRuntime === 'podman') return 'Podman Compose: rootless alternative to Docker';
+    if (containerRuntime === 'singularity') return 'Singularity: HPC clusters and shared systems';
+    return 'Apptainer: HPC clusters and shared systems';
   };
 
   const CopyButton: React.FC<{ getText: () => string; copied: boolean; onCopied: () => void }> = ({ getText, copied: isCopied, onCopied }) => (
@@ -458,7 +458,7 @@ ${getRunCommand()}
             <p className="text-sm text-orange-700">
               The Chiron worker runs inside a container image (~10 GB, pulled automatically on first use).{' '}
               <strong>Docker</strong> and <strong>Podman</strong> use Docker Compose to manage the two services.{' '}
-              <strong>Singularity</strong> and <strong>Apptainer</strong> run each process directly — recommended for HPC clusters where Docker is unavailable.
+              <strong>Singularity</strong> and <strong>Apptainer</strong> run each process directly, recommended for HPC clusters where Docker is unavailable.
             </p>
             {gpus > 0 && (
               <p className="text-sm text-orange-700 mt-2">
@@ -485,9 +485,9 @@ ${getRunCommand()}
                 <span className="text-blue-700 text-xs block mt-1">
                   A <strong>Tabula Trainer</strong> requires a local directory of single-cell datasets (<code className="bg-blue-100 px-1 rounded">.h5ad</code> or <code className="bg-blue-100 px-1 rounded">.zarr</code>).
                   Set the path below to mount it into the data server. Each dataset subfolder must contain a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>.
-                  If only <code className="bg-blue-100 px-1 rounded">.h5ad</code> files are present, Zarr conversion runs automatically on first start.
+                  If only <code className="bg-blue-100 px-1 rounded">.h5ad</code> files are present, Zarr conversion runs automatically on first start and re-checks every 30 seconds for new files.
                   <br />
-                  An <strong>Orchestrator</strong> coordinates training without local data — leave this field empty to omit the data server entirely.
+                  An <strong>Orchestrator</strong> coordinates training without local data. Leave this field empty to omit the data server entirely.
                 </span>
                 <button
                   onClick={() => setShowDataExample(!showDataExample)}
@@ -660,7 +660,7 @@ authorized_users:
                   />
                   <p className="text-xs text-gray-500 mt-1">
                     Path to your local single-cell datasets for model training. Required for a <strong>Tabula Trainer</strong>.
-                    Leave empty if running an <strong>Orchestrator only</strong> — the data server will be omitted.
+                    Leave empty if running an <strong>Orchestrator only</strong>. The data server will be omitted.
                   </p>
                 </div>
 
@@ -847,7 +847,7 @@ authorized_users:
                 <p className="text-xs text-gray-500 mt-1">
                   {dataDir
                     ? <>Two-service stack: <strong>data-server</strong> (serves datasets from disk, health-checked) + <strong>worker</strong> (BioEngine + Ray). The worker waits for the data server to be healthy before starting.</>
-                    : <>Single-service stack: <strong>worker</strong> only (BioEngine + Ray). No data server is started — suitable for an Orchestrator-only worker.</>
+                    : <>Single-service stack: <strong>worker</strong> only (BioEngine + Ray). No data server is started. Suitable for an Orchestrator-only worker.</>
                   }
                 </p>
               </div>
