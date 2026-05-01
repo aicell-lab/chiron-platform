@@ -1338,15 +1338,15 @@ const Training: React.FC = () => {
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
+                    <table className="w-full text-sm table-fixed">
                       <thead>
                         <tr className="bg-gray-50/70 text-xs font-semibold text-gray-500 uppercase tracking-wide">
                           <th className="text-left px-6 py-3">Worker</th>
-                          <th className="text-left px-4 py-3">Location</th>
+                          <th className="text-left px-4 py-3 w-36">Location</th>
                           <th className="text-left px-4 py-3">Datasets</th>
-                          <th className="text-center px-4 py-3 w-36">Orchestrators</th>
-                          <th className="text-center px-4 py-3 w-36">Trainers</th>
-                          <th className="text-right px-6 py-3">Actions</th>
+                          <th className="text-center px-4 py-3 w-40">Orchestrators</th>
+                          <th className="text-center px-4 py-3 w-40">Trainers</th>
+                          <th className="text-right px-6 py-3 w-28">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-50">
@@ -1393,30 +1393,30 @@ const Training: React.FC = () => {
                                   <span className="text-xs text-gray-400">{datasetCount} dataset{datasetCount !== 1 ? 's' : ''}</span>
                                 ) : <span className="text-gray-300 text-xs">—</span>}
                               </td>
-                              <td className="px-4 py-3.5 text-center w-36">
+                              <td className="px-4 py-3.5 text-center">
                                 {isConnected ? (
                                   orchCount > 0 ? (
                                     <div className="flex flex-col gap-1 items-center">
                                       {orchestrators.filter(o => o.managerId === worker.serviceId).map(o => (
-                                        <div key={o.appId} className="flex items-center gap-1 flex-wrap justify-center">
+                                        <div key={o.appId} className="flex items-center gap-1 justify-center">
                                           {getStatusBadge(o.status)}
                                           {o.isBusy && <BusyBadge />}
-                                          <button onClick={() => removeOrchestrator(worker.serviceId)} className="text-red-400 hover:text-red-600 ml-0.5" title="Remove"><FaTrash size={10} /></button>
+                                          <button onClick={() => removeOrchestrator(worker.serviceId)} className="text-red-400 hover:text-red-600 ml-0.5 flex-shrink-0" title="Remove"><FaTrash size={10} /></button>
                                         </div>
                                       ))}
                                     </div>
                                   ) : <span className="text-gray-300 text-xs">None</span>
                                 ) : <span className="text-gray-300 text-xs">—</span>}
                               </td>
-                              <td className="px-4 py-3.5 text-center w-36">
+                              <td className="px-4 py-3.5 text-center">
                                 {isConnected ? (
                                   trainerCount > 0 ? (
                                     <div className="flex flex-col gap-1 items-center">
                                       {trainers.filter(t => t.managerId === worker.serviceId).map(t => (
-                                        <div key={t.appId} className="flex items-center gap-1 flex-wrap justify-center">
+                                        <div key={t.appId} className="flex items-center gap-1 justify-center">
                                           {getStatusBadge(t.status)}
                                           {t.isBusy && <BusyBadge />}
-                                          <button onClick={() => removeTrainer(worker.serviceId, t.appId)} className="text-red-400 hover:text-red-600 ml-0.5" title="Remove"><FaTrash size={10} /></button>
+                                          <button onClick={() => removeTrainer(worker.serviceId, t.appId)} className="text-red-400 hover:text-red-600 ml-0.5 flex-shrink-0" title="Remove"><FaTrash size={10} /></button>
                                         </div>
                                       ))}
                                     </div>
