@@ -83,20 +83,64 @@ function ensurePulseStyle() {
   document.head.appendChild(style);
 }
 
-function makeIcon(L: any, color: string, role: MapWorkerRole, active: boolean) {
+// Role precedence for multi-worker groups (most specific wins)
+const ROLE_PRECEDENCE: MapWorkerRole[] = ['both', 'orchestrator', 'trainer', 'connected', 'available'];
+
+function dominantRole(roles: MapWorkerRole[]): MapWorkerRole {
+  for (const r of ROLE_PRECEDENCE) {
+    if (roles.includes(r)) return r;
+  }
+  return 'available';
+}
+
+// Round to 2 decimal places (~1.1 km) to group co-located workers
+function locationKey(lat: number, lng: number): string {
+  return `loc::${lat.toFixed(2)}::${lng.toFixed(2)}`;
+}
+
+interface WorkerGroup {
+  key: string;
+  lat: number;
+  lng: number;
+  role: MapWorkerRole;
+  active: boolean;
+  workers: MapWorker[];
+}
+
+function groupByLocation(workers: MapWorker[]): WorkerGroup[] {
+  const map = new Map<string, WorkerGroup>();
+  workers.forEach(w => {
+    const key = locationKey(w.lat, w.lng);
+    if (!map.has(key)) {
+      map.set(key, { key, lat: w.lat, lng: w.lng, role: w.role, active: false, workers: [] });
+    }
+    const g = map.get(key)!;
+    g.workers.push(w);
+    g.role = dominantRole(g.workers.map(x => x.role));
+    if (w.active) g.active = true;
+  });
+  return Array.from(map.values());
+}
+
+function makeIcon(L: any, color: string, role: MapWorkerRole, active: boolean, count: number) {
   const inner =
     role === 'orchestrator' ? ICON_ORCHESTRATOR :
     role === 'trainer'      ? ICON_TRAINER :
     role === 'both'         ? ICON_BOTH :
     `<circle cx="15" cy="15" r="6.5" fill="white" opacity="0.92"/>`;
 
+  // Count badge in top-right corner of pin head (only when >1 worker)
+  const badge = count > 1
+    ? `<circle cx="23" cy="7" r="6" fill="white" stroke="${color}" stroke-width="1.5"/>
+       <text x="23" y="10.5" text-anchor="middle" font-size="7" font-weight="700" fill="${color}" font-family="system-ui,sans-serif">${count > 9 ? '9+' : count}</text>`
+    : '';
+
   if (active) {
-    // Larger pin (32×47) with pulsing ring behind it
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="47" viewBox="0 0 30 44">
       <path d="M15 0C6.72 0 0 6.72 0 15c0 10.3 13.5 26.5 14.07 27.18a1.2 1.2 0 001.86 0C16.5 41.5 30 25.3 30 15 30 6.72 23.28 0 15 0z" fill="${color}" stroke="white" stroke-width="1.5"/>
       ${inner}
+      ${badge}
     </svg>`;
-    // Pulse ring: a coloured circle positioned over the pin bulge
     const html = `<div style="position:relative;width:32px;height:47px">
       <div class="map-pin-pulse" style="position:absolute;top:2px;left:2px;width:28px;height:28px;border-radius:50%;background:${color};opacity:0.55;transform-origin:center;pointer-events:none"></div>
       ${svg}
@@ -107,8 +151,37 @@ function makeIcon(L: any, color: string, role: MapWorkerRole, active: boolean) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="38" viewBox="0 0 30 44">
     <path d="M15 0C6.72 0 0 6.72 0 15c0 10.3 13.5 26.5 14.07 27.18a1.2 1.2 0 001.86 0C16.5 41.5 30 25.3 30 15 30 6.72 23.28 0 15 0z" fill="${color}" stroke="white" stroke-width="1.5"/>
     ${inner}
+    ${badge}
   </svg>`;
   return L.divIcon({ html: svg, className: '', iconSize: [26, 38], iconAnchor: [13, 38], popupAnchor: [0, -40] });
+}
+
+function makePopupHtml(group: WorkerGroup): string {
+  if (group.workers.length === 1) {
+    const w = group.workers[0];
+    const color = ROLE_COLORS[w.role];
+    return `<div style="font-size:12px;line-height:1.6">
+      <b>${w.name}</b><br/>
+      <span style="color:${color};font-weight:600">${ROLE_LABELS[w.role]}</span>
+      ${w.label ? `<br/><span style="color:#6b7280">${w.label}</span>` : ''}
+    </div>`;
+  }
+
+  const items = group.workers.map(w => {
+    const color = ROLE_COLORS[w.role];
+    return `<div style="margin-bottom:5px">
+      <b>${w.name}</b><br/>
+      <span style="color:${color};font-weight:600">${ROLE_LABELS[w.role]}</span>
+      ${w.label ? `<br/><span style="color:#6b7280">${w.label}</span>` : ''}
+    </div>`;
+  }).join('');
+
+  return `<div style="font-size:12px;line-height:1.6;min-width:160px">
+    <b>${group.workers.length} workers</b>
+    <div style="border-top:1px solid #e5e7eb;margin-top:5px;padding-top:5px">
+      ${items}
+    </div>
+  </div>`;
 }
 
 const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connections = [], className, style }) => {
@@ -120,7 +193,7 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
   // Inject pulse CSS once
   useEffect(() => { ensurePulseStyle(); }, []);
 
-  // Render markers
+  // Render markers (one per location group)
   useEffect(() => {
     if (!mapRef.current || !window.L) return;
     const L = window.L;
@@ -141,30 +214,28 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
     const map = mapInstanceRef.current;
     setTimeout(() => map.invalidateSize(), 100);
 
+    const groups = groupByLocation(workers);
+
     // Remove stale markers
-    const currentIds = new Set(workers.map(w => w.id));
-    markersRef.current.forEach((marker, id) => {
-      if (!currentIds.has(id)) { map.removeLayer(marker); markersRef.current.delete(id); }
+    const currentKeys = new Set(groups.map(g => g.key));
+    markersRef.current.forEach((marker, key) => {
+      if (!currentKeys.has(key)) { map.removeLayer(marker); markersRef.current.delete(key); }
     });
 
     // Add / update markers
-    workers.forEach(worker => {
-      const color = ROLE_COLORS[worker.role];
-      const icon = makeIcon(L, color, worker.role, !!worker.active);
-      const popupHtml = `<div style="font-size:12px;line-height:1.6">
-        <b>${worker.name}</b><br/>
-        <span style="color:${color};font-weight:600">${ROLE_LABELS[worker.role]}</span>
-        ${worker.label ? `<br/><span style="color:#6b7280">${worker.label}</span>` : ''}
-      </div>`;
+    groups.forEach(group => {
+      const color = ROLE_COLORS[group.role];
+      const icon = makeIcon(L, color, group.role, group.active, group.workers.length);
+      const popupHtml = makePopupHtml(group);
 
-      if (markersRef.current.has(worker.id)) {
-        const m = markersRef.current.get(worker.id);
-        m.setLatLng([worker.lat, worker.lng]);
+      if (markersRef.current.has(group.key)) {
+        const m = markersRef.current.get(group.key);
+        m.setLatLng([group.lat, group.lng]);
         m.setIcon(icon);
         m.setPopupContent(popupHtml);
       } else {
-        const m = L.marker([worker.lat, worker.lng], { icon }).addTo(map).bindPopup(popupHtml);
-        markersRef.current.set(worker.id, m);
+        const m = L.marker([group.lat, group.lng], { icon }).addTo(map).bindPopup(popupHtml);
+        markersRef.current.set(group.key, m);
       }
     });
 
@@ -181,13 +252,13 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
     }
   }, [workers]);
 
-  // Render connection lines
+  // Render connection lines (uses original workers for position lookup)
   useEffect(() => {
     if (!mapInstanceRef.current || !window.L) return;
     const L = window.L;
     const map = mapInstanceRef.current;
 
-    // Build position lookup
+    // Build position lookup from all individual workers
     const posById: Record<string, [number, number]> = {};
     workers.forEach(w => { posById[w.id] = [w.lat, w.lng]; });
 
