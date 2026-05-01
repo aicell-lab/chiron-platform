@@ -10,7 +10,6 @@ const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.3.0';
 const BioEngineGuide: React.FC = () => {
   const { server, isLoggedIn } = useHyphaStore();
 
-  // Standard settings
   const [os, setOS] = useState<OSType>('linux');
   const [containerRuntime, setContainerRuntime] = useState<ContainerRuntimeType>('docker');
   const [shmSize, setShmSize] = useState('8g');
@@ -19,7 +18,6 @@ const BioEngineGuide: React.FC = () => {
   const [memory, setMemory] = useState(30);
   const [dataDir, setDataDir] = useState('');
 
-  // UI state
   const [copied, setCopied] = useState(false);
   const [copiedStep1, setCopiedStep1] = useState(false);
   const [copiedStep2, setCopiedStep2] = useState(false);
@@ -31,16 +29,13 @@ const BioEngineGuide: React.FC = () => {
   const [promptCopied, setPromptCopied] = useState(false);
   const [timezone, setTimezone] = useState('');
 
-  // Token
   const [token, setToken] = useState('');
   const [tokenIsManual, setTokenIsManual] = useState(false);
   const [isGeneratingToken, setIsGeneratingToken] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
 
-  // Workspace resolution
   const [workspaceResolved, setWorkspaceResolved] = useState(false);
 
-  // Advanced options
   const [adminUsers, setAdminUsers] = useState('');
   const [workerName, setWorkerName] = useState('Chiron Platform Worker');
   const [workspaceDir, setWorkspaceDir] = useState('');
@@ -61,7 +56,6 @@ const BioEngineGuide: React.FC = () => {
     }
   }, [showTroubleshooting]);
 
-  // Detect timezone from browser
   useEffect(() => {
     try {
       setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone);
@@ -70,7 +64,6 @@ const BioEngineGuide: React.FC = () => {
     }
   }, []);
 
-  // Token generation
   const generateToken = useCallback(async () => {
     if (!isLoggedIn || !server) return;
     setIsGeneratingToken(true);
@@ -93,7 +86,6 @@ const BioEngineGuide: React.FC = () => {
     }
   }, [isLoggedIn, tokenIsManual, token, generateToken]);
 
-  // Resolve workspace from token via Hypha
   useEffect(() => {
     if (!token) return;
     let cancelled = false;
@@ -109,16 +101,15 @@ const BioEngineGuide: React.FC = () => {
           }
         }
         try { await tmpServer?.disconnect?.(); } catch (_) { /* ignore */ }
-      } catch (_) {
-        // Silently ignore — token may not be valid yet or network unavailable
-      }
+      } catch (_) { /* silently ignore */ }
     };
     setWorkspaceResolved(false);
     resolveWorkspace();
     return () => { cancelled = true; };
-  // Only re-run when token changes to avoid loops
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
+
+  const isComposeRuntime = () => containerRuntime === 'docker' || containerRuntime === 'podman';
 
   const getWorkspaceDirPath = () => {
     if (workspaceDir) return workspaceDir;
@@ -126,19 +117,40 @@ const BioEngineGuide: React.FC = () => {
     return '$HOME/.bioengine';
   };
 
+  // Derive a clean SIF filename from the image reference
+  const getSifFilename = () => {
+    const img = customImage || DEFAULT_IMAGE;
+    const parts = img.split('/');
+    const nameTag = parts[parts.length - 1]; // e.g. "tabula:0.3.0"
+    return nameTag.replace(':', '_') + '.sif'; // "tabula_0.3.0.sif"
+  };
+
+  // Build the common worker arg list (used by both compose and singularity)
+  const buildWorkerArgs = (indent: string): string => {
+    let adminUsersStr = '';
+    if (adminUsers) {
+      adminUsersStr = adminUsers === '*' ? '"*"'
+        : adminUsers.split(',').map(u => `"${u.trim()}"`).join(' ');
+    }
+    return [
+      '--mode single-machine',
+      `--head-num-cpus ${cpus}`,
+      gpus > 0 ? `--head-num-gpus ${gpus}` : '--head-num-gpus 0',
+      `--head-memory-in-gb ${memory}`,
+      '--startup-applications "{\\"artifact_id\\": \\"chiron-platform/chiron-manager\\", \\"application_id\\": \\"chiron-manager\\"}"',
+      adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
+      workspace ? `--workspace ${workspace}` : '',
+      workerName ? `--worker-name "${workerName}"` : '',
+      clientId ? `--client-id ${clientId}` : '',
+      serverUrl ? `--server-url ${serverUrl}` : '',
+      '--dashboard-url https://chiron.aicell.io/#/worker',
+    ].filter(Boolean).join(`\n${indent}`);
+  };
+
   const getDockerComposeContent = () => {
     const imageToUse = customImage || DEFAULT_IMAGE;
     const workspaceDirPath = getWorkspaceDirPath();
-
-    // Admin users string
-    let adminUsersStr = '';
-    if (adminUsers) {
-      if (adminUsers === '*') {
-        adminUsersStr = '"*"';
-      } else {
-        adminUsersStr = adminUsers.split(',').map(u => `"${u.trim()}"`).join(' ');
-      }
-    }
+    const platformLine = platformOverride ? `\n    platform: ${platformOverride}` : '';
 
     // GPU configuration
     let gpuConfig = '';
@@ -165,42 +177,23 @@ const BioEngineGuide: React.FC = () => {
       }
     }
 
-    // Platform override
-    const platformLine = platformOverride ? `\n    platform: ${platformOverride}` : '';
+    const workerArgs = buildWorkerArgs('      ');
 
-    // Data import
-    const dataImportVolume = dataDir ? `\n      - ${dataDir}:/data` : '';
-    const dataImportCommand = dataDir ? '\n      --data-dir /data' : '';
-
-    // Worker command arguments
-    const workerArgs = [
-      '--mode single-machine',
-      `--head-num-cpus ${cpus}`,
-      gpus > 0 ? `--head-num-gpus ${gpus}` : '',
-      `--head-memory-in-gb ${memory}`,
-      '--startup-applications "{\\"artifact_id\\": \\"chiron-platform/chiron-manager\\", \\"application_id\\": \\"chiron-manager\\"}"',
-      adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
-      workspace ? `--workspace ${workspace}` : '',
-      workerName ? `--worker-name "${workerName}"` : '',
-      clientId ? `--client-id ${clientId}` : '',
-      serverUrl ? `--server-url ${serverUrl}` : '',
-      '--dashboard-url https://chiron.aicell.io/#/worker',
-    ].filter(Boolean).join('\n      ');
-
-    return `version: "3.8"
-
-services:
-  data-server:
+    // Data-server service — only included when a data directory is configured.
+    // The data-server requires --data-dir and will fail without it.
+    const dataServerService = dataDir ? `  data-server:
     image: ${imageToUse}${platformLine}
     container_name: bioengine-data-server
     user: "\${UID}:\${GID}"
     volumes:
-      - ${workspaceDirPath}:/home/.bioengine${dataImportVolume}
+      - ${workspaceDirPath}:/home/.bioengine
+      - ${dataDir}:/data
     environment:
       - HOME=/home
       - TZ=${timezone || 'UTC'}
     command: >
-      python -m tabula.datasets${dataImportCommand}
+      python -m tabula.datasets
+      --data-dir /data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:39527/health/liveness"]
@@ -210,13 +203,24 @@ services:
       timeout: 10s
       retries: 3
 
-  worker:
+` : '';
+
+    // Worker depends on data-server only when the data-server is present
+    const dependsOn = dataDir ? `    depends_on:
+      data-server:
+        condition: service_healthy
+` : '';
+
+    return `version: "3.8"
+
+services:
+${dataServerService}  worker:
     image: ${imageToUse}${platformLine}
     container_name: bioengine-worker
     user: "\${UID}:\${GID}"
     shm_size: ${shmSize}
     volumes:
-      - ${workspaceDirPath}:/home/.bioengine
+      - ${workspaceDirPath}:/home/.bioengine${dataDir ? `\n      - ${dataDir}:/data` : ''}
     environment:
       - HOME=/home
       - HYPHA_TOKEN=\${HYPHA_TOKEN}
@@ -225,42 +229,94 @@ services:
       python -m bioengine.worker
       ${workerArgs}
     restart: unless-stopped${gpuConfig}
-    depends_on:
-      data-server:
-        condition: service_healthy
-`;
-  };
-
-  const isComposeRuntime = () => containerRuntime === 'docker' || containerRuntime === 'podman';
-
-  const getRunCommand = () => {
-    if (containerRuntime === 'docker') return 'docker compose up';
-    if (containerRuntime === 'podman') return 'podman-compose up';
-    const bin = containerRuntime; // singularity or apptainer
-    const image = `docker://${customImage || DEFAULT_IMAGE}`;
-    const gpuFlag = gpus > 0 ? '--nv ' : '';
-    const binds = [
-      `${getWorkspaceDirPath()}:/home/.bioengine`,
-      ...(dataDir ? [`${dataDir}:/data`] : []),
-    ].join(',');
-    const dataCmd = dataDir
-      ? `# Start data server\n${bin} exec ${gpuFlag}--bind ${binds} --env HOME=/home ${image} \\\n  python -m tabula.datasets --data-dir /data &\nsleep 10\n\n`
-      : '';
-    return `${dataCmd}# Start BioEngine worker\n${bin} exec ${gpuFlag}--bind ${getWorkspaceDirPath()}:/home/.bioengine --env HOME=/home --env HYPHA_TOKEN=$HYPHA_TOKEN ${image} \\\n  python -m bioengine.worker --mode single-machine --head-num-cpus ${cpus} --head-num-gpus ${gpus} --head-memory-in-gb ${memory} --startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}' --dashboard-url https://chiron.aicell.io/#/worker --worker-name "${workerName || 'Chiron Platform Worker'}"`;
+${dependsOn}`;
   };
 
   const getEnvSetupCommands = () => {
     const dirPath = getWorkspaceDirPath();
     if (os === 'windows') {
+      // Windows / Docker only
       return `set UID=0
 set GID=0
 set HYPHA_TOKEN=${token || '<set_token_here>'}
 md "${dirPath}" 2>nul`;
     }
-    return `export UID=$(id -u)
+    if (isComposeRuntime()) {
+      return `export UID=$(id -u)
 export GID=$(id -g)
 export HYPHA_TOKEN=${token || '<set_token_here>'}
 mkdir -p ${dirPath}`;
+    }
+    // Singularity / Apptainer — no UID/GID needed (process runs as caller)
+    return `export HYPHA_TOKEN=${token || '<set_token_here>'}
+mkdir -p ${dirPath}`;
+  };
+
+  const getPullCommand = () => {
+    const bin = containerRuntime;
+    const image = `docker://${customImage || DEFAULT_IMAGE}`;
+    const sif = getSifFilename();
+    return `# Pull and convert the Docker image to a local SIF file (~10 GB, one-time)
+${bin} pull ${sif} ${image}`;
+  };
+
+  const getRunCommand = () => {
+    if (containerRuntime === 'docker') return 'docker compose up';
+    if (containerRuntime === 'podman') return 'podman-compose up';
+
+    // Singularity / Apptainer
+    const bin = containerRuntime;
+    const sif = getSifFilename();
+    const gpuFlag = gpus > 0 ? '--nv ' : '';
+    const workspacePath = getWorkspaceDirPath();
+
+    const bindParts = [
+      `${workspacePath}:/home/.bioengine`,
+      ...(dataDir ? [`${dataDir}:/data`] : []),
+    ];
+    const bindStr = `--bind ${bindParts.join(',')}`;
+    const dataDirArg = dataDir ? ' \\\n  --data-dir /data' : '';
+
+    // Singularity worker args (single-quote wrapped for shell safety)
+    let adminUsersStr = '';
+    if (adminUsers) {
+      adminUsersStr = adminUsers === '*' ? '"*"'
+        : adminUsers.split(',').map(u => `"${u.trim()}"`).join(' ');
+    }
+    const workerArgsList = [
+      '--mode single-machine',
+      `--head-num-cpus ${cpus}`,
+      `--head-num-gpus ${gpus}`,
+      `--head-memory-in-gb ${memory}`,
+      `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}'`,
+      adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
+      workspace ? `--workspace ${workspace}` : '',
+      workerName ? `--worker-name "${workerName}"` : '',
+      clientId ? `--client-id ${clientId}` : '',
+      serverUrl ? `--server-url ${serverUrl}` : '',
+      '--dashboard-url https://chiron.aicell.io/#/worker',
+    ].filter(Boolean);
+    const workerArgsStr = workerArgsList.join(' \\\n  ');
+
+    const dataServerBlock = dataDir ? `# Start data server in background
+${bin} exec \\
+  ${bindStr} \\
+  --env HOME=/home \\
+  ${sif} python -m tabula.datasets${dataDirArg} &
+DATA_SERVER_PID=$!
+
+# Wait for data server health check
+until curl -sf http://localhost:39527/health/liveness > /dev/null; do sleep 2; done
+
+` : '';
+
+    return `${dataServerBlock}# Start BioEngine worker (foreground — Ctrl+C to stop)
+${bin} exec ${gpuFlag}\\
+  ${bindStr} \\
+  --env HOME=/home \\
+  --env HYPHA_TOKEN=$HYPHA_TOKEN \\
+  ${sif} python -m bioengine.worker \\
+  ${workerArgsStr}`;
   };
 
   const downloadDockerCompose = () => {
@@ -278,11 +334,13 @@ mkdir -p ${dirPath}`;
 
   const getTroubleshootingPrompt = () => {
     const runtimeName = containerRuntime.charAt(0).toUpperCase() + containerRuntime.slice(1);
-    const composeContent = getDockerComposeContent().replace(token, '<my-token>');
+    const step1Content = isComposeRuntime()
+      ? getDockerComposeContent().replace(token, '<my-token>')
+      : getPullCommand();
 
     return `# BioEngine Worker Troubleshooting (Chiron Platform)
 
-I'm trying to set up a **BioEngine Worker** for the Chiron federated learning platform for single-cell analysis. BioEngine is part of the AI4Life project.
+I'm trying to set up a **BioEngine Worker** for the Chiron federated learning platform for single-cell analysis.
 
 Source code: https://github.com/aicell-lab/bioengine-worker
 
@@ -292,19 +350,24 @@ Source code: https://github.com/aicell-lab/bioengine-worker
 - **Container Runtime**: ${runtimeName}
 - **CPUs**: ${cpus}
 - **GPUs**: ${gpus}${gpus > 0 && gpuIndices ? ` (indices: ${gpuIndices})` : ''}
-- **Memory**: ${memory} GB
-- **Shared Memory**: ${shmSize}
+- **Memory**: ${memory} GB${isComposeRuntime() ? `\n- **Shared Memory**: ${shmSize}` : ''}
 ${adminUsers ? `- **Admin Users**: ${adminUsers}` : '- **Admin Users**: Default (logged-in user)'}
-${dataDir ? `- **Data Directory**: ${dataDir}` : ''}
+${dataDir ? `- **Data Directory**: ${dataDir}` : '- **Data Directory**: Not set (Orchestrator-only)'}
 ${customImage ? `- **Custom Image**: ${customImage}` : ''}
 
-## Generated docker-compose.yaml
+## Step 1 — ${isComposeRuntime() ? 'docker-compose.yaml' : 'Pull command'}
 
-\`\`\`yaml
-${composeContent}
+\`\`\`${isComposeRuntime() ? 'yaml' : 'bash'}
+${step1Content}
 \`\`\`
 
-## Run Command
+## Step 2 — Environment variables
+
+\`\`\`bash
+${getEnvSetupCommands()}
+\`\`\`
+
+## Step 3 — Run command
 
 \`\`\`bash
 ${getRunCommand()}
@@ -324,6 +387,28 @@ ${getRunCommand()}
       console.error('Failed to copy prompt:', err);
     }
   };
+
+  const runtimeSubtitle = () => {
+    if (containerRuntime === 'docker') return 'Docker Compose — desktop, workstation, or server';
+    if (containerRuntime === 'podman') return 'Podman Compose — rootless alternative to Docker';
+    if (containerRuntime === 'singularity') return 'Singularity — HPC clusters and shared systems';
+    return 'Apptainer — HPC clusters and shared systems';
+  };
+
+  const CopyButton: React.FC<{ getText: () => string; copied: boolean; onCopied: () => void }> = ({ getText, copied: isCopied, onCopied }) => (
+    <button
+      onClick={async () => {
+        try { await navigator.clipboard.writeText(getText()); onCopied(); } catch (_) {}
+      }}
+      className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
+    >
+      {isCopied ? (
+        <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
+      ) : (
+        <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
+      )}
+    </button>
+  );
 
   return (
     <div className="pt-4">
@@ -350,7 +435,7 @@ ${getRunCommand()}
               Launch Your Own BioEngine Instance
             </h4>
             <p className={`text-gray-500 transition-all duration-200 ${isExpanded ? 'text-xs' : 'text-sm font-medium'}`}>
-              Deploy on your Desktop/Workstation using Docker Compose
+              {isExpanded ? runtimeSubtitle() : 'Set up a worker on your machine or HPC cluster'}
             </p>
           </div>
         </div>
@@ -367,23 +452,29 @@ ${getRunCommand()}
       {isExpanded && (
         <div className="mt-4 space-y-6">
 
-          {/* ── Container runtime required (orange info box) ── */}
+          {/* Container runtime required */}
           <div className="p-4 bg-orange-50 rounded-xl border border-orange-200">
             <p className="text-sm font-semibold text-orange-800 mb-1">Container runtime required</p>
             <p className="text-sm text-orange-700">
-              The Chiron worker runs inside containers. Install <strong>Docker</strong> (most common), <strong>Podman</strong> (rootless alternative), <strong>Singularity</strong>, or <strong>Apptainer</strong>. Docker and Podman use Docker Compose. Singularity and Apptainer run two containers separately. The image is ~10 GB and will be pulled automatically on first run.
+              The Chiron worker runs inside a container image (~10 GB, pulled automatically on first use).{' '}
+              <strong>Docker</strong> and <strong>Podman</strong> use Docker Compose to manage the two services.{' '}
+              <strong>Singularity</strong> and <strong>Apptainer</strong> run each process directly — recommended for HPC clusters where Docker is unavailable.
             </p>
             {gpus > 0 && (
               <p className="text-sm text-orange-700 mt-2">
-                <strong>GPU support</strong> requires the <strong>NVIDIA Container Toolkit</strong> to be installed on the host. See the{' '}
-                <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html" target="_blank" rel="noopener noreferrer" className="underline hover:text-orange-900">
-                  installation guide
-                </a>.
+                <strong>GPU support: </strong>
+                {isComposeRuntime() ? (
+                  <>Requires the <strong>NVIDIA Container Toolkit</strong> on the host. See the{' '}
+                    <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html" target="_blank" rel="noopener noreferrer" className="underline hover:text-orange-900">installation guide</a>.
+                  </>
+                ) : (
+                  <>Pass <code className="bg-orange-100 px-1 rounded">--nv</code> to expose NVIDIA GPUs to the container. NVIDIA drivers must be installed on the host; no additional toolkit is required on most HPC systems.</>
+                )}
               </p>
             )}
           </div>
 
-          {/* ── Data Import Directory (blue info box) ── */}
+          {/* Data Import Directory */}
           <div className="p-4 bg-blue-50 rounded-xl border border-blue-200">
             <div className="flex items-start">
               <svg className="w-4 h-4 text-blue-500 mr-2 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -392,7 +483,11 @@ ${getRunCommand()}
               <div className="text-sm text-blue-800 flex-1">
                 <span className="font-medium">Data Import Directory</span>
                 <span className="text-blue-700 text-xs block mt-1">
-                  A <strong>Tabula Trainer</strong> requires a local directory of single-cell datasets (<code className="bg-blue-100 px-1 rounded">.h5ad</code> or <code className="bg-blue-100 px-1 rounded">.zarr</code>). An <strong>Orchestrator</strong> coordinates training across sites without local data, so the field can be left empty. Each dataset folder must contain a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>. If only <code className="bg-blue-100 px-1 rounded">.h5ad</code> files are present, a Zarr conversion is generated automatically on first start.
+                  A <strong>Tabula Trainer</strong> requires a local directory of single-cell datasets (<code className="bg-blue-100 px-1 rounded">.h5ad</code> or <code className="bg-blue-100 px-1 rounded">.zarr</code>).
+                  Set the path below to mount it into the data server. Each dataset subfolder must contain a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>.
+                  If only <code className="bg-blue-100 px-1 rounded">.h5ad</code> files are present, Zarr conversion runs automatically on first start.
+                  <br />
+                  An <strong>Orchestrator</strong> coordinates training without local data — leave this field empty to omit the data server entirely.
                 </span>
                 <button
                   onClick={() => setShowDataExample(!showDataExample)}
@@ -417,7 +512,6 @@ ${getRunCommand()}
 └── thymus/
     ├── thymus_adult.h5ad
     ├── thymus_fetal.zarr/
-    ├── thymus_child.zarr/
     └── manifest.yaml`}</pre>
                     </div>
                     <div className="bg-white rounded-lg p-3 border border-blue-100">
@@ -435,7 +529,7 @@ authorized_users:
             </div>
           </div>
 
-          {/* ── BioEngine Workspace Directory (blue info box) ── */}
+          {/* BioEngine Workspace Directory */}
           <div className="p-4 bg-blue-50 rounded-xl border border-blue-200">
             <div className="flex items-start">
               <svg className="w-4 h-4 text-blue-500 mr-2 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -445,13 +539,13 @@ authorized_users:
                 <span className="font-medium">BioEngine Workspace Directory: </span>
                 <code className="bg-blue-100 px-1 rounded">{getWorkspaceDirPath()}</code>
                 <span className="text-blue-700 text-xs block mt-1">
-                  This directory is created on the host and mounted into both containers. It stores worker app data, Ray state, logs, and temporary files. Change it under Advanced Options below.
+                  Created on the host and mounted into the container(s). Stores worker app data, Ray state, logs, and temporary files. Change it under Advanced Options below.
                 </span>
               </p>
             </div>
           </div>
 
-          {/* ── Authentication Required (amber info box, shown when no token) ── */}
+          {/* Authentication warning */}
           {!token && (
             <div className="p-4 bg-amber-50 rounded-xl border border-amber-200">
               <div className="flex items-start">
@@ -459,13 +553,13 @@ authorized_users:
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
                 </svg>
                 <div className="text-sm text-amber-800">
-                  <p className="font-medium mb-1">🔐 Important: Authentication Required</p>
+                  <p className="font-medium mb-1">Authentication Required</p>
                   <div className="text-amber-700 space-y-1">
                     {isLoggedIn ? (
                       <p>Generating your authentication token… or set one manually in <strong>Advanced Options → Authentication Token</strong>.</p>
                     ) : (
                       <>
-                        <p>An authentication token is required. Either:</p>
+                        <p>An authentication token is required to connect the worker to Hypha. Either:</p>
                         <ol className="list-decimal list-inside space-y-1 ml-2 text-xs">
                           <li><strong>Log in</strong> to auto-generate a 30-day admin token, or</li>
                           <li>Set a token manually in <strong>Advanced Options → Authentication Token</strong></li>
@@ -479,10 +573,8 @@ authorized_users:
             </div>
           )}
 
-          {/* ── Configure Worker (Container & Compute) ── */}
+          {/* Configure Worker */}
           <div>
-
-            {/* Container & Compute */}
             <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
               <h5 className="text-sm font-semibold text-gray-700 mb-3">Container &amp; Compute</h5>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -507,23 +599,26 @@ authorized_users:
                     <option value="apptainer">Apptainer</option>
                   </select>
                   <p className="text-xs text-gray-500 mt-1">
-                    {containerRuntime === 'docker' ? 'Most common runtime, uses Docker Compose' :
-                     containerRuntime === 'podman' ? 'Rootless Docker alternative, uses Podman Compose' :
-                     containerRuntime === 'singularity' ? 'HPC-compatible, starts containers separately' :
-                     'Singularity successor, starts containers separately'}
+                    {containerRuntime === 'docker' ? 'Most common runtime, requires Docker Compose' :
+                     containerRuntime === 'podman' ? 'Rootless Docker alternative, requires Podman Compose' :
+                     containerRuntime === 'singularity' ? 'HPC-compatible, no root required' :
+                     'Singularity successor, common on newer HPC systems'}
                   </p>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Shared Memory Size</label>
-                  <select value={shmSize} onChange={(e) => setShmSize(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    {['1g','2g','4g','6g','8g','10g','12g','16g'].map(v => (
-                      <option key={v} value={v}>{v.replace('g', ' GB')}</option>
-                    ))}
-                  </select>
-                  <p className="text-xs text-gray-500 mt-1">Increase for large models and datasets</p>
-                </div>
+                {/* Shared memory — compose only */}
+                {isComposeRuntime() && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Shared Memory Size</label>
+                    <select value={shmSize} onChange={(e) => setShmSize(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      {['1g','2g','4g','6g','8g','10g','12g','16g'].map(v => (
+                        <option key={v} value={v}>{v.replace('g', ' GB')}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">Shared memory for the worker container. Increase for large models.</p>
+                  </div>
+                )}
 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">CPU Cores</label>
@@ -540,8 +635,8 @@ authorized_users:
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   <p className="text-xs text-gray-500 mt-1">
                     {gpus > 0
-                      ? `Requires NVIDIA ${containerRuntime === 'docker' ? 'Docker runtime' : 'container toolkit'}`
-                      : 'Set to 0 for CPU-only mode (Orchestrator only)'}
+                      ? (isComposeRuntime() ? 'Requires NVIDIA Container Toolkit on host' : 'Enables --nv GPU passthrough flag')
+                      : 'Set to 0 for CPU-only mode (e.g. Orchestrator)'}
                   </p>
                 </div>
 
@@ -553,7 +648,7 @@ authorized_users:
                   <p className="text-xs text-gray-500 mt-1">RAM for the Ray head node in GB</p>
                 </div>
 
-                {/* Data Import Directory — last field in standard settings */}
+                {/* Data Import Directory */}
                 <div className="md:col-span-2 lg:col-span-3">
                   <label className="block text-sm font-medium text-gray-700 mb-1">Data Import Directory</label>
                   <input
@@ -564,7 +659,8 @@ authorized_users:
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    Path to your local single-cell datasets for model training. Required for a <strong>Tabula Trainer</strong>. Leave empty if hosting an <strong>Orchestrator</strong> only.
+                    Path to your local single-cell datasets for model training. Required for a <strong>Tabula Trainer</strong>.
+                    Leave empty if running an <strong>Orchestrator only</strong> — the data server will be omitted.
                   </p>
                 </div>
 
@@ -600,7 +696,7 @@ authorized_users:
                     <input type="text" value={workerName} onChange={(e) => setWorkerName(e.target.value)}
                       placeholder="Chiron Platform Worker"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    <p className="text-xs text-gray-500 mt-1">Display name for this worker in the Hypha service registry</p>
+                    <p className="text-xs text-gray-500 mt-1">Display name for this worker in the Chiron UI</p>
                   </div>
 
                   <div className="md:col-span-2">
@@ -609,7 +705,7 @@ authorized_users:
                       placeholder={os === 'windows' ? '%USERPROFILE%\\.bioengine' : '$HOME/.bioengine'}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-xs text-gray-500 mt-1">
-                      Directory for app data, dataset files, logs and Ray cluster temporary files. Defaults to {os === 'windows' ? '%USERPROFILE%\\.bioengine' : '$HOME/.bioengine'}.
+                      Directory for app data, logs, and Ray cluster state. Defaults to {os === 'windows' ? '%USERPROFILE%\\.bioengine' : '$HOME/.bioengine'}.
                     </p>
                   </div>
 
@@ -673,7 +769,7 @@ authorized_users:
                       onChange={(e) => { setWorkspace(e.target.value); setWorkspaceResolved(false); }}
                       placeholder="my-workspace" autoComplete="off"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    <p className="text-xs text-gray-500 mt-1">Hypha workspace for service registration (resolved from token if not set)</p>
+                    <p className="text-xs text-gray-500 mt-1">Hypha workspace for service registration (auto-resolved from token)</p>
                   </div>
 
                   <div>
@@ -689,7 +785,7 @@ authorized_users:
                       <input type="text" value={gpuIndices} onChange={(e) => setGpuIndices(e.target.value)}
                         placeholder="0,1,2 (leave empty to use count)"
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                      <p className="text-xs text-gray-500 mt-1">Comma-separated GPU device IDs (e.g. 0,1). Leave empty to use the GPU count above</p>
+                      <p className="text-xs text-gray-500 mt-1">Comma-separated GPU device IDs. Leave empty to use the GPU count above</p>
                     </div>
                   )}
 
@@ -698,19 +794,22 @@ authorized_users:
                     <input type="text" value={customImage} onChange={(e) => setCustomImage(e.target.value)}
                       placeholder={DEFAULT_IMAGE}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    <p className="text-xs text-gray-500 mt-1">Custom image. Leave empty for default ({DEFAULT_IMAGE})</p>
+                    <p className="text-xs text-gray-500 mt-1">Custom image tag. Leave empty for default ({DEFAULT_IMAGE})</p>
                   </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Platform Override</label>
-                    <select value={platformOverride} onChange={(e) => setPlatformOverride(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
-                      <option value="">Auto-detect (default)</option>
-                      <option value="linux/amd64">linux/amd64</option>
-                      <option value="linux/arm64">linux/arm64</option>
-                    </select>
-                    <p className="text-xs text-gray-500 mt-1">Override platform only if auto-detection is wrong</p>
-                  </div>
+                  {/* Platform override — compose only */}
+                  {isComposeRuntime() && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Platform Override</label>
+                      <select value={platformOverride} onChange={(e) => setPlatformOverride(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">Auto-detect (default)</option>
+                        <option value="linux/amd64">linux/amd64</option>
+                        <option value="linux/arm64">linux/arm64</option>
+                      </select>
+                      <p className="text-xs text-gray-500 mt-1">Override platform only if auto-detection is wrong</p>
+                    </div>
+                  )}
 
                 </div>
               )}
@@ -720,26 +819,17 @@ authorized_users:
           {/* ── Steps 1–3 ── */}
           <div className="space-y-3">
 
-            {/* Step 1: docker-compose.yaml (compose runtimes only) */}
-            {isComposeRuntime() && <div>
-              <div className="flex items-center justify-between mb-1">
-                <p className="text-sm text-gray-700 font-medium">
-                  1. Download docker-compose.yaml
-                </p>
-                <div className="flex items-center space-x-2">
-                  <button
-                    onClick={async () => {
-                      try { await navigator.clipboard.writeText(getDockerComposeContent()); setCopiedStep1(true); setTimeout(() => setCopiedStep1(false), 2000); } catch (_) {}
-                    }}
-                    className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
-                  >
-                    {copiedStep1 ? (
-                      <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
-                    ) : (
-                      <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
-                    )}
-                  </button>
-                  {isComposeRuntime() && (
+            {/* Step 1 */}
+            {isComposeRuntime() ? (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-sm text-gray-700 font-medium">1. Download docker-compose.yaml</p>
+                  <div className="flex items-center space-x-2">
+                    <CopyButton
+                      getText={getDockerComposeContent}
+                      copied={copiedStep1}
+                      onCopied={() => { setCopiedStep1(true); setTimeout(() => setCopiedStep1(false), 2000); }}
+                    />
                     <button
                       onClick={downloadDockerCompose}
                       className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
@@ -749,33 +839,47 @@ authorized_users:
                       </svg>
                       Download
                     </button>
-                  )}
+                  </div>
                 </div>
+                <div className="bg-gray-900 rounded-lg p-3 overflow-x-auto">
+                  <pre className="text-green-400 text-xs font-mono whitespace-pre">{getDockerComposeContent()}</pre>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  {dataDir
+                    ? <>Two-service stack: <strong>data-server</strong> (serves datasets from disk, health-checked) + <strong>worker</strong> (BioEngine + Ray). The worker waits for the data server to be healthy before starting.</>
+                    : <>Single-service stack: <strong>worker</strong> only (BioEngine + Ray). No data server is started — suitable for an Orchestrator-only worker.</>
+                  }
+                </p>
               </div>
-              <div className="bg-gray-900 rounded-lg p-3 overflow-x-auto">
-                <pre className="text-green-400 text-xs font-mono whitespace-pre">{getDockerComposeContent()}</pre>
+            ) : (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-sm text-gray-700 font-medium">1. Pull container image</p>
+                  <CopyButton
+                    getText={getPullCommand}
+                    copied={copiedStep1}
+                    onCopied={() => { setCopiedStep1(true); setTimeout(() => setCopiedStep1(false), 2000); }}
+                  />
+                </div>
+                <div className="bg-gray-900 rounded-lg p-3 overflow-x-auto">
+                  <pre className="text-green-400 text-xs font-mono whitespace-pre">{getPullCommand()}</pre>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  Downloads and converts the Docker image to a local SIF file (~10 GB). Run once; subsequent starts use the cached file.
+                  Set <code className="bg-gray-100 px-1 rounded">SINGULARITY_CACHEDIR</code> (or <code className="bg-gray-100 px-1 rounded">APPTAINER_CACHEDIR</code>) to control where the conversion cache is stored.
+                </p>
               </div>
-              <p className="text-xs text-gray-500 mt-1">
-                Two-service stack: <strong>data-server</strong> (serves datasets directly from disk) + <strong>worker</strong> (BioEngine + Ray). The data-server must pass its health check before the worker starts.
-              </p>
-            </div>}
+            )}
 
             {/* Step 2: Environment variables */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <p className="text-sm text-gray-700 font-medium">{isComposeRuntime() ? '2' : '1'}. Set environment variables</p>
-                <button
-                  onClick={async () => {
-                    try { await navigator.clipboard.writeText(getEnvSetupCommands()); setCopiedStep2(true); setTimeout(() => setCopiedStep2(false), 2000); } catch (_) {}
-                  }}
-                  className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
-                >
-                  {copiedStep2 ? (
-                    <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
-                  ) : (
-                    <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
-                  )}
-                </button>
+                <p className="text-sm text-gray-700 font-medium">2. Set environment variables</p>
+                <CopyButton
+                  getText={getEnvSetupCommands}
+                  copied={copiedStep2}
+                  onCopied={() => { setCopiedStep2(true); setTimeout(() => setCopiedStep2(false), 2000); }}
+                />
               </div>
               <div className="bg-gray-900 rounded-lg p-3 overflow-x-auto">
                 <pre className="text-green-400 text-xs font-mono whitespace-pre">{getEnvSetupCommands()}</pre>
@@ -788,34 +892,36 @@ authorized_users:
             {/* Step 3: Start BioEngine */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <p className="text-sm text-gray-700 font-medium">{isComposeRuntime() ? '3' : '2'}. Start BioEngine</p>
-                <button
-                  onClick={async () => {
-                    try { await navigator.clipboard.writeText(getRunCommand()); setCopiedStep3(true); setTimeout(() => setCopiedStep3(false), 2000); } catch (_) {}
-                  }}
-                  className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
-                >
-                  {copiedStep3 ? (
-                    <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
-                  ) : (
-                    <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
-                  )}
-                </button>
+                <p className="text-sm text-gray-700 font-medium">3. Start BioEngine</p>
+                <CopyButton
+                  getText={getRunCommand}
+                  copied={copiedStep3}
+                  onCopied={() => { setCopiedStep3(true); setTimeout(() => setCopiedStep3(false), 2000); }}
+                />
               </div>
               <div className="bg-gray-900 rounded-lg p-3 overflow-x-auto">
                 <pre className="text-green-400 text-xs font-mono whitespace-pre">{getRunCommand()}</pre>
               </div>
               <p className="text-xs text-gray-500 mt-1">
-                {isComposeRuntime()
-                  ? <>Add <code className="bg-gray-100 px-1 rounded">-d</code> to run in the background. View logs with <code className="bg-gray-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose logs -f' : 'podman-compose logs -f'}</code>. Stop with <code className="bg-gray-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose down' : 'podman-compose down'}</code>.</>
-                  : <>The data server starts in the background; the worker connects to Hypha and registers as a BioEngine worker. Run in a persistent session (e.g. <code className="bg-gray-100 px-1 rounded">screen</code> or <code className="bg-gray-100 px-1 rounded">tmux</code>).</>
-                }
+                {containerRuntime === 'docker' && (
+                  <>Add <code className="bg-gray-100 px-1 rounded">-d</code> to run in the background. View logs with <code className="bg-gray-100 px-1 rounded">docker compose logs -f</code>. Stop with <code className="bg-gray-100 px-1 rounded">docker compose down</code>.</>
+                )}
+                {containerRuntime === 'podman' && (
+                  <>Add <code className="bg-gray-100 px-1 rounded">-d</code> to run in the background. View logs with <code className="bg-gray-100 px-1 rounded">podman-compose logs -f</code>. Stop with <code className="bg-gray-100 px-1 rounded">podman-compose down</code>.</>
+                )}
+                {(containerRuntime === 'singularity' || containerRuntime === 'apptainer') && (
+                  <>
+                    Run inside a persistent session (<code className="bg-gray-100 px-1 rounded">tmux</code> or <code className="bg-gray-100 px-1 rounded">screen</code>) or a SLURM batch job.
+                    {dataDir && <> The data server runs in the background (<code className="bg-gray-100 px-1 rounded">$DATA_SERVER_PID</code>) and the worker runs in the foreground. Stop both with <code className="bg-gray-100 px-1 rounded">Ctrl+C</code> then <code className="bg-gray-100 px-1 rounded">kill $DATA_SERVER_PID</code>.</>}
+                    {!dataDir && <> The worker runs in the foreground. Stop with <code className="bg-gray-100 px-1 rounded">Ctrl+C</code>.</>}
+                  </>
+                )}
               </p>
             </div>
 
           </div>
 
-          {/* ── Troubleshooting Button ── */}
+          {/* Troubleshooting */}
           <div className="flex justify-center pt-4 border-t border-gray-200">
             <button
               onClick={() => setShowTroubleshooting(true)}
@@ -831,7 +937,7 @@ authorized_users:
         </div>
       )}
 
-      {/* ── Troubleshooting Dialog ── */}
+      {/* Troubleshooting Dialog */}
       {showTroubleshooting && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div ref={troubleshootingDialogRef} className="bg-white rounded-2xl shadow-lg max-w-4xl w-full max-h-[90vh] flex flex-col">
