@@ -1206,7 +1206,7 @@ const Training: React.FC = () => {
   const isActivelyTraining = isTraining && selectedOrchestrator === trainingOrchestratorId;
 
   return (
-    <div className="max-w-screen-2xl mx-auto px-4 py-6">
+    <div className="px-6 py-6">
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-gray-900 mb-1">Federated Training</h1>
@@ -1338,15 +1338,15 @@ const Training: React.FC = () => {
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm table-fixed">
+                    <table className="w-full text-sm">
                       <thead>
                         <tr className="bg-gray-50/70 text-xs font-semibold text-gray-500 uppercase tracking-wide">
                           <th className="text-left px-6 py-3">Worker</th>
-                          <th className="text-left px-4 py-3 w-36">Location</th>
+                          <th className="text-left px-4 py-3">Location</th>
                           <th className="text-left px-4 py-3">Datasets</th>
                           <th className="text-center px-4 py-3 w-40">Orchestrators</th>
                           <th className="text-center px-4 py-3 w-40">Trainers</th>
-                          <th className="text-right px-6 py-3 w-28">Actions</th>
+                          <th className="text-right px-6 py-3">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-50">
