@@ -720,11 +720,11 @@ authorized_users:
           {/* ── Steps 1–3 ── */}
           <div className="space-y-3">
 
-            {/* Step 1: docker-compose.yaml or singularity startup script */}
-            <div>
+            {/* Step 1: docker-compose.yaml (compose runtimes only) */}
+            {isComposeRuntime() && <div>
               <div className="flex items-center justify-between mb-1">
                 <p className="text-sm text-gray-700 font-medium">
-                  {isComposeRuntime() ? '1. Download docker-compose.yaml' : '1. Prepare startup commands'}
+                  1. Download docker-compose.yaml
                 </p>
                 <div className="flex items-center space-x-2">
                   <button
@@ -756,17 +756,14 @@ authorized_users:
                 <pre className="text-green-400 text-xs font-mono whitespace-pre">{getDockerComposeContent()}</pre>
               </div>
               <p className="text-xs text-gray-500 mt-1">
-                {isComposeRuntime()
-                  ? <>Two-service stack: <strong>data-server</strong> (serves datasets directly from disk) + <strong>worker</strong> (BioEngine + Ray). The data-server must pass its health check before the worker starts.</>
-                  : <>Run these commands to start the data server and worker as separate {containerRuntime} containers. The data server starts in the background; the worker starts after a short wait.</>
-                }
+                Two-service stack: <strong>data-server</strong> (serves datasets directly from disk) + <strong>worker</strong> (BioEngine + Ray). The data-server must pass its health check before the worker starts.
               </p>
-            </div>
+            </div>}
 
             {/* Step 2: Environment variables */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <p className="text-sm text-gray-700 font-medium">2. Set environment variables</p>
+                <p className="text-sm text-gray-700 font-medium">{isComposeRuntime() ? '2' : '1'}. Set environment variables</p>
                 <button
                   onClick={async () => {
                     try { await navigator.clipboard.writeText(getEnvSetupCommands()); setCopiedStep2(true); setTimeout(() => setCopiedStep2(false), 2000); } catch (_) {}
@@ -788,32 +785,33 @@ authorized_users:
               </p>
             </div>
 
-            {/* Step 3: Start (compose runtimes only) */}
-            {isComposeRuntime() && (
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <p className="text-sm text-gray-700 font-medium">3. Start BioEngine</p>
-                  <button
-                    onClick={async () => {
-                      try { await navigator.clipboard.writeText(getRunCommand()); setCopiedStep3(true); setTimeout(() => setCopiedStep3(false), 2000); } catch (_) {}
-                    }}
-                    className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
-                  >
-                    {copiedStep3 ? (
-                      <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
-                    ) : (
-                      <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
-                    )}
-                  </button>
-                </div>
-                <div className="bg-gray-900 rounded-lg p-3 overflow-x-auto">
-                  <pre className="text-green-400 text-xs font-mono whitespace-pre">{getRunCommand()}</pre>
-                </div>
-                <p className="text-xs text-gray-500 mt-1">
-                  Add <code className="bg-gray-100 px-1 rounded">-d</code> to run in the background. View logs with <code className="bg-gray-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose logs -f' : 'podman-compose logs -f'}</code>. Stop with <code className="bg-gray-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose down' : 'podman-compose down'}</code>.
-                </p>
+            {/* Step 3: Start BioEngine */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-sm text-gray-700 font-medium">{isComposeRuntime() ? '3' : '2'}. Start BioEngine</p>
+                <button
+                  onClick={async () => {
+                    try { await navigator.clipboard.writeText(getRunCommand()); setCopiedStep3(true); setTimeout(() => setCopiedStep3(false), 2000); } catch (_) {}
+                  }}
+                  className="flex items-center px-2 py-1 text-xs text-gray-600 bg-gray-100 border border-gray-200 rounded hover:bg-gray-200 transition-colors"
+                >
+                  {copiedStep3 ? (
+                    <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
+                  ) : (
+                    <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
+                  )}
+                </button>
               </div>
-            )}
+              <div className="bg-gray-900 rounded-lg p-3 overflow-x-auto">
+                <pre className="text-green-400 text-xs font-mono whitespace-pre">{getRunCommand()}</pre>
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                {isComposeRuntime()
+                  ? <>Add <code className="bg-gray-100 px-1 rounded">-d</code> to run in the background. View logs with <code className="bg-gray-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose logs -f' : 'podman-compose logs -f'}</code>. Stop with <code className="bg-gray-100 px-1 rounded">{containerRuntime === 'docker' ? 'docker compose down' : 'podman-compose down'}</code>.</>
+                  : <>The data server starts in the background; the worker connects to Hypha and registers as a BioEngine worker. Run in a persistent session (e.g. <code className="bg-gray-100 px-1 rounded">screen</code> or <code className="bg-gray-100 px-1 rounded">tmux</code>).</>
+                }
+              </p>
+            </div>
 
           </div>
 
