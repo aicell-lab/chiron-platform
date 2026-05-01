@@ -1043,10 +1043,20 @@ const Training: React.FC = () => {
     return dataset.authorized_users.includes(userId) || dataset.authorized_users.includes(userEmail);
   };
 
-  const getTrainerAppId = (serviceId: string): string => {
-    const trainer = trainers.find(t => t.serviceIds && t.serviceIds[0] && t.serviceIds[0].websocket_service_id === serviceId);
-    return trainer ? trainer.appId : serviceId;
-  };
+  const trainerServiceToWorkerName = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const trainer of trainers) {
+      const wsId = trainer.serviceIds?.[0]?.websocket_service_id;
+      if (wsId) {
+        const worker = allDiscoveredWorkers.find(w => w.serviceId === trainer.managerId);
+        map[wsId] = worker?.name || trainer.managerId;
+      }
+    }
+    return map;
+  }, [trainers, allDiscoveredWorkers]);
+
+  const getTrainerDisplayName = (serviceId: string): string =>
+    trainerServiceToWorkerName[serviceId] || serviceId;
 
   const getStatusBadge = (status?: string) => {
     const displayStatus = status || 'NOT_STARTED';
@@ -1709,8 +1719,8 @@ const Training: React.FC = () => {
                         <div key={trainerId}>
                           <div className="flex justify-between text-xs mb-1">
                             <div className="flex items-center gap-2">
-                              <span className="text-gray-600 font-medium">{getTrainerAppId(trainerId)}</span>
-                              {hasError && <button onClick={() => { setErrorDetailTrainerId(getTrainerAppId(trainerId)); setErrorDetailMessage(progress.error || ''); setShowErrorDetailModal(true); }} className="text-red-500 hover:text-red-700"><FaTimesCircle size={12} /></button>}
+                              <span className="text-gray-600 font-medium">{getTrainerDisplayName(trainerId)}</span>
+                              {hasError && <button onClick={() => { setErrorDetailTrainerId(getTrainerDisplayName(trainerId)); setErrorDetailMessage(progress.error || ''); setShowErrorDetailModal(true); }} className="text-red-500 hover:text-red-700"><FaTimesCircle size={12} /></button>}
                             </div>
                             <span className="text-gray-400">{progress.current_batch}/{progress.total_batches} batches</span>
                           </div>
@@ -1736,6 +1746,7 @@ const Training: React.FC = () => {
                         color="#2563eb"
                         fill="#dbeafe"
                         clientData={trainingHistory.client_training_losses}
+                        clientLabels={trainerServiceToWorkerName}
                       />
                     )}
                     {trainingHistory.validation_losses?.length > 0 && (
@@ -1745,6 +1756,7 @@ const Training: React.FC = () => {
                         color="#10b981"
                         fill="#d1fae5"
                         clientData={trainingHistory.client_validation_losses}
+                        clientLabels={trainerServiceToWorkerName}
                       />
                     )}
                   </div>

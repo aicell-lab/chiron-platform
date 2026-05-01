@@ -10,6 +10,8 @@ interface LossChartProps {
   fill: string;
   /** Per-trainer losses keyed by client ID: Record<clientId, [round, loss][]> */
   clientData?: Record<string, [number, number][]>;
+  /** Optional display labels keyed by client ID (e.g. worker names) */
+  clientLabels?: Record<string, string>;
 }
 
 const TRAINER_PALETTE = ['#f97316', '#a855f7', '#ef4444', '#06b6d4', '#f59e0b', '#ec4899'];
@@ -20,7 +22,7 @@ const PAD = { l: 52, r: 16, t: 16, b: 36 };
 const PLOT_W = W - PAD.l - PAD.r;
 const PLOT_H = H - PAD.t - PAD.b;
 
-const LossChart: React.FC<LossChartProps> = ({ title, data, color, fill, clientData = {} }) => {
+const LossChart: React.FC<LossChartProps> = ({ title, data, color, fill, clientData = {}, clientLabels = {} }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -55,7 +57,7 @@ const LossChart: React.FC<LossChartProps> = ({ title, data, color, fill, clientD
 
   const clientPts = clientEntries.map(([clientId, arr], ci) => ({
     clientId,
-    label: `Trainer ${ci + 1}`,
+    label: clientLabels[clientId] || `Trainer ${ci + 1}`,
     color: TRAINER_PALETTE[ci % TRAINER_PALETTE.length],
     pts: arr.map(([round, value]) => ({ x: roundToX(round), y: valueToY(value), round, value })),
     byRound: Object.fromEntries(arr.map(([r, v]) => [r, v])),
