@@ -232,13 +232,16 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
       const icon = makeIcon(L, color, group.role, group.active, group.workers.length);
       const popupHtml = makePopupHtml(group);
 
+      const zIndexOffset = (group.role === 'orchestrator' || group.role === 'both') ? 1000 : 0;
+
       if (markersRef.current.has(group.key)) {
         const m = markersRef.current.get(group.key);
         m.setLatLng([group.lat, group.lng]);
         m.setIcon(icon);
         m.setPopupContent(popupHtml);
+        m.setZIndexOffset(zIndexOffset);
       } else {
-        const m = L.marker([group.lat, group.lng], { icon }).addTo(map).bindPopup(popupHtml);
+        const m = L.marker([group.lat, group.lng], { icon, zIndexOffset }).addTo(map).bindPopup(popupHtml);
         markersRef.current.set(group.key, m);
       }
     });
