@@ -17,6 +17,7 @@ interface LoginConfig {
 
 const serverUrl = "https://hypha.aicell.io";
 const REDIRECT_PATH_KEY = 'redirectPath';
+const FORCE_LOGIN_KEY = 'hypha_force_login';
 
 const getSavedToken = () => {
   const token = localStorage.getItem("token");
@@ -66,6 +67,7 @@ export default function LoginButton({ className = '' }: LoginButtonProps) {
       localStorage.removeItem('tokenExpiry');
       localStorage.removeItem('user');
       sessionStorage.removeItem(REDIRECT_PATH_KEY);
+      sessionStorage.setItem(FORCE_LOGIN_KEY, 'true');
       logout();
       setIsDropdownOpen(false);
       navigate('/');
@@ -73,7 +75,14 @@ export default function LoginButton({ className = '' }: LoginButtonProps) {
   };
 
   const loginCallback = (context: { login_url: string }) => {
-    window.open(context.login_url);
+    let url = context.login_url;
+    if (sessionStorage.getItem(FORCE_LOGIN_KEY)) {
+      const parsed = new URL(url);
+      parsed.searchParams.set('prompt', 'login');
+      url = parsed.toString();
+      sessionStorage.removeItem(FORCE_LOGIN_KEY);
+    }
+    window.open(url);
   };
 
   const login = async () => {
