@@ -4,6 +4,7 @@ import { FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, 
 import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
 import FederatedWorldMap, { MapWorker, MapConnection, MapLegend, MapLegendMode } from './FederatedWorldMap';
+import LossChart from './LossChart';
 
 const CountryFlag: React.FC<{ countryName?: string; countryCode?: string; className?: string }> = ({ countryName, countryCode, className }) => {
   const flagUrl = countryCode
@@ -118,6 +119,8 @@ const STAGE_LABELS: Record<NonNullable<TrainingStage>, string> = {
 interface TrainingHistory {
   training_losses: [number, number][];
   validation_losses: [number, number][];
+  client_training_losses?: Record<string, [number, number][]>;
+  client_validation_losses?: Record<string, [number, number][]>;
 }
 
 interface ClusterStatus {
@@ -1664,65 +1667,24 @@ const Training: React.FC = () => {
                 <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
                   <h3 className="font-semibold text-gray-900 mb-4 text-sm">Training History</h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                    {[
-                      { title: 'Training Loss', data: trainingHistory.training_losses, color: '#2563eb', fill: '#dbeafe' },
-                      { title: 'Validation Loss', data: trainingHistory.validation_losses, color: '#10b981', fill: '#d1fae5' },
-                    ].filter(chart => chart.data && chart.data.length > 0).map(chart => {
-                      const lossData = chart.data.map((item: [number, number]) => ({ round: item[0], value: item[1] }));
-                      const values = lossData.map(d => d.value);
-                      const maxV = Math.max(...values); const minV = Math.min(...values);
-                      const range = maxV - minV || 1;
-                      const PAD = { l: 52, r: 16, t: 16, b: 36 };
-                      const W = 420; const H = 180;
-                      const plotW = W - PAD.l - PAD.r; const plotH = H - PAD.t - PAD.b;
-                      const pts = lossData.map((d, i) => {
-                        const x = PAD.l + (i / Math.max(lossData.length - 1, 1)) * plotW;
-                        const y = PAD.t + ((maxV - d.value) / range) * plotH;
-                        return { x, y, d };
-                      });
-                      return (
-                        <div key={chart.title}>
-                          <h4 className="text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">{chart.title}</h4>
-                          <div className="bg-gray-50 rounded-xl p-2 border border-gray-100">
-                            <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
-                              {/* Y grid + labels */}
-                              {Array.from({ length: 5 }).map((_, i) => {
-                                const v = maxV - (i / 4) * range;
-                                const y = PAD.t + (i / 4) * plotH;
-                                return (
-                                  <g key={i}>
-                                    <line x1={PAD.l} y1={y} x2={W - PAD.r} y2={y} stroke="#e5e7eb" strokeWidth="1" />
-                                    <text x={PAD.l - 4} y={y + 4} textAnchor="end" fontSize="9" fill="#9ca3af">{v.toFixed(3)}</text>
-                                  </g>
-                                );
-                              })}
-                              {/* X labels */}
-                              {pts.filter((_, i, a) => i === 0 || i === a.length - 1 || (a.length <= 10) || i % Math.ceil(a.length / 5) === 0).map(({ x, d }, i) => (
-                                <text key={i} x={x} y={H - 8} textAnchor="middle" fontSize="9" fill="#9ca3af">{d.round}</text>
-                              ))}
-                              <text x={W / 2} y={H - 1} textAnchor="middle" fontSize="9" fill="#6b7280">Round</text>
-                              {/* Area fill */}
-                              {pts.length > 1 && (
-                                <polygon
-                                  points={[...pts.map(p => `${p.x},${p.y}`), `${pts[pts.length - 1].x},${PAD.t + plotH}`, `${pts[0].x},${PAD.t + plotH}`].join(' ')}
-                                  fill={chart.fill} opacity="0.5"
-                                />
-                              )}
-                              {/* Line */}
-                              {pts.length > 1 && (
-                                <polyline points={pts.map(p => `${p.x},${p.y}`).join(' ')} fill="none" stroke={chart.color} strokeWidth="2" strokeLinejoin="round" />
-                              )}
-                              {/* Dots */}
-                              {pts.map(({ x, y, d }, i) => (
-                                <circle key={i} cx={x} cy={y} r="3.5" fill={chart.color} stroke="white" strokeWidth="1.5">
-                                  <title>Round {d.round}: {d.value.toFixed(4)}</title>
-                                </circle>
-                              ))}
-                            </svg>
-                          </div>
-                        </div>
-                      );
-                    })}
+                    {trainingHistory.training_losses?.length > 0 && (
+                      <LossChart
+                        title="Training Loss"
+                        data={trainingHistory.training_losses}
+                        color="#2563eb"
+                        fill="#dbeafe"
+                        clientData={trainingHistory.client_training_losses}
+                      />
+                    )}
+                    {trainingHistory.validation_losses?.length > 0 && (
+                      <LossChart
+                        title="Validation Loss"
+                        data={trainingHistory.validation_losses}
+                        color="#10b981"
+                        fill="#d1fae5"
+                        clientData={trainingHistory.client_validation_losses}
+                      />
+                    )}
                   </div>
                 </div>
               )}
