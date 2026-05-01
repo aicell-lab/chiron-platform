@@ -1043,18 +1043,6 @@ const Training: React.FC = () => {
     return dataset.authorized_users.includes(userId) || dataset.authorized_users.includes(userEmail);
   };
 
-  const trainerServiceToWorkerName = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const trainer of trainers) {
-      const wsId = trainer.serviceIds?.[0]?.websocket_service_id;
-      if (wsId) {
-        const worker = allDiscoveredWorkers.find(w => w.serviceId === trainer.managerId);
-        map[wsId] = worker?.name || trainer.managerId;
-      }
-    }
-    return map;
-  }, [trainers, allDiscoveredWorkers]);
-
   const getTrainerDisplayName = (serviceId: string): string =>
     trainerServiceToWorkerName[serviceId] || serviceId;
 
@@ -1188,6 +1176,18 @@ const Training: React.FC = () => {
       .flatMap(ws => (discoveredWorkers[ws] || []).map(w => ({ ...w, workspace: ws })))
       .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
   }, [observedWorkspaces, discoveredWorkers]);
+
+  const trainerServiceToWorkerName = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const trainer of trainers) {
+      const wsId = trainer.serviceIds?.[0]?.websocket_service_id;
+      if (wsId) {
+        const worker = allDiscoveredWorkers.find(w => w.serviceId === trainer.managerId);
+        map[wsId] = worker?.name || trainer.managerId;
+      }
+    }
+    return map;
+  }, [trainers, allDiscoveredWorkers]);
 
   const stepEnabled = (step: number) => {
     if (step === 1) return true;
