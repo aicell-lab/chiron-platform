@@ -98,6 +98,7 @@ interface TrainerApp {
   displayName?: string;
   applicationId?: string;
   isBusy?: boolean;
+  registeredOrchestratorId?: string;
 }
 
 type TrainingStage = 'fit' | 'evaluate' | 'aggregation' | 'distribution' | null;
@@ -582,7 +583,7 @@ const Training: React.FC = () => {
         const newT: TrainerApp[] = [];
         if (workerInfo.trainers_status) {
           for (const [appId, trainerStatus] of Object.entries(workerInfo.trainers_status)) {
-            newT.push({ managerId, appId, status: (trainerStatus as any).status, serviceIds: (trainerStatus as any).service_ids || [], datasets: (trainerStatus as any).datasets || {}, artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer', displayName: (trainerStatus as any).display_name, applicationId: appId, isBusy: (trainerStatus as any).is_busy ?? false });
+            newT.push({ managerId, appId, status: (trainerStatus as any).status, serviceIds: (trainerStatus as any).service_ids || [], datasets: (trainerStatus as any).datasets || {}, artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer', displayName: (trainerStatus as any).display_name, applicationId: appId, isBusy: (trainerStatus as any).is_busy ?? false, registeredOrchestratorId: (trainerStatus as any).registered_orchestrator_id ?? undefined });
           }
         }
         return [...filtered, ...newT];
@@ -830,8 +831,9 @@ const Training: React.FC = () => {
     if (!trainer || trainer.status !== 'RUNNING') return;
     try {
       setIsLoadingRegisteredTrainers(true);
-      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      await orchestratorService.add_trainer(trainer.serviceIds[0].websocket_service_id);
+      const orchestratorServiceId = orchestrator.serviceIds[0].websocket_service_id;
+      const orchestratorService = await server.getService(orchestratorServiceId);
+      await orchestratorService.add_trainer(trainer.serviceIds[0].websocket_service_id, orchestratorServiceId);
       const registeredServiceIds = await orchestratorService.list_trainers();
       setRegisteredTrainers(registeredServiceIds);
     } catch (error) {
@@ -1578,13 +1580,32 @@ const Training: React.FC = () => {
                       const isTrainerHighlighted = highlightedWorkerIds.includes(trainer.managerId);
                       const trainerBorder = isRegistered ? 'border-emerald-400' : isBusyElsewhere ? 'border-amber-200' : isTrainerHighlighted ? 'border-violet-400' : 'border-transparent hover:border-gray-200';
                       const trainerBg = isRegistered ? (isTrainerHighlighted ? 'bg-violet-50' : 'bg-emerald-50/60') : isBusyElsewhere ? 'bg-amber-50/40' : isTrainerHighlighted ? 'bg-violet-50' : 'bg-gray-50';
+                      // Resolve which orchestrator/worker this trainer is registered to (for tooltip)
+                      const regOrch = isBusyElsewhere && trainer.registeredOrchestratorId
+                        ? orchestrators.find(o => o.serviceIds[0]?.websocket_service_id === trainer.registeredOrchestratorId)
+                        : undefined;
+                      const regOrchManager = regOrch ? managers.find(m => m.serviceId === regOrch.managerId) : undefined;
+                      const regOrchWorkerName = regOrchManager?.workerInfo?.worker_info?.name || regOrch?.managerId?.split('/')[1]?.split(':')[0];
+                      const regOrchGeo = regOrchManager?.workerInfo?.worker_info?.geo_location;
                       return (
                         <label key={trainerId} data-managerid={trainer.managerId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${trainerBorder} ${trainerBg}`}>
                           <input type="checkbox" checked={isRegistered} disabled={isDisabled} onChange={async e => { e.target.checked ? await registerTrainer(trainerId) : await unregisterTrainer(trainerId); }} className="mt-0.5 accent-emerald-600" />
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <p className="font-medium text-gray-900 text-sm leading-tight">{trainer.displayName || 'Tabula Trainer'}</p>
-                              {trainer.isBusy && <BusyBadge />}
+                              {trainer.isBusy && (
+                                isBusyElsewhere && trainer.registeredOrchestratorId ? (
+                                  <span className="relative group/busytip">
+                                    <BusyBadge />
+                                    <div className="absolute left-0 top-full mt-1.5 z-50 hidden group-hover/busytip:block w-64 bg-gray-900 text-white text-xs rounded-xl shadow-xl p-3 pointer-events-none">
+                                      <p className="font-semibold mb-1.5 text-amber-300">Registered to orchestrator</p>
+                                      {regOrchWorkerName && <p className="mb-0.5"><span className="text-gray-400">Worker:</span> {regOrchWorkerName}</p>}
+                                      {regOrchGeo && <p className="mb-0.5"><span className="text-gray-400">Location:</span> {regOrchGeo.region}, {regOrchGeo.country_name}</p>}
+                                      <p className="text-gray-400 break-all mt-1 leading-snug">{trainer.registeredOrchestratorId}</p>
+                                    </div>
+                                  </span>
+                                ) : <BusyBadge />
+                              )}
                             </div>
                             {geo && <p className="text-xs text-gray-500 mt-0.5">{geo.region}, {geo.country_name}</p>}
                             {datasetNames.length > 0 && <p className="text-xs text-gray-400 mt-0.5 truncate">{datasetNames.join(', ')}</p>}
