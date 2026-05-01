@@ -74,21 +74,21 @@ const AppContent: React.FC = () => {
         message={snackbarMessage}
         onClose={() => setSnackbarOpen(false)}
       />
-      <main className="container mx-auto px-4">
+      <main>
         <Routes>
           <Route path="/" element={<Navigate to="/training" replace />} />
-          <Route path="/resources/:id" element={<ResourceDetails />} />
-          <Route path="/about" element={<About />} />
-          <Route path="/workers" element={<ResourceGrid type="worker" />} />
-          <Route path="/notebooks" element={<ResourceGrid type="notebook" />} />
-          <Route path="/edit/:artifactId" element={<Edit />} />
-          <Route path="/model-trainer/:id" element={<ModelTrainer />} />
-          <Route path="/manage-worker/:artifactId" element={<ManageWorker />} />
-          <Route path="/worker" element={<BioEngineHome />} />
-          <Route path="/worker/dashboard" element={<BioEngineWorker />} />
+          <Route path="/resources/:id" element={<div className="container mx-auto px-4"><ResourceDetails /></div>} />
+          <Route path="/about" element={<div className="container mx-auto px-4"><About /></div>} />
+          <Route path="/workers" element={<div className="container mx-auto px-4"><ResourceGrid type="worker" /></div>} />
+          <Route path="/notebooks" element={<div className="container mx-auto px-4"><ResourceGrid type="notebook" /></div>} />
+          <Route path="/edit/:artifactId" element={<div className="container mx-auto px-4"><Edit /></div>} />
+          <Route path="/model-trainer/:id" element={<div className="container mx-auto px-4"><ModelTrainer /></div>} />
+          <Route path="/manage-worker/:artifactId" element={<div className="container mx-auto px-4"><ManageWorker /></div>} />
+          <Route path="/worker" element={<div className="container mx-auto px-4"><BioEngineHome /></div>} />
+          <Route path="/worker/dashboard" element={<div className="container mx-auto px-4"><BioEngineWorker /></div>} />
           <Route path="/bioengine" element={<Navigate to="/worker" replace />} />
           <Route path="/bioengine/worker" element={<Navigate to="/worker/dashboard" replace />} />
-          <Route path="/orchestrator" element={<Orchestrator />} />
+          <Route path="/orchestrator" element={<div className="container mx-auto px-4"><Orchestrator /></div>} />
           <Route path="/training" element={<Training />} />
         </Routes>
       </main>
