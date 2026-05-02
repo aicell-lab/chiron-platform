@@ -142,6 +142,19 @@ interface OrchestratorInfoModalData { status?: string; artifactId?: string; }
 interface TrainerInfoModalData { appId: string; status?: string; datasets: Record<string, any>; artifactId?: string; }
 type InfoModalData = ManagerInfoModalData | OrchestratorInfoModalData | TrainerInfoModalData;
 
+const extractRemoteError = (msg: string): string => {
+  if (!msg.includes('Traceback')) return msg;
+  const lines = msg.split('\n');
+  let last = '';
+  for (const line of lines) {
+    const t = line.trim();
+    if (/^[A-Za-z]+(?:Error|Exception): /.test(t) && !t.startsWith('Exception: Traceback')) {
+      last = t;
+    }
+  }
+  return last || msg;
+};
+
 const Training: React.FC = () => {
   const { server, isLoggedIn, user, artifactManager } = useHyphaStore();
 
@@ -164,6 +177,7 @@ const Training: React.FC = () => {
   const [showErrorPopup, setShowErrorPopup] = useState(false);
   const [errorPopupMessage, setErrorPopupMessage] = useState('');
   const [errorPopupDetails, setErrorPopupDetails] = useState('');
+  const [errorPopupDashboardUrl, setErrorPopupDashboardUrl] = useState<string | null>(null);
 
   const [orchestrators, setOrchestrators] = useState<OrchestratorApp[]>([]);
   const [trainers, setTrainers] = useState<TrainerApp[]>([]);
@@ -653,7 +667,7 @@ const Training: React.FC = () => {
       scheduleWorkerRefresh(managerId);
     } catch (error) {
       setErrorPopupMessage('Failed to Create Orchestrator');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true);
       setIsCreatingOrchestrator(false);
     }
@@ -674,7 +688,7 @@ const Training: React.FC = () => {
       scheduleWorkerRefresh(managerId);
     } catch (error) {
       setErrorPopupMessage('Failed to Create Trainer');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true);
       setIsCreatingTrainer(false);
     }
@@ -738,8 +752,12 @@ const Training: React.FC = () => {
       await manager.service.remove_orchestrator({ application_id: orchestrator.appId, force, caller_id: callerId, _rkwargs: true });
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
+      const msg = extractRemoteError(error instanceof Error ? error.message : 'Unknown error');
       setErrorPopupMessage('Failed to Remove Orchestrator');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(msg);
+      if (msg.includes('worker admin')) {
+        setErrorPopupDashboardUrl(`${window.location.origin}/#/worker/dashboard?service_id=${managerId.split(':bioengine')[0]}:bioengine-worker`);
+      }
       setShowErrorPopup(true);
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     }
@@ -760,8 +778,12 @@ const Training: React.FC = () => {
       await manager.service.remove_trainer({ application_id: appId, force, caller_id: callerId, _rkwargs: true });
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
+      const msg = extractRemoteError(error instanceof Error ? error.message : 'Unknown error');
       setErrorPopupMessage('Failed to Remove Trainer');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(msg);
+      if (msg.includes('worker admin')) {
+        setErrorPopupDashboardUrl(`${window.location.origin}/#/worker/dashboard?service_id=${managerId.split(':bioengine')[0]}:bioengine-worker`);
+      }
       setShowErrorPopup(true);
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     }
@@ -822,7 +844,7 @@ const Training: React.FC = () => {
     } catch (error) {
       setIsInfoModalLoading(false);
       setErrorPopupMessage('Failed to Get Information');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true);
       setShowInfoModal(false);
     }
@@ -843,7 +865,7 @@ const Training: React.FC = () => {
       setRegisteredTrainers(registeredServiceIds);
     } catch (error) {
       setErrorPopupMessage('Failed to Register Trainer');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true);
     } finally { setIsLoadingRegisteredTrainers(false); }
   };
@@ -974,7 +996,7 @@ const Training: React.FC = () => {
       }, 3000);
     } catch (error) {
       setErrorPopupMessage('Failed to Start Training');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true); setIsPreparingTraining(false); setIsTraining(false); setTrainingOrchestratorId(null);
     }
   };
@@ -990,7 +1012,7 @@ const Training: React.FC = () => {
       setIsTraining(false); setTrainingOrchestratorId(null); setTrainingStatus(null);
     } catch (error) {
       setErrorPopupMessage('Failed to Stop Training');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true);
     } finally { setIsStoppingTraining(false); }
   };
@@ -1007,7 +1029,7 @@ const Training: React.FC = () => {
       setTimeout(() => setResetStateSuccess(false), 2000);
     } catch (error) {
       setErrorPopupMessage('Failed to Reset Training State');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true);
     }
   };
@@ -1035,7 +1057,7 @@ const Training: React.FC = () => {
       setSaveStatus('global', 'success');
     } catch (error) {
       setErrorPopupMessage('Failed to Save Global Weights');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true);
       setSaveStatus('global', 'idle');
     }
@@ -1058,7 +1080,7 @@ const Training: React.FC = () => {
       setSaveStatus(key, 'success');
     } catch (error) {
       setErrorPopupMessage('Failed to Publish Trainer Model');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true);
       setSaveStatus(key, 'idle');
     }
@@ -1077,7 +1099,7 @@ const Training: React.FC = () => {
       setSaveStatus(key, 'success');
     } catch (error) {
       setErrorPopupMessage('Failed to Save Model Locally');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true);
       setSaveStatus(key, 'idle');
     }
@@ -2291,8 +2313,14 @@ const Training: React.FC = () => {
             <div className="flex-1 overflow-y-auto p-6">
               <p className="text-sm text-gray-600 whitespace-pre-wrap">{errorPopupDetails}</p>
             </div>
-            <div className="px-6 pb-5 flex-shrink-0">
-              <button onClick={() => { setShowErrorPopup(false); setErrorPopupMessage(''); setErrorPopupDetails(''); }} className="w-full py-2.5 bg-red-600 text-white text-sm font-medium rounded-xl hover:bg-red-700 transition-colors">Close</button>
+            <div className="px-6 pb-5 flex-shrink-0 flex flex-col gap-2">
+              {errorPopupDashboardUrl && (
+                <a href={errorPopupDashboardUrl} target="_blank" rel="noopener noreferrer"
+                  className="w-full py-2.5 bg-blue-600 text-white text-sm font-medium rounded-xl hover:bg-blue-700 transition-colors text-center block">
+                  Open BioEngine Dashboard
+                </a>
+              )}
+              <button onClick={() => { setShowErrorPopup(false); setErrorPopupMessage(''); setErrorPopupDetails(''); setErrorPopupDashboardUrl(null); }} className="w-full py-2.5 bg-red-600 text-white text-sm font-medium rounded-xl hover:bg-red-700 transition-colors">Close</button>
             </div>
           </div>
         </div>
