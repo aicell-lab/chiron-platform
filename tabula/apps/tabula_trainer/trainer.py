@@ -1089,6 +1089,33 @@ class TabulaTrainer:
         return results
 
     @schema_method
+    async def clear_local_model_weights(self) -> List[str]:
+        """Delete all locally saved model weight directories on this worker.
+
+        Removes every subdirectory under ~/.bioengine/models/ and returns a
+        list of the deleted paths.
+        """
+        import shutil
+        app_home = Path(os.environ.get("HOME", os.path.expanduser("~")))
+        if app_home.parent.name == "apps" and app_home.parent.parent.name == ".bioengine":
+            bioengine_root = app_home.parent.parent
+        else:
+            bioengine_root = app_home / ".bioengine"
+        models_dir = bioengine_root / "models"
+
+        deleted: List[str] = []
+        if not models_dir.exists():
+            return deleted
+
+        for entry in sorted(models_dir.iterdir()):
+            if entry.is_dir():
+                shutil.rmtree(entry)
+                deleted.append(str(entry))
+
+        logger.info(f"Cleared {len(deleted)} local model weight directory(ies)")
+        return deleted
+
+    @schema_method
     async def reset_training_state(self) -> Dict[str, Union[bool, str]]:
         """Reset per-session bookkeeping (training history, artifact tracking, status flags).
 
@@ -1707,71 +1734,65 @@ class TabulaTrainer:
                 "No checkpoint found. Please call `start_fit` at least once before saving a model."
             )
 
-        # Prepare model manifest
-        artifact_id = os.environ["HYPHA_ARTIFACT_ID"]
-        checkpoint_name = checkpoint.name
-        server_round = int(checkpoint_name.split("round=")[-1].split(".pth")[0])
+        # Build metadata
         dataset_info = self.local_client._properties["dataset_info"]
-        datasets = list(dataset_info.keys())
+        dataset_names = [v.get("name", k) for k, v in dataset_info.items()]
+        num_rounds = len(self.local_client.training_history.get("train_loss", []))
+        total_samples_seen = sum(
+            v for _, v in self.local_client.training_history.get("train_samples", [])
+        )
+        auto_description = (
+            f"{num_rounds} federated round{'s' if num_rounds != 1 else ''} · "
+            + ", ".join(dataset_names)
+            + (f" · {total_samples_seen:,} samples" if total_samples_seen > 0 else "")
+        )
 
         model_manifest = {
-            "name": f"Model '{artifact_id}' - datasets: {', '.join(datasets)}",
-            "description": description
-            or f"Trained models based on artifact '{artifact_id}' using datasets: {', '.join(datasets)}.",
-            "model_artifact_id": artifact_id,
-            "data_info": dataset_info,
+            "name": f"Tabula model — {', '.join(dataset_names)}",
+            "description": description or auto_description,
+            "model_type": "whole_tabula",
+            "client_name": self.client_name,
+            "client_id": self.client_id,
+            "num_rounds": num_rounds,
+            "total_samples_seen": total_samples_seen,
+            "dataset_info": dataset_info,
         }
 
         # Read checkpoint file into memory
         checkpoint_content = checkpoint.read_bytes()
 
-        # Ensure collections exists
+        # Ensure collection exists — always create a new artifact per save
         collection_id = await self._create_collection()
+        artifact = await self.artifact_manager.create(
+            type="model",
+            parent_id=collection_id,
+            manifest=model_manifest,
+            stage=True,
+        )
 
-        if self.model_upload_artifact_id is None:
-            # Create the model artifact and put it in stage mode
-            artifact = await self.artifact_manager.create(
-                type="model",
-                parent_id=collection_id,
-                manifest=model_manifest,
-                stage=True,
-            )
-            self.model_upload_artifact_id = artifact.id
-        else:
-            # Put artifact in stage mode
-            artifact = await self.artifact_manager.edit(
-                artifact_id=self.model_upload_artifact_id,
-                stage=True,
-            )
-
-        # Upload the weights file and training history
+        # Upload model.pth and training_history.json
         weights_upload_url = await self.artifact_manager.put_file(
-            artifact.id, file_path=f"round_{server_round}/{checkpoint_name}"
+            artifact.id, file_path="model.pth"
         )
         history_upload_url = await self.artifact_manager.put_file(
-            artifact.id, file_path=f"round_{server_round}/training_history.json"
+            artifact.id, file_path="training_history.json"
         )
 
         timeout = httpx.Timeout(upload_timeout)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.put(
-                    weights_upload_url, content=checkpoint_content
-                )
+                response = await client.put(weights_upload_url, content=checkpoint_content)
                 response.raise_for_status()
-
                 response = await client.put(
                     history_upload_url,
-                    data=json.dumps(self.local_client.training_history, indent=4),
+                    content=json.dumps(self.local_client.training_history, indent=2).encode(),
                 )
+                response.raise_for_status()
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to upload file '{checkpoint_name}' to artifact '{artifact.id}': {e}"
-            )
+            raise RuntimeError(f"Failed to upload model to artifact '{artifact.id}': {e}")
 
-        # Commit the artifact
         await self.artifact_manager.commit(artifact.id)
-
+        logger.info(f"Published whole Tabula model to artifact {artifact.id}")
         return artifact.id
 
 

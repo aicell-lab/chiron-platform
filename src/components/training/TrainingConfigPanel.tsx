@@ -20,7 +20,7 @@ interface TrainerParams {
 interface ArtifactEntry {
   id: string;
   alias: string;
-  manifest: { name?: string };
+  manifest: { name?: string; model_type?: string; num_rounds?: number; datasets?: {name: string}[] };
 }
 
 interface TrainingConfigPanelProps {
@@ -40,7 +40,7 @@ interface TrainingConfigPanelProps {
   onConfigChange?: (numRounds: number, perRoundTimeoutMinutes: number) => void;
 }
 
-const PRETRAINED_COLLECTION = 'chiron-platform/pretrained-weights';
+const CHIRON_MODELS_COLLECTION = 'chiron-platform/chiron-models';
 
 const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   params,
@@ -80,23 +80,26 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     onConfigChange?.(numRounds, perRoundTimeoutMinutes);
   }, [numRounds, perRoundTimeoutMinutes]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch artifacts from pretrained-weights collection when toggle is turned on
+  // Fetch global transformer weight artifacts from chiron-models collection
   const fetchArtifacts = useCallback(async () => {
     if (!artifactManager) return;
     setArtifactsLoading(true);
     setArtifactsError(null);
     try {
       const result = await artifactManager.list({
-        parent_id: PRETRAINED_COLLECTION,
+        parent_id: CHIRON_MODELS_COLLECTION,
         limit: 100,
         _rkwargs: true,
       });
-      setArtifacts(result || []);
-      if (result?.length > 0) {
-        setSelectedArtifactId(result[0].id);
+      const globalWeights = (result || []).filter(
+        (a: ArtifactEntry) => a.manifest?.model_type === 'global_transformer'
+      );
+      setArtifacts(globalWeights);
+      if (globalWeights.length > 0) {
+        setSelectedArtifactId(globalWeights[0].id);
       }
     } catch (e: any) {
-      setArtifactsError('Failed to load pretrained artifacts');
+      setArtifactsError('Failed to load global transformer weights');
     } finally {
       setArtifactsLoading(false);
     }
@@ -106,30 +109,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     if (usePretrainedWeights) fetchArtifacts();
   }, [usePretrainedWeights]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch .pth files when selected artifact changes
-  useEffect(() => {
-    if (!selectedArtifactId || !artifactManager) return;
-    setFilesLoading(true);
-    setWeightFiles([]);
-    setSelectedFilePath('');
-    (async () => {
-      try {
-        const files: { name: string; type: string }[] = await artifactManager.list_files({
-          artifact_id: selectedArtifactId,
-          _rkwargs: true,
-        });
-        const pthFiles = (files || [])
-          .filter((f: any) => (f.name || f).endsWith('.pth'))
-          .map((f: any) => f.name || f);
-        setWeightFiles(pthFiles);
-        if (pthFiles.length > 0) setSelectedFilePath(pthFiles[0]);
-      } catch {
-        setWeightFiles([]);
-      } finally {
-        setFilesLoading(false);
-      }
-    })();
-  }, [selectedArtifactId, artifactManager]);
+  // Global transformer weight artifacts always use model.pth — no file picker needed.
 
   // Initialize values with defaults when params change
   useEffect(() => {
@@ -327,8 +307,8 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
       fit_config,
       eval_config,
       per_round_timeout: perRoundTimeoutMinutes * 60,
-      initial_weights: usePretrainedWeights && selectedArtifactId && selectedFilePath
-        ? { artifact_id: selectedArtifactId, file_path: selectedFilePath }
+      initial_weights: usePretrainedWeights && selectedArtifactId
+        ? { artifact_id: selectedArtifactId, file_path: 'model.pth' }
         : null,
     });
   };
@@ -420,45 +400,29 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
                 <button onClick={fetchArtifacts} className="text-xs text-blue-600 hover:underline">Retry</button>
               </div>
             ) : artifacts.length === 0 ? (
-              <p className="text-xs text-gray-400 italic">No artifacts found in {PRETRAINED_COLLECTION}</p>
+              <p className="text-xs text-gray-400 italic">No global transformer weights in chiron-models yet</p>
             ) : (
-              <>
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Checkpoint artifact</label>
-                  <select
-                    value={selectedArtifactId}
-                    onChange={e => setSelectedArtifactId(e.target.value)}
-                    className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-                  >
-                    {artifacts.map(a => (
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">Checkpoint</label>
+                <select
+                  value={selectedArtifactId}
+                  onChange={e => setSelectedArtifactId(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                >
+                  {artifacts.map(a => {
+                    const datasets = a.manifest?.datasets?.map(d => d.name).join(', ') || '';
+                    const rounds = a.manifest?.num_rounds;
+                    const label = a.manifest?.name || a.alias || a.id;
+                    const sub = [rounds ? `${rounds} rounds` : '', datasets].filter(Boolean).join(' · ');
+                    return (
                       <option key={a.id} value={a.id}>
-                        {a.manifest?.name || a.alias || a.id}
+                        {label}{sub ? ` — ${sub}` : ''}
                       </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-gray-700 mb-1">Weights file</label>
-                  {filesLoading ? (
-                    <div className="flex items-center gap-2 text-xs text-gray-400">
-                      <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-400" />
-                      Loading files…
-                    </div>
-                  ) : weightFiles.length === 0 ? (
-                    <p className="text-xs text-gray-400 italic">No .pth files found in this artifact</p>
-                  ) : (
-                    <select
-                      value={selectedFilePath}
-                      onChange={e => setSelectedFilePath(e.target.value)}
-                      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-                    >
-                      {weightFiles.map(f => (
-                        <option key={f} value={f}>{f}</option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-              </>
+                    );
+                  })}
+                </select>
+                <p className="text-xs text-gray-400 mt-1">Loads model.pth from the selected artifact</p>
+              </div>
             )}
           </div>
         )}

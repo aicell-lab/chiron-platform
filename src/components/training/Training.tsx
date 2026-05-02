@@ -198,13 +198,10 @@ const Training: React.FC = () => {
   const [resetStateSuccess, setResetStateSuccess] = useState(false);
 
   // Save model weights
-  const [isSavingGlobal, setIsSavingGlobal] = useState(false);
-  const [saveModelDescription, setSaveModelDescription] = useState('');
-  const [savedGlobalArtifactId, setSavedGlobalArtifactId] = useState<string | null>(null);
-  const [savingPublishIds, setSavingPublishIds] = useState<Record<string, boolean>>({});
-  const [savingLocalIds, setSavingLocalIds] = useState<Record<string, boolean>>({});
-  const [savedPublishArtifactIds, setSavedPublishArtifactIds] = useState<Record<string, string>>({});
-  const [savedLocalPaths, setSavedLocalPaths] = useState<Record<string, string>>({});
+  // Save Weights state — keyed by 'global', 'publish-{svcId}', 'local-{svcId}'
+  const [saveDescriptions, setSaveDescriptions] = useState<Record<string, string>>({});
+  const [saveStatuses, setSaveStatuses] = useState<Record<string, 'idle'|'saving'|'success'|'duplicate'>>({});
+  const [savedItems, setSavedItems] = useState<Record<string, {artifactId?: string; path?: string; description: string; round?: number}>>({});
 
   const [trainerParams, setTrainerParams] = useState<any>(null);
   const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
@@ -1002,65 +999,74 @@ const Training: React.FC = () => {
     }
   };
 
-  const saveTrainerPublish = async (trainerServiceId: string) => {
+  const setSaveStatus = (key: string, status: 'idle'|'saving'|'success'|'duplicate', timeoutMs?: number) => {
+    setSaveStatuses(p => ({ ...p, [key]: status }));
+    if (timeoutMs) setTimeout(() => setSaveStatuses(p => ({ ...p, [key]: 'idle' })), timeoutMs);
+  };
+
+  const saveGlobalWeights = async (autoDescription: string) => {
     if (!selectedOrchestrator) return;
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-    setSavingPublishIds(prev => ({ ...prev, [trainerServiceId]: true }));
-    try {
-      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      const artifactIds = await orchestratorService.save_model_weights({
-        client_ids: [trainerServiceId],
-        description: saveModelDescription.trim() || undefined,
-        _rkwargs: true,
-      });
-      const artifactId = Object.values(artifactIds as Record<string, string>)[0] || '';
-      setSavedPublishArtifactIds(prev => ({ ...prev, [trainerServiceId]: artifactId }));
-    } catch (error) {
-      setErrorPopupMessage('Failed to Publish Trainer Model');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
-      setShowErrorPopup(true);
-    } finally {
-      setSavingPublishIds(prev => ({ ...prev, [trainerServiceId]: false }));
+    const desc = saveDescriptions['global'] || autoDescription;
+    const currentRound = trainingHistory?.training_losses?.length ?? 0;
+    const prev = savedItems['global'];
+    if (prev && prev.description === desc && prev.round === currentRound) {
+      setSaveStatus('global', 'duplicate', 4000); return;
     }
-  };
-
-  const saveTrainerLocal = async (trainerServiceId: string) => {
-    setSavingLocalIds(prev => ({ ...prev, [trainerServiceId]: true }));
+    setSaveStatus('global', 'saving');
     try {
-      const trainerService = await server.getService(trainerServiceId);
-      const savedPath = await trainerService.save_local_model({
-        description: saveModelDescription.trim() || undefined,
-        _rkwargs: true,
-      });
-      setSavedLocalPaths(prev => ({ ...prev, [trainerServiceId]: savedPath as string }));
-    } catch (error) {
-      setErrorPopupMessage('Failed to Save Model Locally');
-      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
-      setShowErrorPopup(true);
-    } finally {
-      setSavingLocalIds(prev => ({ ...prev, [trainerServiceId]: false }));
-    }
-  };
-
-  const saveGlobalWeights = async () => {
-    if (!selectedOrchestrator) return;
-    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
-    if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-    setIsSavingGlobal(true);
-    try {
-      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      const artifactId = await orchestratorService.save_global_weights({
-        description: saveModelDescription.trim() || undefined,
-        _rkwargs: true,
-      });
-      setSavedGlobalArtifactId(artifactId);
+      const orchSvc = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+      const artifactId = await orchSvc.save_global_weights({ description: desc, _rkwargs: true });
+      setSavedItems(p => ({ ...p, 'global': { artifactId, description: desc, round: currentRound } }));
+      setSaveStatus('global', 'success');
     } catch (error) {
       setErrorPopupMessage('Failed to Save Global Weights');
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
       setShowErrorPopup(true);
-    } finally {
-      setIsSavingGlobal(false);
+      setSaveStatus('global', 'idle');
+    }
+  };
+
+  const saveTrainerPublish = async (svcId: string, autoDescription: string) => {
+    if (!selectedOrchestrator) return;
+    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+    const key = `publish-${svcId}`;
+    const desc = saveDescriptions[key] || autoDescription;
+    const prev = savedItems[key];
+    if (prev && prev.description === desc) { setSaveStatus(key, 'duplicate', 4000); return; }
+    setSaveStatus(key, 'saving');
+    try {
+      const orchSvc = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+      const artifactIds = await orchSvc.save_model_weights({ client_ids: [svcId], description: desc, _rkwargs: true });
+      const artifactId = Object.values(artifactIds as Record<string, string>)[0] || '';
+      setSavedItems(p => ({ ...p, [key]: { artifactId, description: desc } }));
+      setSaveStatus(key, 'success');
+    } catch (error) {
+      setErrorPopupMessage('Failed to Publish Trainer Model');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setShowErrorPopup(true);
+      setSaveStatus(key, 'idle');
+    }
+  };
+
+  const saveTrainerLocal = async (svcId: string, autoDescription: string) => {
+    const key = `local-${svcId}`;
+    const desc = saveDescriptions[key] || autoDescription;
+    const prev = savedItems[key];
+    if (prev && prev.description === desc) { setSaveStatus(key, 'duplicate', 4000); return; }
+    setSaveStatus(key, 'saving');
+    try {
+      const trainerSvc = await server.getService(svcId);
+      const savedPath = await trainerSvc.save_local_model({ description: desc, _rkwargs: true });
+      setSavedItems(p => ({ ...p, [key]: { path: savedPath as string, description: desc } }));
+      setSaveStatus(key, 'success');
+    } catch (error) {
+      setErrorPopupMessage('Failed to Save Model Locally');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setShowErrorPopup(true);
+      setSaveStatus(key, 'idle');
     }
   };
 
@@ -1836,99 +1842,133 @@ const Training: React.FC = () => {
                 </div>
               )}
 
-              {/* Save Model Weights — shown when there is training history and not actively training */}
-              {!isActivelyTraining && trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0) && (
-                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
-                  <div className="flex items-center gap-2 mb-4">
-                    <div className="w-7 h-7 bg-violet-500 rounded-lg flex items-center justify-center flex-shrink-0">
-                      <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-sm text-gray-900">Save Weights</p>
-                      <p className="text-xs text-gray-400 mt-0.5">Publish to the artifact hub or save locally to the worker.</p>
-                    </div>
-                  </div>
-                  <div className="space-y-3">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Description <span className="text-gray-400 font-normal">(optional)</span></label>
-                      <input type="text" value={saveModelDescription} onChange={e => setSaveModelDescription(e.target.value)}
-                        placeholder="e.g. Round 10 checkpoint — liver + kidney datasets"
-                        className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500" />
-                    </div>
+              {/* Save Weights — shown when there is training history and not actively training */}
+              {!isActivelyTraining && trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0) && (() => {
+                const rounds = trainingHistory.training_losses?.length ?? 0;
+                const registeredTrainerApps = trainers.filter(t =>
+                  t.serviceIds?.[0]?.websocket_service_id && registeredTrainers.includes(t.serviceIds[0].websocket_service_id)
+                );
+                const allDatasets = [...new Set(registeredTrainerApps.flatMap(t =>
+                  Object.values(t.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean)
+                ))];
+                const globalAutoDesc = `${rounds} federated round${rounds !== 1 ? 's' : ''} · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''}: ${allDatasets.join(', ')}`;
 
-                    {/* Global averaged transformer row */}
-                    <div className="rounded-xl border border-gray-200 p-3 space-y-2">
+                const SaveCard = ({ itemKey, title, subtitle, autoDesc, actions }: {
+                  itemKey: string; title: string; subtitle: string; autoDesc: string;
+                  actions: React.ReactNode;
+                }) => {
+                  const status = saveStatuses[itemKey] || 'idle';
+                  const saved = savedItems[itemKey];
+                  const borderCls = status === 'success' ? 'border-emerald-300 bg-emerald-50/30' : status === 'duplicate' ? 'border-amber-300 bg-amber-50/30' : 'border-gray-200';
+                  return (
+                    <div className={`rounded-xl border p-3 space-y-2 transition-colors ${borderCls}`}>
                       <div>
-                        <p className="text-sm font-semibold text-gray-800">Global averaged transformer</p>
-                        <p className="text-xs text-gray-400">FedAvg result · shared across all sites · round {trainingHistory.training_losses?.length ?? 0}</p>
+                        <p className="text-sm font-semibold text-gray-800">{title}</p>
+                        <p className="text-xs text-gray-400">{subtitle}</p>
                       </div>
+                      <input type="text"
+                        value={saveDescriptions[itemKey] ?? ''}
+                        onChange={e => setSaveDescriptions(p => ({ ...p, [itemKey]: e.target.value }))}
+                        onBlur={e => { if (!e.target.value.trim()) setSaveDescriptions(p => ({ ...p, [itemKey]: autoDesc })); }}
+                        placeholder={autoDesc}
+                        className="w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-violet-400 bg-white"
+                      />
                       <div className="flex flex-wrap items-center gap-2">
-                        <button onClick={saveGlobalWeights} disabled={isSavingGlobal}
-                          className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                          {isSavingGlobal
-                            ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" /> Saving…</>
-                            : <><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg> Publish</>}
-                        </button>
-                        {savedGlobalArtifactId && (
-                          <span className="text-xs text-emerald-700 font-mono bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200 truncate max-w-[200px]" title={savedGlobalArtifactId}>✓ {savedGlobalArtifactId}</span>
+                        {actions}
+                        {status === 'success' && saved?.artifactId && (
+                          <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-200 truncate max-w-[200px]" title={saved.artifactId}>✓ {saved.artifactId.split('/').pop()}</span>
+                        )}
+                        {status === 'success' && saved?.path && (
+                          <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-200 truncate max-w-[200px]" title={saved.path}>✓ {saved.path.split('/').slice(-2).join('/')}</span>
+                        )}
+                        {status === 'duplicate' && (
+                          <span className="text-xs text-amber-700 bg-amber-100 px-2 py-1 rounded-lg border border-amber-200">Already saved</span>
                         )}
                       </div>
                     </div>
+                  );
+                };
 
-                    {/* Per-trainer rows */}
-                    {(() => {
-                      const registeredTrainerApps = trainers.filter(t =>
-                        t.serviceIds?.[0]?.websocket_service_id && registeredTrainers.includes(t.serviceIds[0].websocket_service_id)
-                      );
-                      if (registeredTrainerApps.length === 0) return null;
-                      return registeredTrainerApps.map(trainer => {
+                const globalStatus = saveStatuses['global'] || 'idle';
+                const publishSvg = <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg>;
+                const localSvg = <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" /></svg>;
+                const spinner = <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />;
+
+                return (
+                  <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+                    <div className="flex items-center gap-2 mb-4">
+                      <div className="w-7 h-7 bg-violet-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                        {publishSvg && <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg>}
+                      </div>
+                      <div>
+                        <p className="font-semibold text-sm text-gray-900">Save Weights</p>
+                        <p className="text-xs text-gray-400 mt-0.5">Edit each description, then publish to the hub or save locally.</p>
+                      </div>
+                    </div>
+                    <div className="space-y-3">
+                      <SaveCard
+                        itemKey="global"
+                        title="Global averaged transformer"
+                        subtitle={`FedAvg result · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''} · round ${rounds}`}
+                        autoDesc={globalAutoDesc}
+                        actions={
+                          <button onClick={() => saveGlobalWeights(globalAutoDesc)} disabled={globalStatus === 'saving'}
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                            {globalStatus === 'saving' ? <>{spinner} Saving…</> : <>{publishSvg} Publish</>}
+                          </button>
+                        }
+                      />
+                      {registeredTrainerApps.map(trainer => {
                         const svcId = trainer.serviceIds[0].websocket_service_id;
                         const mgr = managers.find(m => m.serviceId === trainer.managerId);
                         const geo = mgr?.workerInfo?.worker_info?.geo_location;
                         const location = geo ? `${geo.region}, ${geo.country_name}` : trainer.managerId.split('/')[1]?.split(':')[0] || trainer.managerId;
                         const datasetNames = Object.values(trainer.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean);
-                        const totalSamples = Object.values(trainer.datasets as Record<string, any>).reduce((sum: number, d: any) => sum + (d.n_samples || 0), 0);
-                        const isPublishing = !!savingPublishIds[svcId];
-                        const isSavingLocally = !!savingLocalIds[svcId];
+                        const clientRounds = trainingHistory.client_training_losses?.[svcId]?.length || rounds;
+                        const autoDesc = `${clientRounds} federated round${clientRounds !== 1 ? 's' : ''} · ${datasetNames.join(', ')}`;
+                        const pubKey = `publish-${svcId}`;
+                        const locKey = `local-${svcId}`;
+                        const pubStatus = saveStatuses[pubKey] || 'idle';
+                        const locStatus = saveStatuses[locKey] || 'idle';
+                        const pubSaved = savedItems[pubKey];
+                        const locSaved = savedItems[locKey];
+                        const borderCls = (st: string) => st === 'success' ? 'border-emerald-300 bg-emerald-50/30' : st === 'duplicate' ? 'border-amber-300 bg-amber-50/30' : 'border-gray-200';
+                        const descKey = `trainer-${svcId}`;
                         return (
                           <div key={svcId} className="rounded-xl border border-gray-200 p-3 space-y-2">
                             <div>
                               <p className="text-sm font-semibold text-gray-800">{location}</p>
-                              <p className="text-xs text-gray-400">
-                                {datasetNames.length > 0 ? datasetNames.join(', ') : 'No datasets'}
-                                {totalSamples > 0 && <span> · {totalSamples.toLocaleString()} samples</span>}
-                                <span className="ml-1 text-gray-300">· full model</span>
-                              </p>
+                              <p className="text-xs text-gray-400">{datasetNames.join(', ') || 'No datasets'}<span className="text-gray-300 ml-1">· full model</span></p>
                             </div>
-                            <div className="flex flex-wrap items-center gap-2">
-                              <button onClick={() => saveTrainerPublish(svcId)} disabled={isPublishing || isSavingLocally}
-                                title="Publish full model (transformer + embedder + heads) to artifact hub"
+                            <input type="text"
+                              value={saveDescriptions[descKey] ?? ''}
+                              onChange={e => setSaveDescriptions(p => ({ ...p, [descKey]: e.target.value }))}
+                              onBlur={e => { if (!e.target.value.trim()) setSaveDescriptions(p => ({ ...p, [descKey]: autoDesc })); }}
+                              placeholder={autoDesc}
+                              className="w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-violet-400 bg-white"
+                            />
+                            <div className={`flex flex-wrap items-center gap-2 rounded-lg p-1.5 -m-1.5 transition-colors ${borderCls(pubStatus === 'idle' ? locStatus : pubStatus)}`}>
+                              <button onClick={() => saveTrainerPublish(svcId, saveDescriptions[descKey] || autoDesc)} disabled={pubStatus === 'saving' || locStatus === 'saving'}
+                                title="Publish full model to chiron-models artifact hub"
                                 className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                                {isPublishing
-                                  ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" /> Saving…</>
-                                  : <><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg> Publish</>}
+                                {pubStatus === 'saving' ? <>{spinner} Saving…</> : <>{publishSvg} Publish</>}
                               </button>
-                              <button onClick={() => saveTrainerLocal(svcId)} disabled={isSavingLocally || isPublishing}
-                                title="Save full model locally on this worker (~/.bioengine/models/) for future training sessions"
+                              <button onClick={() => saveTrainerLocal(svcId, saveDescriptions[descKey] || autoDesc)} disabled={locStatus === 'saving' || pubStatus === 'saving'}
+                                title="Save locally to ~/.bioengine/models/ on this worker"
                                 className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-semibold rounded-lg hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all border border-gray-200">
-                                {isSavingLocally
-                                  ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" /> Saving…</>
-                                  : <><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" /></svg> Save locally</>}
+                                {locStatus === 'saving' ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" /> Saving…</> : <>{localSvg} Save locally</>}
                               </button>
-                              {savedPublishArtifactIds[svcId] && (
-                                <span className="text-xs text-emerald-700 font-mono bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200 truncate max-w-[200px]" title={savedPublishArtifactIds[svcId]}>✓ {savedPublishArtifactIds[svcId]}</span>
-                              )}
-                              {savedLocalPaths[svcId] && (
-                                <span className="text-xs text-emerald-700 font-mono bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200 truncate max-w-[200px]" title={savedLocalPaths[svcId]}>✓ {savedLocalPaths[svcId].split('/').slice(-3).join('/')}</span>
-                              )}
+                              {pubStatus === 'success' && pubSaved?.artifactId && <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded border border-emerald-200 truncate max-w-[180px]" title={pubSaved.artifactId}>✓ {pubSaved.artifactId.split('/').pop()}</span>}
+                              {locStatus === 'success' && locSaved?.path && <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded border border-emerald-200 truncate max-w-[180px]" title={locSaved.path}>✓ {locSaved.path.split('/').slice(-2).join('/')}</span>}
+                              {(pubStatus === 'duplicate' || locStatus === 'duplicate') && <span className="text-xs text-amber-700 bg-amber-100 px-2 py-1 rounded border border-amber-200">Already saved</span>}
                             </div>
                           </div>
                         );
-                      });
-                    })()}
+                      })}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               <div className="flex justify-start">
                 <button onClick={() => setCurrentStep(2)} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors">

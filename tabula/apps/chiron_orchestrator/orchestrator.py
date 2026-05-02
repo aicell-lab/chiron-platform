@@ -1231,34 +1231,40 @@ class FederatedTrainingOrchestrator:
             "participating_trainers": trainer_sections,
         }
 
-        # ── ensure pretrained-weights collection exists ───────────────────────────
+        # ── ensure chiron-models collection exists ────────────────────────────────
         artifact_manager = await self.hypha_client.get_service("public/artifact-manager")
         workspace = self.hypha_client.config.workspace
-        collection_id = f"{workspace}/pretrained-weights"
+        collection_id = f"{workspace}/chiron-models"
         try:
             await artifact_manager.read(collection_id)
         except Exception as e:
             if "does not exist" in str(e):
                 await artifact_manager.create(
                     type="collection",
-                    alias="pretrained-weights",
-                    manifest={"name": "Pretrained Weights",
-                               "description": "Aggregated transformer checkpoints from federated training runs."},
+                    alias="chiron-models",
+                    manifest={"name": "Chiron Models",
+                               "description": "Trained model artifacts from federated learning runs."},
                 )
             else:
                 raise
 
+        # ── auto-generate description ─────────────────────────────────────────────
+        dataset_names = [ds["name"] for ds in datasets_in_manifest]
+        num_sites = len(trainer_sections)
+        auto_description = (
+            f"{round_num} federated round{'s' if round_num != 1 else ''} · "
+            f"{num_sites} site{'s' if num_sites != 1 else ''}: "
+            + ", ".join(dataset_names)
+        )
+
         # ── create artifact with enriched manifest ────────────────────────────────
         manifest = {
             "name": f"Global transformer weights — round {round_num}",
-            "description": description or (
-                f"Aggregated transformer weights after {round_num} federated rounds "
-                f"across {len(trainer_sections)} site(s) / "
-                f"{len(datasets_in_manifest)} dataset(s)."
-            ),
+            "description": description or auto_description,
+            "model_type": "global_transformer",
             "round": round_num,
             "num_rounds": round_num,
-            "num_sites": len(trainer_sections),
+            "num_sites": num_sites,
             "total_train_samples": total_train_samples,
             "datasets": datasets_in_manifest,
         }
@@ -1266,11 +1272,9 @@ class FederatedTrainingOrchestrator:
             type="model", parent_id=collection_id, manifest=manifest, stage=True
         )
 
-        # ── upload weights + history ──────────────────────────────────────────────
-        file_name = f"transformer-round={round_num}.pth"
-        history_name = "training_history.json"
-        weights_url = await artifact_manager.put_file(artifact.id, file_path=file_name)
-        history_url = await artifact_manager.put_file(artifact.id, file_path=history_name)
+        # ── upload weights (model.pth) + history ─────────────────────────────────
+        weights_url = await artifact_manager.put_file(artifact.id, file_path="model.pth")
+        history_url = await artifact_manager.put_file(artifact.id, file_path="training_history.json")
 
         timeout = httpx.Timeout(upload_timeout)
         async with httpx.AsyncClient(timeout=timeout) as http:
@@ -1281,7 +1285,7 @@ class FederatedTrainingOrchestrator:
             r.raise_for_status()
 
         await artifact_manager.commit(artifact.id)
-        logger.info(f"Saved global transformer weights to artifact {artifact.id} ({file_name})")
+        logger.info(f"Saved global transformer weights to artifact {artifact.id} (model.pth)")
         return artifact.id
 
     def _build_training_history_dict(self) -> dict:

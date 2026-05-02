@@ -636,3 +636,30 @@ class FederatedTrainingManager:
 
         results.sort(key=lambda x: x.get("saved_at") or "", reverse=True)
         return results
+
+    @schema_method
+    async def clear_local_model_weights(self) -> List[str]:
+        """Delete all locally saved model weight directories on this worker.
+
+        Removes every subdirectory under ~/.bioengine/models/ and returns a
+        list of the deleted paths.
+        """
+        import shutil
+        app_home = Path(os.environ.get("HOME", os.path.expanduser("~")))
+        if app_home.parent.name == "apps" and app_home.parent.parent.name == ".bioengine":
+            bioengine_root = app_home.parent.parent
+        else:
+            bioengine_root = app_home / ".bioengine"
+        models_dir = bioengine_root / "models"
+
+        deleted: List[str] = []
+        if not models_dir.exists():
+            return deleted
+
+        for entry in sorted(models_dir.iterdir()):
+            if entry.is_dir():
+                shutil.rmtree(entry)
+                deleted.append(str(entry))
+
+        logger.info(f"Cleared {len(deleted)} local model weight directory(ies)")
+        return deleted
