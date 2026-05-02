@@ -198,11 +198,13 @@ const Training: React.FC = () => {
   const [resetStateSuccess, setResetStateSuccess] = useState(false);
 
   // Save model weights
-  const [isSavingModel, setIsSavingModel] = useState(false);
   const [isSavingGlobal, setIsSavingGlobal] = useState(false);
   const [saveModelDescription, setSaveModelDescription] = useState('');
-  const [savedModelArtifactIds, setSavedModelArtifactIds] = useState<Record<string, string> | null>(null);
   const [savedGlobalArtifactId, setSavedGlobalArtifactId] = useState<string | null>(null);
+  const [savingPublishIds, setSavingPublishIds] = useState<Record<string, boolean>>({});
+  const [savingLocalIds, setSavingLocalIds] = useState<Record<string, boolean>>({});
+  const [savedPublishArtifactIds, setSavedPublishArtifactIds] = useState<Record<string, string>>({});
+  const [savedLocalPaths, setSavedLocalPaths] = useState<Record<string, string>>({});
 
   const [trainerParams, setTrainerParams] = useState<any>(null);
   const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
@@ -1000,25 +1002,44 @@ const Training: React.FC = () => {
     }
   };
 
-  const saveModelWeights = async () => {
+  const saveTrainerPublish = async (trainerServiceId: string) => {
     if (!selectedOrchestrator) return;
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-    setIsSavingModel(true);
+    setSavingPublishIds(prev => ({ ...prev, [trainerServiceId]: true }));
     try {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       const artifactIds = await orchestratorService.save_model_weights({
-        client_ids: 'all',
+        client_ids: [trainerServiceId],
         description: saveModelDescription.trim() || undefined,
         _rkwargs: true,
       });
-      setSavedModelArtifactIds(artifactIds);
+      const artifactId = Object.values(artifactIds as Record<string, string>)[0] || '';
+      setSavedPublishArtifactIds(prev => ({ ...prev, [trainerServiceId]: artifactId }));
     } catch (error) {
-      setErrorPopupMessage('Failed to Save Model Weights');
+      setErrorPopupMessage('Failed to Publish Trainer Model');
       setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
       setShowErrorPopup(true);
     } finally {
-      setIsSavingModel(false);
+      setSavingPublishIds(prev => ({ ...prev, [trainerServiceId]: false }));
+    }
+  };
+
+  const saveTrainerLocal = async (trainerServiceId: string) => {
+    setSavingLocalIds(prev => ({ ...prev, [trainerServiceId]: true }));
+    try {
+      const trainerService = await server.getService(trainerServiceId);
+      const savedPath = await trainerService.save_local_model({
+        description: saveModelDescription.trim() || undefined,
+        _rkwargs: true,
+      });
+      setSavedLocalPaths(prev => ({ ...prev, [trainerServiceId]: savedPath as string }));
+    } catch (error) {
+      setErrorPopupMessage('Failed to Save Model Locally');
+      setErrorPopupDetails(error instanceof Error ? error.message : 'Unknown error');
+      setShowErrorPopup(true);
+    } finally {
+      setSavingLocalIds(prev => ({ ...prev, [trainerServiceId]: false }));
     }
   };
 
@@ -1815,7 +1836,7 @@ const Training: React.FC = () => {
                 </div>
               )}
 
-              {/* Save Model Weights — shown when there is training history and not actively training on this orchestrator */}
+              {/* Save Model Weights — shown when there is training history and not actively training */}
               {!isActivelyTraining && trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0) && (
                 <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
                   <div className="flex items-center gap-2 mb-4">
@@ -1823,61 +1844,88 @@ const Training: React.FC = () => {
                       <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg>
                     </div>
                     <div>
-                      <p className="font-semibold text-sm text-gray-900">Save Model Weights</p>
-                      <p className="text-xs text-gray-400 mt-0.5">Publish the trained weights from all clients to the artifact hub.</p>
+                      <p className="font-semibold text-sm text-gray-900">Save Weights</p>
+                      <p className="text-xs text-gray-400 mt-0.5">Publish to the artifact hub or save locally to the worker.</p>
                     </div>
                   </div>
                   <div className="space-y-3">
                     <div>
                       <label className="block text-xs font-medium text-gray-700 mb-1">Description <span className="text-gray-400 font-normal">(optional)</span></label>
-                      <input
-                        type="text"
-                        value={saveModelDescription}
-                        onChange={e => setSaveModelDescription(e.target.value)}
+                      <input type="text" value={saveModelDescription} onChange={e => setSaveModelDescription(e.target.value)}
                         placeholder="e.g. Round 10 checkpoint — liver + kidney datasets"
-                        className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500"
-                      />
+                        className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500" />
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        onClick={saveGlobalWeights}
-                        disabled={isSavingGlobal || isSavingModel}
-                        title="Save aggregated transformer weights from the orchestrator — portable across clients"
-                        className="flex items-center gap-2 px-4 py-2 bg-violet-600 text-white text-sm font-semibold rounded-xl hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                      >
-                        {isSavingGlobal ? (
-                          <><div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" /> Saving...</>
-                        ) : (
-                          <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg> Save Global Transformer</>
+
+                    {/* Global averaged transformer row */}
+                    <div className="rounded-xl border border-gray-200 p-3 space-y-2">
+                      <div>
+                        <p className="text-sm font-semibold text-gray-800">Global averaged transformer</p>
+                        <p className="text-xs text-gray-400">FedAvg result · shared across all sites · round {trainingHistory.training_losses?.length ?? 0}</p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button onClick={saveGlobalWeights} disabled={isSavingGlobal}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                          {isSavingGlobal
+                            ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" /> Saving…</>
+                            : <><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg> Publish</>}
+                        </button>
+                        {savedGlobalArtifactId && (
+                          <span className="text-xs text-emerald-700 font-mono bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200 truncate max-w-[200px]" title={savedGlobalArtifactId}>✓ {savedGlobalArtifactId}</span>
                         )}
-                      </button>
-                      <button
-                        onClick={saveModelWeights}
-                        disabled={isSavingModel || isSavingGlobal}
-                        title="Save full model checkpoint (transformer + embedder) for each client — client-specific"
-                        className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 text-sm font-semibold rounded-xl hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all border border-gray-200"
-                      >
-                        {isSavingModel ? (
-                          <><div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-gray-500" /> Saving...</>
-                        ) : (
-                          <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg> Save All Clients</>
-                        )}
-                      </button>
+                      </div>
                     </div>
-                    {savedGlobalArtifactId && (
-                      <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3">
-                        <p className="text-xs font-semibold text-emerald-800 mb-0.5">Global transformer saved</p>
-                        <p className="text-xs text-emerald-700 font-mono">{savedGlobalArtifactId}</p>
-                      </div>
-                    )}
-                    {savedModelArtifactIds && (
-                      <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 space-y-1">
-                        <p className="text-xs font-semibold text-emerald-800 mb-1">Client checkpoints saved</p>
-                        {Object.entries(savedModelArtifactIds).map(([cid, id]) => (
-                          <p key={cid} className="text-xs text-emerald-700 font-mono">{cid}: {id}</p>
-                        ))}
-                      </div>
-                    )}
+
+                    {/* Per-trainer rows */}
+                    {(() => {
+                      const registeredTrainerApps = trainers.filter(t =>
+                        t.serviceIds?.[0]?.websocket_service_id && registeredTrainers.includes(t.serviceIds[0].websocket_service_id)
+                      );
+                      if (registeredTrainerApps.length === 0) return null;
+                      return registeredTrainerApps.map(trainer => {
+                        const svcId = trainer.serviceIds[0].websocket_service_id;
+                        const mgr = managers.find(m => m.serviceId === trainer.managerId);
+                        const geo = mgr?.workerInfo?.worker_info?.geo_location;
+                        const location = geo ? `${geo.region}, ${geo.country_name}` : trainer.managerId.split('/')[1]?.split(':')[0] || trainer.managerId;
+                        const datasetNames = Object.values(trainer.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean);
+                        const totalSamples = Object.values(trainer.datasets as Record<string, any>).reduce((sum: number, d: any) => sum + (d.n_samples || 0), 0);
+                        const isPublishing = !!savingPublishIds[svcId];
+                        const isSavingLocally = !!savingLocalIds[svcId];
+                        return (
+                          <div key={svcId} className="rounded-xl border border-gray-200 p-3 space-y-2">
+                            <div>
+                              <p className="text-sm font-semibold text-gray-800">{location}</p>
+                              <p className="text-xs text-gray-400">
+                                {datasetNames.length > 0 ? datasetNames.join(', ') : 'No datasets'}
+                                {totalSamples > 0 && <span> · {totalSamples.toLocaleString()} samples</span>}
+                                <span className="ml-1 text-gray-300">· full model</span>
+                              </p>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button onClick={() => saveTrainerPublish(svcId)} disabled={isPublishing || isSavingLocally}
+                                title="Publish full model (transformer + embedder + heads) to artifact hub"
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                                {isPublishing
+                                  ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" /> Saving…</>
+                                  : <><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg> Publish</>}
+                              </button>
+                              <button onClick={() => saveTrainerLocal(svcId)} disabled={isSavingLocally || isPublishing}
+                                title="Save full model locally on this worker (~/.bioengine/models/) for future training sessions"
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-semibold rounded-lg hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all border border-gray-200">
+                                {isSavingLocally
+                                  ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" /> Saving…</>
+                                  : <><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" /></svg> Save locally</>}
+                              </button>
+                              {savedPublishArtifactIds[svcId] && (
+                                <span className="text-xs text-emerald-700 font-mono bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200 truncate max-w-[200px]" title={savedPublishArtifactIds[svcId]}>✓ {savedPublishArtifactIds[svcId]}</span>
+                              )}
+                              {savedLocalPaths[svcId] && (
+                                <span className="text-xs text-emerald-700 font-mono bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200 truncate max-w-[200px]" title={savedLocalPaths[svcId]}>✓ {savedLocalPaths[svcId].split('/').slice(-3).join('/')}</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      });
+                    })()}
                   </div>
                 </div>
               )}
