@@ -180,6 +180,7 @@ const Training: React.FC = () => {
   const [localModelWeights, setLocalModelWeights] = useState<Array<{path: string; client_name: string; saved_at: string | null; description: string | null; datasets: Record<string, any>; train_samples: number}> | null>(null);
   const [selectedWeightsPath, setSelectedWeightsPath] = useState<string | null>(null);
   const [isLoadingLocalWeights, setIsLoadingLocalWeights] = useState(false);
+  const [isWeightsDropdownOpen, setIsWeightsDropdownOpen] = useState(false);
 
   const [workerTimers, setWorkerTimers] = useState<Record<string, NodeJS.Timeout>>({});
   const [datasetTimers, setDatasetTimers] = useState<Record<string, NodeJS.Timeout>>({});
@@ -669,7 +670,7 @@ const Training: React.FC = () => {
       const trainerParams: Record<string, any> = { token: applicationToken, datasets: newTrainerDatasets, trainer_artifact_id: newTrainerArtifactId, owner_id: ownerId, _rkwargs: true };
       if (selectedWeightsPath) trainerParams.pretrained_weights_path = selectedWeightsPath;
       await manager.service.create_trainer(trainerParams);
-      setShowCreateTrainer(false); setShowLaunchDialog(false); setCreatingFor(null); setNewTrainerDatasets([]); setLocalModelWeights(null); setSelectedWeightsPath(null); setIsCreatingTrainer(false);
+      setShowCreateTrainer(false); setShowLaunchDialog(false); setCreatingFor(null); setNewTrainerDatasets([]); setLocalModelWeights(null); setSelectedWeightsPath(null); setIsWeightsDropdownOpen(false); setIsCreatingTrainer(false);
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
     } catch (error) {
@@ -1897,7 +1898,7 @@ const Training: React.FC = () => {
                 <h3 className="font-semibold text-gray-900">Launch Application</h3>
                 <p className="text-xs text-gray-500 mt-0.5 font-mono">{launchDialogManagerId.split('/')[1]?.split(':')[0] || launchDialogManagerId}</p>
               </div>
-              <button onClick={() => { setShowLaunchDialog(false); setLaunchDialogManagerId(null); setNewTrainerDatasets([]); setLocalModelWeights(null); setSelectedWeightsPath(null); }} className="text-gray-400 hover:text-gray-600 p-1">
+              <button onClick={() => { setShowLaunchDialog(false); setLaunchDialogManagerId(null); setNewTrainerDatasets([]); setLocalModelWeights(null); setSelectedWeightsPath(null); setIsWeightsDropdownOpen(false); }} className="text-gray-400 hover:text-gray-600 p-1">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
@@ -1966,32 +1967,55 @@ const Training: React.FC = () => {
                       <div className="flex items-center gap-2 text-xs text-gray-400 py-2"><BiLoaderAlt className="animate-spin" size={12} /> Loading saved weights…</div>
                     ) : localModelWeights === null ? (
                       <p className="text-xs text-gray-400">Switch to Trainer tab to load available weights.</p>
-                    ) : (
-                      <div className="border border-gray-200 rounded-lg divide-y divide-gray-50 max-h-40 overflow-y-auto">
-                        <label className="flex items-start gap-2.5 px-3 py-2.5 hover:bg-gray-50 cursor-pointer">
-                          <input type="radio" name="local-weights" checked={selectedWeightsPath === null} onChange={() => setSelectedWeightsPath(null)} className="accent-emerald-600 flex-shrink-0 mt-0.5" />
-                          <span className="text-sm text-gray-700">Start fresh</span>
-                        </label>
-                        {localModelWeights.length === 0 && (
-                          <p className="text-xs text-gray-400 text-center py-3">No saved weights on this worker yet.</p>
-                        )}
-                        {localModelWeights.map(w => {
-                          const datasetNames = Object.values(w.datasets).map((d: any) => d.name || '').filter(Boolean);
-                          const savedDate = w.saved_at ? new Date(w.saved_at).toLocaleDateString() : null;
-                          return (
-                            <label key={w.path} className="flex items-start gap-2.5 px-3 py-2.5 hover:bg-gray-50 cursor-pointer">
-                              <input type="radio" name="local-weights" checked={selectedWeightsPath === w.path} onChange={() => setSelectedWeightsPath(w.path)} className="accent-emerald-600 flex-shrink-0 mt-0.5" />
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm text-gray-800 truncate">{w.client_name}</p>
-                                {datasetNames.length > 0 && <p className="text-xs text-gray-500 mt-0.5">{datasetNames.join(', ')} · {w.train_samples.toLocaleString()} samples</p>}
-                                {w.description && <p className="text-xs text-gray-400 mt-0.5 italic truncate">{w.description}</p>}
-                                {savedDate && <p className="text-xs text-gray-400">{savedDate}</p>}
+                    ) : (() => {
+                      const selected = localModelWeights.find(w => w.path === selectedWeightsPath);
+                      const selectedDatasets = selected ? Object.values(selected.datasets).map((d: any) => d.name || '').filter(Boolean) : [];
+                      const selectedDate = selected?.saved_at ? new Date(selected.saved_at).toLocaleDateString() : null;
+                      return (
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={() => setIsWeightsDropdownOpen(o => !o)}
+                            className="w-full text-left px-3 py-2 border border-gray-200 rounded-lg bg-white hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+                          >
+                            {selected ? (
+                              <div>
+                                <p className="text-sm text-gray-800">{selectedDate && <span className="mr-1">{selectedDate}</span>}{selectedDatasets.join(', ')}{selected.train_samples > 0 && <span className="text-gray-500"> · {selected.train_samples.toLocaleString()} samples</span>}</p>
+                                <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{selected.client_name}</p>
                               </div>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    )}
+                            ) : (
+                              <span className="text-sm text-gray-500">Start fresh (no pretrained weights)</span>
+                            )}
+                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">▾</span>
+                          </button>
+                          {isWeightsDropdownOpen && (
+                            <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg overflow-hidden">
+                              <div className="max-h-52 overflow-y-auto divide-y divide-gray-50">
+                                <button type="button" onClick={() => { setSelectedWeightsPath(null); setIsWeightsDropdownOpen(false); }}
+                                  className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === null ? 'bg-emerald-50' : ''}`}>
+                                  <span className="text-sm text-gray-700">Start fresh</span>
+                                </button>
+                                {localModelWeights.length === 0 && (
+                                  <p className="text-xs text-gray-400 text-center py-3 px-3">No saved weights on this worker yet.</p>
+                                )}
+                                {localModelWeights.map(w => {
+                                  const names = Object.values(w.datasets).map((d: any) => d.name || '').filter(Boolean);
+                                  const date = w.saved_at ? new Date(w.saved_at).toLocaleDateString() : null;
+                                  return (
+                                    <button key={w.path} type="button"
+                                      onClick={() => { setSelectedWeightsPath(w.path); setIsWeightsDropdownOpen(false); }}
+                                      className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === w.path ? 'bg-emerald-50' : ''}`}>
+                                      <p className="text-sm text-gray-800">{date && <span className="mr-1">{date}</span>}{names.join(', ')}{w.train_samples > 0 && <span className="text-gray-500"> · {w.train_samples.toLocaleString()} samples</span>}</p>
+                                      <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{w.client_name}</p>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainer || newTrainerDatasets.length === 0} className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                     {isCreatingTrainer ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Trainer ({newTrainerDatasets.length} dataset{newTrainerDatasets.length !== 1 ? 's' : ''})</>}
