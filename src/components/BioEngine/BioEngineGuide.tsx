@@ -139,17 +139,19 @@ const BioEngineGuide: React.FC = () => {
       `--head-memory-in-gb ${memory}`,
       '--startup-applications "{\\"artifact_id\\": \\"chiron-platform/chiron-manager\\", \\"application_id\\": \\"chiron-manager\\"}"',
       adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
-      workspace ? `--workspace ${workspace}` : '',
+      workspace ? `--workspace "${workspace}"` : '',
       workerName ? `--worker-name "${workerName}"` : '',
-      clientId ? `--client-id ${clientId}` : '',
-      serverUrl ? `--server-url ${serverUrl}` : '',
-      '--dashboard-url https://chiron.aicell.io/#/worker',
+      clientId ? `--client-id "${clientId}"` : '',
+      serverUrl ? `--server-url "${serverUrl}"` : '',
+      '--dashboard-url "https://chiron.aicell.io/#/worker"',
     ].filter(Boolean).join(`\n${indent}`);
   };
 
   const getDockerComposeContent = () => {
     const imageToUse = customImage || DEFAULT_IMAGE;
     const workspaceDirPath = getWorkspaceDirPath();
+    const workerSlug = (workerName || 'bioengine-worker')
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
     const platformLine = platformOverride ? `\n    platform: ${platformOverride}` : '';
 
     // GPU configuration
@@ -182,15 +184,15 @@ const BioEngineGuide: React.FC = () => {
     // Data-server service — only included when a data directory is configured.
     // The data-server requires --data-dir and will fail without it.
     const dataServerService = dataDir ? `  data-server:
-    image: ${imageToUse}${platformLine}
-    container_name: bioengine-data-server
+    image: "${imageToUse}"${platformLine}
+    container_name: ${workerSlug}-data-server
     user: "\${UID}:\${GID}"
     volumes:
-      - ${workspaceDirPath}:/home/.bioengine
-      - ${dataDir}:/data
+      - "${workspaceDirPath}:/home/.bioengine"
+      - "${dataDir}:/data"
     environment:
-      - HOME=/home
-      - TZ=${timezone || 'UTC'}
+      - HOME="/home"
+      - TZ="${timezone || 'UTC'}"
     command: >
       python -m tabula.datasets
       --data-dir /data
@@ -211,20 +213,18 @@ const BioEngineGuide: React.FC = () => {
         condition: service_healthy
 ` : '';
 
-    return `version: "3.8"
-
-services:
+    return `services:
 ${dataServerService}  worker:
-    image: ${imageToUse}${platformLine}
-    container_name: bioengine-worker
+    image: "${imageToUse}"${platformLine}
+    container_name: ${workerSlug}-worker
     user: "\${UID}:\${GID}"
     shm_size: ${shmSize}
     volumes:
-      - ${workspaceDirPath}:/home/.bioengine${dataDir ? `\n      - ${dataDir}:/data` : ''}
+      - "${workspaceDirPath}:/home/.bioengine"${dataDir ? `\n      - "${dataDir}:/data"` : ''}
     environment:
-      - HOME=/home
-      - HYPHA_TOKEN=\${HYPHA_TOKEN}
-      - TZ=${timezone || 'UTC'}
+      - HOME="/home"
+      - HYPHA_TOKEN="\${HYPHA_TOKEN}"
+      - TZ="${timezone || 'UTC'}"
     command: >
       python -m bioengine.worker
       ${workerArgs}
@@ -290,11 +290,11 @@ ${bin} pull ${sif} ${image}`;
       `--head-memory-in-gb ${memory}`,
       `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}'`,
       adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
-      workspace ? `--workspace ${workspace}` : '',
+      workspace ? `--workspace "${workspace}"` : '',
       workerName ? `--worker-name "${workerName}"` : '',
-      clientId ? `--client-id ${clientId}` : '',
-      serverUrl ? `--server-url ${serverUrl}` : '',
-      '--dashboard-url https://chiron.aicell.io/#/worker',
+      clientId ? `--client-id "${clientId}"` : '',
+      serverUrl ? `--server-url "${serverUrl}"` : '',
+      '--dashboard-url "https://chiron.aicell.io/#/worker"',
     ].filter(Boolean);
     const workerArgsStr = workerArgsList.join(' \\\n  ');
 
