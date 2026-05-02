@@ -124,6 +124,7 @@ Remember:
   // Handle data channel messages
   const handleDataChannelMessage = useCallback(async (e: MessageEvent) => {
     try {
+      if (e.data instanceof ArrayBuffer || e.data instanceof Blob) return;
       const msg = JSON.parse(e.data);
       console.log('Received message:', msg);
       
