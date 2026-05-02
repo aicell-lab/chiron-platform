@@ -191,8 +191,8 @@ const BioEngineGuide: React.FC = () => {
       - "${workspaceDirPath}:/home/.bioengine"
       - "${dataDir}:/data"
     environment:
-      - HOME="/home"
-      - TZ="${timezone || 'UTC'}"
+      - HOME=/home
+      - TZ=${timezone || 'UTC'}
     command: >
       python -m tabula.datasets
       --data-dir /data
@@ -222,9 +222,9 @@ ${dataServerService}  worker:
     volumes:
       - "${workspaceDirPath}:/home/.bioengine"${dataDir ? `\n      - "${dataDir}:/data"` : ''}
     environment:
-      - HOME="/home"
-      - HYPHA_TOKEN="\${HYPHA_TOKEN}"
-      - TZ="${timezone || 'UTC'}"
+      - HOME=/home
+      - HYPHA_TOKEN=\${HYPHA_TOKEN}
+      - TZ=${timezone || 'UTC'}
     command: >
       python -m bioengine.worker
       ${workerArgs}
