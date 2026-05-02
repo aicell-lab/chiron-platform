@@ -177,6 +177,9 @@ const Training: React.FC = () => {
   const [newOrchestratorArtifactId, setNewOrchestratorArtifactId] = useState('chiron-platform/chiron-orchestrator');
   const [newTrainerDatasets, setNewTrainerDatasets] = useState<string[]>([]);
   const [newTrainerArtifactId, setNewTrainerArtifactId] = useState('chiron-platform/tabula-trainer');
+  const [localModelWeights, setLocalModelWeights] = useState<Array<{path: string; client_name: string; saved_at: string | null; description: string | null; datasets: Record<string, any>; train_samples: number}> | null>(null);
+  const [selectedWeightsPath, setSelectedWeightsPath] = useState<string | null>(null);
+  const [isLoadingLocalWeights, setIsLoadingLocalWeights] = useState(false);
 
   const [workerTimers, setWorkerTimers] = useState<Record<string, NodeJS.Timeout>>({});
   const [datasetTimers, setDatasetTimers] = useState<Record<string, NodeJS.Timeout>>({});
@@ -663,8 +666,10 @@ const Training: React.FC = () => {
     try {
       const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
       const ownerId = user?.id as string | undefined;
-      await manager.service.create_trainer({ token: applicationToken, datasets: newTrainerDatasets, trainer_artifact_id: newTrainerArtifactId, owner_id: ownerId, _rkwargs: true });
-      setShowCreateTrainer(false); setShowLaunchDialog(false); setCreatingFor(null); setNewTrainerDatasets([]); setIsCreatingTrainer(false);
+      const trainerParams: Record<string, any> = { token: applicationToken, datasets: newTrainerDatasets, trainer_artifact_id: newTrainerArtifactId, owner_id: ownerId, _rkwargs: true };
+      if (selectedWeightsPath) trainerParams.pretrained_weights_path = selectedWeightsPath;
+      await manager.service.create_trainer(trainerParams);
+      setShowCreateTrainer(false); setShowLaunchDialog(false); setCreatingFor(null); setNewTrainerDatasets([]); setLocalModelWeights(null); setSelectedWeightsPath(null); setIsCreatingTrainer(false);
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
     } catch (error) {
@@ -1892,14 +1897,24 @@ const Training: React.FC = () => {
                 <h3 className="font-semibold text-gray-900">Launch Application</h3>
                 <p className="text-xs text-gray-500 mt-0.5 font-mono">{launchDialogManagerId.split('/')[1]?.split(':')[0] || launchDialogManagerId}</p>
               </div>
-              <button onClick={() => { setShowLaunchDialog(false); setLaunchDialogManagerId(null); setNewTrainerDatasets([]); }} className="text-gray-400 hover:text-gray-600 p-1">
+              <button onClick={() => { setShowLaunchDialog(false); setLaunchDialogManagerId(null); setNewTrainerDatasets([]); setLocalModelWeights(null); setSelectedWeightsPath(null); }} className="text-gray-400 hover:text-gray-600 p-1">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
             {/* Tabs */}
             <div className="flex border-b border-gray-100">
               {(['orchestrator', 'trainer'] as const).map(tab => (
-                <button key={tab} onClick={() => setLaunchDialogTab(tab)} className={`flex-1 py-3 text-sm font-medium transition-colors capitalize ${launchDialogTab === tab ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'}`}>
+                <button key={tab} onClick={async () => {
+                  setLaunchDialogTab(tab);
+                  if (tab === 'trainer' && localModelWeights === null && launchDialogManagerId) {
+                    const mgr = managers.find(m => m.serviceId === launchDialogManagerId);
+                    if (mgr?.service) {
+                      setIsLoadingLocalWeights(true);
+                      try { setLocalModelWeights(await mgr.service.list_local_model_weights()); } catch { setLocalModelWeights([]); }
+                      setIsLoadingLocalWeights(false);
+                    }
+                  }
+                }} className={`flex-1 py-3 text-sm font-medium transition-colors capitalize ${launchDialogTab === tab ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'}`}>
                   {tab === 'orchestrator' ? '🎭 Orchestrator' : '🏋 Trainer'}
                 </button>
               ))}
@@ -1943,6 +1958,40 @@ const Training: React.FC = () => {
                   <div>
                     <label className="block text-xs font-semibold text-gray-700 mb-1.5">Artifact ID</label>
                     <input type="text" value={newTrainerArtifactId} onChange={e => setNewTrainerArtifactId(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="chiron-platform/tabula-trainer" />
+                  </div>
+                  {/* Pretrained weights selection */}
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Pretrained weights <span className="text-gray-400 font-normal">(optional)</span></label>
+                    {isLoadingLocalWeights ? (
+                      <div className="flex items-center gap-2 text-xs text-gray-400 py-2"><BiLoaderAlt className="animate-spin" size={12} /> Loading saved weights…</div>
+                    ) : localModelWeights === null ? (
+                      <p className="text-xs text-gray-400">Switch to Trainer tab to load available weights.</p>
+                    ) : (
+                      <div className="border border-gray-200 rounded-lg divide-y divide-gray-50 max-h-40 overflow-y-auto">
+                        <label className="flex items-start gap-2.5 px-3 py-2.5 hover:bg-gray-50 cursor-pointer">
+                          <input type="radio" name="local-weights" checked={selectedWeightsPath === null} onChange={() => setSelectedWeightsPath(null)} className="accent-emerald-600 flex-shrink-0 mt-0.5" />
+                          <span className="text-sm text-gray-700">Start fresh</span>
+                        </label>
+                        {localModelWeights.length === 0 && (
+                          <p className="text-xs text-gray-400 text-center py-3">No saved weights on this worker yet.</p>
+                        )}
+                        {localModelWeights.map(w => {
+                          const datasetNames = Object.values(w.datasets).map((d: any) => d.name || '').filter(Boolean);
+                          const savedDate = w.saved_at ? new Date(w.saved_at).toLocaleDateString() : null;
+                          return (
+                            <label key={w.path} className="flex items-start gap-2.5 px-3 py-2.5 hover:bg-gray-50 cursor-pointer">
+                              <input type="radio" name="local-weights" checked={selectedWeightsPath === w.path} onChange={() => setSelectedWeightsPath(w.path)} className="accent-emerald-600 flex-shrink-0 mt-0.5" />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm text-gray-800 truncate">{w.client_name}</p>
+                                {datasetNames.length > 0 && <p className="text-xs text-gray-500 mt-0.5">{datasetNames.join(', ')} · {w.train_samples.toLocaleString()} samples</p>}
+                                {w.description && <p className="text-xs text-gray-400 mt-0.5 italic truncate">{w.description}</p>}
+                                {savedDate && <p className="text-xs text-gray-400">{savedDate}</p>}
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                   <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainer || newTrainerDatasets.length === 0} className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                     {isCreatingTrainer ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Trainer ({newTrainerDatasets.length} dataset{newTrainerDatasets.length !== 1 ? 's' : ''})</>}

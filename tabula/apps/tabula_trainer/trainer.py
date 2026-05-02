@@ -598,6 +598,7 @@ class TabulaTrainer:
         datasets: List[str],
         client_id: Optional[str] = None,
         client_name: Optional[str] = None,
+        pretrained_weights_path: Optional[str] = None,
     ):
         """
         Flower Client for Federated Learning
@@ -608,6 +609,7 @@ class TabulaTrainer:
         # Set client_id and client_name
         self.client_id = client_id or str(uuid.uuid4())
         self.client_name = client_name or self.client_id
+        self.pretrained_weights_path = pretrained_weights_path
 
         # Device and model config
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -698,22 +700,14 @@ class TabulaTrainer:
         # Initialize FederatedClient for the first time
         await self._init_federated_client()
 
-        # Auto-load local model checkpoint if one was previously saved.
-        # This restores the embedder and projection heads from the last saved state.
-        # The shared transformer weights will be overwritten by global parameters at
-        # the start of the first training round, so loading them here is harmless.
-        local_model_path = self._local_model_dir / "model.pth"
-        if local_model_path.exists():
+        # Load pretrained weights if a path was specified at deployment time.
+        if self.pretrained_weights_path:
+            weights_path = Path(self.pretrained_weights_path)
             try:
-                self.local_client.load_weights(local_model_path)
-                meta_path = local_model_path.parent / "metadata.json"
-                meta_info = ""
-                if meta_path.exists():
-                    meta = json.loads(meta_path.read_text())
-                    meta_info = f" (saved {meta.get('saved_at','?')}, {meta.get('train_samples',0)} train samples)"
-                logger.info(f"Loaded local model from {local_model_path}{meta_info}")
+                self.local_client.load_weights(weights_path)
+                logger.info(f"Loaded pretrained weights from {weights_path}")
             except Exception as e:
-                logger.warning(f"Could not load local model from {local_model_path}: {e}")
+                logger.warning(f"Could not load pretrained weights from {weights_path}: {e}")
 
     async def test_deployment(self):
 
@@ -1002,10 +996,9 @@ class TabulaTrainer:
         - model.pth       — full model state_dict (all components)
         - metadata.json   — dataset info, training history, timestamp
 
-        When the trainer app is (re)started it automatically loads this checkpoint,
-        giving the embedder and projection heads their previously learned weights.
-        The transformer weights are then overwritten by the global parameters at the
-        start of the first training round.
+        Use list_local_model_weights() to discover saved checkpoints and pass the
+        desired path via the pretrained_weights_path parameter when deploying a new
+        trainer to restore the embedder and projection heads from a prior run.
 
         Returns the path of the saved model file as a string.
         """
@@ -1038,6 +1031,55 @@ class TabulaTrainer:
 
         logger.info(f"Saved local model to {model_path}")
         return str(model_path)
+
+    @schema_method
+    async def list_local_model_weights(self) -> List[dict]:
+        """List available local model weight files on this worker.
+
+        Scans ~/.bioengine/models/ for saved model checkpoints and returns
+        metadata for each, including the datasets they were trained on.
+        """
+        app_home = Path(os.environ.get("HOME", os.path.expanduser("~")))
+        if app_home.parent.name == "apps" and app_home.parent.parent.name == ".bioengine":
+            bioengine_root = app_home.parent.parent
+        else:
+            bioengine_root = app_home / ".bioengine"
+        models_dir = bioengine_root / "models"
+
+        results: List[dict] = []
+        if not models_dir.exists():
+            return results
+
+        for model_dir in sorted(models_dir.iterdir()):
+            if not model_dir.is_dir():
+                continue
+            model_path = model_dir / "model.pth"
+            if not model_path.exists():
+                continue
+
+            entry: dict = {
+                "path": str(model_path),
+                "client_name": model_dir.name,
+                "saved_at": None,
+                "description": None,
+                "datasets": {},
+                "train_samples": 0,
+            }
+            meta_path = model_dir / "metadata.json"
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text())
+                    entry["client_name"] = meta.get("client_name", model_dir.name)
+                    entry["saved_at"] = meta.get("saved_at")
+                    entry["description"] = meta.get("description")
+                    entry["datasets"] = meta.get("datasets", {})
+                    entry["train_samples"] = meta.get("train_samples", 0)
+                except Exception:
+                    pass
+            results.append(entry)
+
+        results.sort(key=lambda x: x.get("saved_at") or "", reverse=True)
+        return results
 
     @schema_method
     async def reset_training_state(self) -> Dict[str, Union[bool, str]]:
