@@ -99,6 +99,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
         setSelectedArtifactId(globalWeights[0].id);
       }
     } catch (e: any) {
+      console.error('Failed to load global transformer weights:', e);
       setArtifactsError('Failed to load global transformer weights');
     } finally {
       setArtifactsLoading(false);
@@ -377,7 +378,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
         <div className="flex items-center justify-between mb-3">
           <div>
             <label className="block text-xs font-semibold text-gray-700">Start from Pretrained Weights</label>
-            <p className="text-xs text-gray-400 mt-0.5">Load transformer weights from a prior run or published checkpoint before round 1.</p>
+            <p className="text-xs text-gray-400 mt-0.5">Load published transformer weights as the starting point before round 1.</p>
           </div>
           <button
             type="button"
