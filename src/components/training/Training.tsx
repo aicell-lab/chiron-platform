@@ -863,6 +863,19 @@ const Training: React.FC = () => {
     } catch { /* silent */ } finally { setIsLoadingRegisteredTrainers(false); }
   };
 
+  const unregisterRemoteTrainer = async (trainerServiceId: string) => {
+    if (!selectedOrchestrator) return;
+    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+    try {
+      setIsLoadingRegisteredTrainers(true);
+      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+      await orchestratorService.remove_trainer(trainerServiceId);
+      const registeredServiceIds = await orchestratorService.list_trainers();
+      setRegisteredTrainers(registeredServiceIds);
+    } catch { /* silent */ } finally { setIsLoadingRegisteredTrainers(false); }
+  };
+
   useEffect(() => {
     const fetchRegisteredTrainers = async () => {
       if (!selectedOrchestrator) { setRegisteredTrainers([]); return; }
@@ -940,8 +953,8 @@ const Training: React.FC = () => {
       const launchedFrom = selectedOrchestrator!;
       setIsPreparingTraining(false); setIsTraining(true); setTrainingOrchestratorId(launchedFrom); setTrainingConfigCollapsed(true);
       window.scrollTo({ top: 0, behavior: 'smooth' });
-      setSavedModelArtifactIds(null);
-      setSavedGlobalArtifactId(null);
+      setSavedItems({});
+      setSaveStatuses({});
       const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, _rkwargs: true };
       if (config.initial_weights) trainingParams.initial_weights = config.initial_weights;
       orchestratorService.start_training(trainingParams).catch((error: Error) => {
@@ -1597,61 +1610,100 @@ const Training: React.FC = () => {
                         <p className="text-sm font-medium">Select an orchestrator first</p>
                       </div>
                     )}
-                    {selectedOrchestrator && trainers.filter(t => t.status === 'RUNNING').length === 0 && (
-                      <div className="text-center py-8 text-gray-400">
-                        <FaClock className="mx-auto mb-2 opacity-40" size={24} />
-                        <p className="text-sm">No running trainers</p>
-                        <p className="text-xs mt-1">Launch trainers from the Setup step</p>
-                      </div>
-                    )}
-                    {selectedOrchestrator && trainers.filter(t => t.status === 'RUNNING').map(trainer => {
-                      const trainerId = `${trainer.managerId}::${trainer.appId}`;
-                      const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
-                      const isRegistered = registeredTrainers.includes(trainerServiceId);
-                      // Busy in another session = busy but not already registered here
-                      const isBusyElsewhere = trainer.isBusy && !isRegistered;
-                      const isDisabled = !selectedOrchestrator || isLoadingRegisteredTrainers || isBusyElsewhere;
-                      const manager = managers.find(m => m.serviceId === trainer.managerId);
-                      const geo = manager?.workerInfo?.worker_info?.geo_location;
-                      const datasetNames = Object.values(trainer.datasets).map((d: any) => d.name || Object.keys(trainer.datasets).find(k => trainer.datasets[k] === d)).filter(Boolean);
-                      const isTrainerHighlighted = highlightedWorkerIds.includes(trainer.managerId);
-                      const trainerBorder = isRegistered ? 'border-emerald-400' : isBusyElsewhere ? 'border-amber-200' : isTrainerHighlighted ? 'border-violet-400' : 'border-transparent hover:border-gray-200';
-                      const trainerBg = isRegistered ? (isTrainerHighlighted ? 'bg-violet-50' : 'bg-emerald-50/60') : isBusyElsewhere ? 'bg-amber-50/40' : isTrainerHighlighted ? 'bg-violet-50' : 'bg-gray-50';
-                      // Resolve which orchestrator/worker this trainer is registered to (for tooltip)
-                      const regOrch = isBusyElsewhere && trainer.registeredOrchestratorId
-                        ? orchestrators.find(o => o.serviceIds[0]?.websocket_service_id === trainer.registeredOrchestratorId)
-                        : undefined;
-                      const regOrchManager = regOrch ? managers.find(m => m.serviceId === regOrch.managerId) : undefined;
-                      const regOrchWorkerName = regOrchManager?.workerInfo?.worker_info?.name || regOrch?.managerId?.split('/')[1]?.split(':')[0];
-                      const regOrchGeo = regOrchManager?.workerInfo?.worker_info?.geo_location;
+                    {(() => {
+                      const connectedRunningTrainers = trainers.filter(t => t.status === 'RUNNING');
+                      const connectedSvcIds = new Set(connectedRunningTrainers.map(t => t.serviceIds[0]?.websocket_service_id).filter(Boolean));
+                      const remoteRegisteredSvcIds = selectedOrchestrator
+                        ? registeredTrainers.filter(svcId => !connectedSvcIds.has(svcId))
+                        : [];
                       return (
-                        <label key={trainerId} data-managerid={trainer.managerId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${trainerBorder} ${trainerBg}`}>
-                          <input type="checkbox" checked={isRegistered} disabled={isDisabled} onChange={async e => { e.target.checked ? await registerTrainer(trainerId) : await unregisterTrainer(trainerId); }} className="mt-0.5 accent-emerald-600" />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <p className="font-medium text-gray-900 text-sm leading-tight">{trainer.displayName || 'Tabula Trainer'}</p>
-                              {trainer.isBusy && (
-                                isBusyElsewhere && trainer.registeredOrchestratorId ? (
-                                  <span className="relative group/busytip">
-                                    <BusyBadge />
-                                    <div className="absolute left-0 top-full mt-1.5 z-50 hidden group-hover/busytip:block w-64 bg-gray-900 text-white text-xs rounded-xl shadow-xl p-3 pointer-events-none">
-                                      <p className="font-semibold mb-1.5 text-amber-300">Registered to orchestrator</p>
-                                      {regOrchWorkerName && <p className="mb-0.5"><span className="text-gray-400">Worker:</span> {regOrchWorkerName}</p>}
-                                      {regOrchGeo && <p className="mb-0.5"><span className="text-gray-400">Location:</span> {regOrchGeo.region}, {regOrchGeo.country_name}</p>}
-                                      <p className="text-gray-400 break-all mt-1 leading-snug">{trainer.registeredOrchestratorId}</p>
-                                    </div>
-                                  </span>
-                                ) : <BusyBadge />
-                              )}
+                        <>
+                          {selectedOrchestrator && connectedRunningTrainers.length === 0 && remoteRegisteredSvcIds.length === 0 && (
+                            <div className="text-center py-8 text-gray-400">
+                              <FaClock className="mx-auto mb-2 opacity-40" size={24} />
+                              <p className="text-sm">No running trainers</p>
+                              <p className="text-xs mt-1">Launch trainers from the Setup step</p>
                             </div>
-                            {geo && <p className="text-xs text-gray-500 mt-0.5">{geo.region}, {geo.country_name}</p>}
-                            {datasetNames.length > 0 && <p className="text-xs text-gray-400 mt-0.5 truncate">{datasetNames.join(', ')}</p>}
-                            {isBusyElsewhere && <p className="text-xs text-amber-600 mt-0.5">In an active training session</p>}
-                          </div>
-                          {isRegistered && <FaCheckCircle className="text-emerald-500 flex-shrink-0 mt-0.5" size={14} />}
-                        </label>
+                          )}
+                          {selectedOrchestrator && connectedRunningTrainers.map(trainer => {
+                            const trainerId = `${trainer.managerId}::${trainer.appId}`;
+                            const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
+                            const isRegistered = registeredTrainers.includes(trainerServiceId);
+                            const isBusyElsewhere = trainer.isBusy && !isRegistered;
+                            const isDisabled = !selectedOrchestrator || isLoadingRegisteredTrainers || isBusyElsewhere;
+                            const manager = managers.find(m => m.serviceId === trainer.managerId);
+                            const geo = manager?.workerInfo?.worker_info?.geo_location;
+                            const datasetNames = Object.values(trainer.datasets).map((d: any) => d.name || Object.keys(trainer.datasets).find(k => trainer.datasets[k] === d)).filter(Boolean);
+                            const isTrainerHighlighted = highlightedWorkerIds.includes(trainer.managerId);
+                            const trainerBorder = isRegistered ? 'border-emerald-400' : isBusyElsewhere ? 'border-amber-200' : isTrainerHighlighted ? 'border-violet-400' : 'border-transparent hover:border-gray-200';
+                            const trainerBg = isRegistered ? (isTrainerHighlighted ? 'bg-violet-50' : 'bg-emerald-50/60') : isBusyElsewhere ? 'bg-amber-50/40' : isTrainerHighlighted ? 'bg-violet-50' : 'bg-gray-50';
+                            const regOrch = isBusyElsewhere && trainer.registeredOrchestratorId
+                              ? orchestrators.find(o => o.serviceIds[0]?.websocket_service_id === trainer.registeredOrchestratorId)
+                              : undefined;
+                            const regOrchManager = regOrch ? managers.find(m => m.serviceId === regOrch.managerId) : undefined;
+                            const regOrchWorkerName = regOrchManager?.workerInfo?.worker_info?.name || regOrch?.managerId?.split('/')[1]?.split(':')[0];
+                            const regOrchGeo = regOrchManager?.workerInfo?.worker_info?.geo_location;
+                            return (
+                              <label key={trainerId} data-managerid={trainer.managerId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 transition-all ${isDisabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${trainerBorder} ${trainerBg}`}>
+                                <input type="checkbox" checked={isRegistered} disabled={isDisabled} onChange={async e => { e.target.checked ? await registerTrainer(trainerId) : await unregisterTrainer(trainerId); }} className="mt-0.5 accent-emerald-600" />
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <p className="font-medium text-gray-900 text-sm leading-tight">{trainer.displayName || 'Tabula Trainer'}</p>
+                                    {trainer.isBusy && (
+                                      isBusyElsewhere && trainer.registeredOrchestratorId ? (
+                                        <span className="relative group/busytip">
+                                          <BusyBadge />
+                                          <div className="absolute left-0 top-full mt-1.5 z-50 hidden group-hover/busytip:block w-64 bg-gray-900 text-white text-xs rounded-xl shadow-xl p-3 pointer-events-none">
+                                            <p className="font-semibold mb-1.5 text-amber-300">Registered to orchestrator</p>
+                                            {regOrchWorkerName && <p className="mb-0.5"><span className="text-gray-400">Worker:</span> {regOrchWorkerName}</p>}
+                                            {regOrchGeo && <p className="mb-0.5"><span className="text-gray-400">Location:</span> {regOrchGeo.region}, {regOrchGeo.country_name}</p>}
+                                            <p className="text-gray-400 break-all mt-1 leading-snug">{trainer.registeredOrchestratorId}</p>
+                                          </div>
+                                        </span>
+                                      ) : <BusyBadge />
+                                    )}
+                                  </div>
+                                  {geo && <p className="text-xs text-gray-500 mt-0.5">{geo.region}, {geo.country_name}</p>}
+                                  {datasetNames.length > 0 && <p className="text-xs text-gray-400 mt-0.5 truncate">{datasetNames.join(', ')}</p>}
+                                  {isBusyElsewhere && <p className="text-xs text-amber-600 mt-0.5">In an active training session</p>}
+                                </div>
+                                {isRegistered && <FaCheckCircle className="text-emerald-500 flex-shrink-0 mt-0.5" size={14} />}
+                              </label>
+                            );
+                          })}
+                          {selectedOrchestrator && remoteRegisteredSvcIds.length > 0 && (
+                            <>
+                              {connectedRunningTrainers.length > 0 && (
+                                <div className="flex items-center gap-2 pt-1">
+                                  <div className="flex-1 border-t border-gray-100" />
+                                  <span className="text-xs text-gray-400 flex-shrink-0">worker not connected</span>
+                                  <div className="flex-1 border-t border-gray-100" />
+                                </div>
+                              )}
+                              {remoteRegisteredSvcIds.map(svcId => {
+                                const shortId = svcId.split('/').slice(1).join('/').split('@')[0];
+                                return (
+                                  <label key={svcId} className={`flex items-start gap-3 p-3.5 rounded-xl border-2 border-emerald-300 bg-emerald-50/40 ${isLoadingRegisteredTrainers ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}>
+                                    <input type="checkbox" checked={true} disabled={isLoadingRegisteredTrainers} onChange={async () => { await unregisterRemoteTrainer(svcId); }} className="mt-0.5 accent-emerald-600" />
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-1.5 flex-wrap">
+                                        <p className="font-medium text-gray-700 text-sm leading-tight">Tabula Trainer</p>
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs bg-gray-100 text-gray-500">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
+                                          Worker offline
+                                        </span>
+                                      </div>
+                                      <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{shortId}</p>
+                                    </div>
+                                    <FaCheckCircle className="text-emerald-400 flex-shrink-0 mt-0.5" size={14} />
+                                  </label>
+                                );
+                              })}
+                            </>
+                          )}
+                        </>
                       );
-                    })}
+                    })()}
                   </div>
                 </div>
               </div>
