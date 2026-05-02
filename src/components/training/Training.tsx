@@ -1124,7 +1124,9 @@ const Training: React.FC = () => {
           const geo = manager.workerInfo?.worker_info?.geo_location;
           if (!geo?.latitude || !geo?.longitude) return [];
           const datasetCount = manager.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0;
-          return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: sessionRole(manager.serviceId), label: `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}` }];
+          const datasetNames3 = manager.workerInfo?.datasets ? Object.values(manager.workerInfo.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean) : [];
+          const datasetLabel3 = datasetCount > 0 ? `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}: ${datasetNames3.join(', ')}` : '0 datasets';
+          return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: sessionRole(manager.serviceId), label: datasetLabel3 }];
         });
     }
 
@@ -1136,7 +1138,9 @@ const Training: React.FC = () => {
         const orchCount = orchestrators.filter(o => o.managerId === manager.serviceId).length;
         const trainerCount = trainers.filter(t => t.managerId === manager.serviceId).length;
         const datasetCount = manager.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0;
-        return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: appRole(manager.serviceId), label: `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}, ${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` }];
+        const datasetNames2 = manager.workerInfo?.datasets ? Object.values(manager.workerInfo.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean) : [];
+        const datasetLabel2 = datasetCount > 0 ? `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}: ${datasetNames2.join(', ')}` : '0 datasets';
+        return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: appRole(manager.serviceId), label: `${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}<br/>${datasetLabel2}` }];
       });
     }
 
