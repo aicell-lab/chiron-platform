@@ -177,7 +177,7 @@ const Training: React.FC = () => {
   const [newOrchestratorArtifactId, setNewOrchestratorArtifactId] = useState('chiron-platform/chiron-orchestrator');
   const [newTrainerDatasets, setNewTrainerDatasets] = useState<string[]>([]);
   const [newTrainerArtifactId, setNewTrainerArtifactId] = useState('chiron-platform/tabula-trainer');
-  const [localModelWeights, setLocalModelWeights] = useState<Array<{path: string; client_name: string; saved_at: string | null; description: string | null; datasets: Record<string, any>; train_samples: number}> | null>(null);
+  const [localModelWeights, setLocalModelWeights] = useState<Array<{path: string; client_name: string; saved_at: string | null; description: string | null; datasets: Record<string, any>; train_samples: number; num_rounds: number; total_samples_seen: number}> | null>(null);
   const [selectedWeightsPath, setSelectedWeightsPath] = useState<string | null>(null);
   const [isLoadingLocalWeights, setIsLoadingLocalWeights] = useState(false);
   const [isWeightsDropdownOpen, setIsWeightsDropdownOpen] = useState(false);
@@ -1944,7 +1944,7 @@ const Training: React.FC = () => {
       {/* ====== LAUNCH APP DIALOG ====== */}
       {showLaunchDialog && launchDialogManagerId && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col max-h-[90vh]">
             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
               <div>
                 <h3 className="font-semibold text-gray-900">Launch Application</h3>
@@ -1972,7 +1972,7 @@ const Training: React.FC = () => {
                 </button>
               ))}
             </div>
-            <div className="p-6">
+            <div className="p-6 overflow-y-auto flex-1">
               {launchDialogTab === 'orchestrator' && (
                 <div className="space-y-4">
                   <div className="text-xs text-gray-500 bg-gray-50 rounded-lg p-3">
@@ -2024,25 +2024,25 @@ const Training: React.FC = () => {
                       const selectedDatasets = selected ? Object.values(selected.datasets).map((d: any) => d.name || '').filter(Boolean) : [];
                       const selectedDate = selected?.saved_at ? new Date(selected.saved_at).toLocaleDateString() : null;
                       return (
-                        <div className="relative">
+                        <div>
                           <button
                             type="button"
                             onClick={() => setIsWeightsDropdownOpen(o => !o)}
-                            className="w-full text-left px-3 py-2 border border-gray-200 rounded-lg bg-white hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+                            className="w-full text-left px-3 py-2 border border-gray-200 rounded-lg bg-white hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors relative"
                           >
                             {selected ? (
-                              <div>
-                                <p className="text-sm text-gray-800">{selectedDate && <span className="mr-1">{selectedDate}</span>}{selectedDatasets.join(', ')}{selected.train_samples > 0 && <span className="text-gray-500"> · {selected.train_samples.toLocaleString()} samples</span>}</p>
+                              <div className="pr-5">
+                                <p className="text-sm text-gray-800">{selectedDate && <span className="mr-1.5">{selectedDate}</span>}{selectedDatasets.join(', ')}{(selected.num_rounds > 0 || selected.total_samples_seen > 0) && <span className="text-gray-500"> · {selected.num_rounds} round{selected.num_rounds !== 1 ? 's' : ''}, {selected.total_samples_seen.toLocaleString()} samples</span>}</p>
                                 <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{selected.client_name}</p>
                               </div>
                             ) : (
-                              <span className="text-sm text-gray-500">Start fresh (no pretrained weights)</span>
+                              <span className="text-sm text-gray-500 pr-5">Start fresh (no pretrained weights)</span>
                             )}
-                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">▾</span>
+                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs">{isWeightsDropdownOpen ? '▴' : '▾'}</span>
                           </button>
                           {isWeightsDropdownOpen && (
-                            <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg overflow-hidden">
-                              <div className="max-h-52 overflow-y-auto divide-y divide-gray-50">
+                            <div className="mt-1 border border-gray-200 rounded-lg overflow-hidden">
+                              <div className="max-h-48 overflow-y-auto divide-y divide-gray-50" onWheel={e => e.stopPropagation()}>
                                 <button type="button" onClick={() => { setSelectedWeightsPath(null); setIsWeightsDropdownOpen(false); }}
                                   className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === null ? 'bg-emerald-50' : ''}`}>
                                   <span className="text-sm text-gray-700">Start fresh</span>
@@ -2057,7 +2057,8 @@ const Training: React.FC = () => {
                                     <button key={w.path} type="button"
                                       onClick={() => { setSelectedWeightsPath(w.path); setIsWeightsDropdownOpen(false); }}
                                       className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === w.path ? 'bg-emerald-50' : ''}`}>
-                                      <p className="text-sm text-gray-800">{date && <span className="mr-1">{date}</span>}{names.join(', ')}{w.train_samples > 0 && <span className="text-gray-500"> · {w.train_samples.toLocaleString()} samples</span>}</p>
+                                      <p className="text-sm text-gray-800">{date && <span className="mr-1.5">{date}</span>}{names.join(', ')}</p>
+                                      <p className="text-xs text-gray-500 mt-0.5">{w.num_rounds > 0 || w.total_samples_seen > 0 ? `${w.num_rounds} round${w.num_rounds !== 1 ? 's' : ''} · ${w.total_samples_seen.toLocaleString()} samples` : 'No training history'}</p>
                                       <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{w.client_name}</p>
                                     </button>
                                   );

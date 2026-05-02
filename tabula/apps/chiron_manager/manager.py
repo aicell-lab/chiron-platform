@@ -613,6 +613,8 @@ class FederatedTrainingManager:
                 "description": None,
                 "datasets": {},
                 "train_samples": 0,
+                "num_rounds": 0,
+                "total_samples_seen": 0,
             }
             meta_path = model_dir / "metadata.json"
             if meta_path.exists():
@@ -623,6 +625,11 @@ class FederatedTrainingManager:
                     entry["description"] = meta.get("description")
                     entry["datasets"] = meta.get("datasets", {})
                     entry["train_samples"] = meta.get("train_samples", 0)
+                    history = meta.get("training_history", {})
+                    train_loss = history.get("train_loss", [])
+                    train_samples_hist = history.get("train_samples", [])
+                    entry["num_rounds"] = len(train_loss)
+                    entry["total_samples_seen"] = sum(v for _, v in train_samples_hist)
                 except Exception:
                     pass
             results.append(entry)
