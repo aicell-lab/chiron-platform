@@ -1395,9 +1395,20 @@ const Training: React.FC = () => {
                     <h2 className="text-base font-semibold text-gray-900">BioEngine Workers</h2>
                     <p className="text-xs text-gray-500 mt-0.5">Workers with Chiron Manager across observed workspaces</p>
                   </div>
-                  {Object.values(wsDiscoveryStatus).some(s => s === 'loading') && (
-                    <BiLoaderAlt className="animate-spin text-blue-500" size={18} />
-                  )}
+                  <div className="flex items-center gap-2">
+                    {Object.values(wsDiscoveryStatus).some(s => s === 'loading') && (
+                      <BiLoaderAlt className="animate-spin text-blue-500" size={18} />
+                    )}
+                    <button
+                      onClick={() => observedWorkspaces.forEach(ws => discoverWorkspace(ws))}
+                      disabled={Object.values(wsDiscoveryStatus).some(s => s === 'loading')}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-500 hover:text-gray-800 hover:bg-gray-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Refresh worker list"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                      Refresh
+                    </button>
+                  </div>
                 </div>
 
                 {!server ? (
