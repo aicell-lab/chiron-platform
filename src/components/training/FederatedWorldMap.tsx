@@ -194,6 +194,9 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
   const mapInstanceRef = useRef<any>(null);
   const markersRef  = useRef<Map<string, any>>(new Map());
   const polylinesRef = useRef<Map<string, any>>(new Map());
+  // True for one microtask after a marker click so the popupclose handler
+  // (fired by Leaflet closing the previous popup) does not clear the new selection.
+  const justSelectedRef = useRef(false);
 
   // Inject pulse CSS once
   useEffect(() => { ensurePulseStyle(); }, []);
@@ -214,6 +217,12 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
         opacity: 0.75,
       }).addTo(mapInstanceRef.current);
+
+      // Clear highlight when a popup is closed (X button or clicking map background),
+      // but not when the close was caused by opening a different marker's popup.
+      mapInstanceRef.current.on('popupclose', () => {
+        if (!justSelectedRef.current && onSelect) onSelect([]);
+      });
     }
 
     const map = mapInstanceRef.current;
@@ -244,7 +253,13 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
       } else {
         const m = L.marker([group.lat, group.lng], { icon, zIndexOffset }).addTo(map).bindPopup(popupHtml);
         if (onSelect) {
-          m.on('click', () => onSelect(group.workers.map((w: MapWorker) => w.id)));
+          m.on('click', () => {
+            // Mark that a selection just happened so the popupclose of the
+            // previously open popup does not immediately clear the new highlight.
+            justSelectedRef.current = true;
+            setTimeout(() => { justSelectedRef.current = false; }, 0);
+            onSelect(group.workers.map((w: MapWorker) => w.id));
+          });
         }
         markersRef.current.set(group.key, m);
       }
