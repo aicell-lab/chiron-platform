@@ -501,8 +501,8 @@ class FederatedTrainingOrchestrator:
             return
 
         async def _ping_loop() -> None:
-            _ping_interval = 60
-            _max_fails = 3
+            _ping_interval = 120
+            _max_fails = 5
             while True:
                 await asyncio.sleep(_ping_interval)
                 # Skip while training is active — the FL loop handles failures itself.
@@ -526,7 +526,7 @@ class FederatedTrainingOrchestrator:
                         if fails >= _max_fails:
                             logger.warning(
                                 f"Trainer '{cid}' unreachable after {_max_fails} consecutive "
-                                "pings — removing from registered trainers."
+                                f"pings (~{_max_fails * _ping_interval // 60} min) — removing from registered trainers."
                             )
                             client = self.client_manager.clients.get(cid)
                             if client is not None:
