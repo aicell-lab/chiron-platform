@@ -1493,6 +1493,11 @@ class TabulaTrainer:
         return self._registered_orchestrator_id
 
     @schema_method
+    async def ping(self) -> bool:
+        """Heartbeat endpoint called by the orchestrator to confirm trainer liveness."""
+        return True
+
+    @schema_method
     async def register_to_orchestrator(
         self,
         orchestrator_service_id: str = Field(

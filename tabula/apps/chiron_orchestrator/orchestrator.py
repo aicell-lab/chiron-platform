@@ -469,6 +469,10 @@ class FederatedTrainingOrchestrator:
         # save_global_weights to build the dataset summary and training history artifact.
         self._trainer_properties: Dict[str, dict] = {}
 
+        # Trainer liveness tracking — ping each registered trainer every 60 s when idle.
+        self._trainer_ping_fails: Dict[str, int] = {}
+        self._trainer_ping_task: Optional[asyncio.Task] = None
+
     # === BioEngine App Method - will be called when the deployment is started ===
 
     async def async_init(self):
@@ -479,11 +483,58 @@ class FederatedTrainingOrchestrator:
             }
         )
         logger.info(f"Connected to Hypha Server at {self._server_url}")
+        self._start_trainer_ping_loop()
 
     async def test_deployment(self):
         pass
 
     # === Ray Serve Health Check Method - will be called periodically to check the health of the deployment ===
+
+    def _start_trainer_ping_loop(self) -> None:
+        """Start a background task that pings each registered trainer every 60 s.
+
+        Trainers that fail to respond 3 times in a row are silently removed from the
+        client_manager. The loop pauses during active training — the FL loop already
+        handles unreachable trainers via fit/evaluate timeouts.
+        """
+        if self._trainer_ping_task is not None and not self._trainer_ping_task.done():
+            return
+
+        async def _ping_loop() -> None:
+            _ping_interval = 60
+            _max_fails = 3
+            while True:
+                await asyncio.sleep(_ping_interval)
+                # Skip while training is active — the FL loop handles failures itself.
+                if self.training_task is not None and not self.training_task.done():
+                    continue
+
+                client_ids = list(self.client_manager.clients.keys())
+                for cid in client_ids:
+                    try:
+                        svc = await asyncio.wait_for(
+                            self.hypha_client.get_service(cid), timeout=10.0
+                        )
+                        await asyncio.wait_for(svc.ping(), timeout=10.0)
+                        self._trainer_ping_fails[cid] = 0
+                    except Exception as e:
+                        fails = self._trainer_ping_fails.get(cid, 0) + 1
+                        self._trainer_ping_fails[cid] = fails
+                        logger.warning(
+                            f"Trainer ping failed for '{cid}' ({fails}/{_max_fails}): {e}"
+                        )
+                        if fails >= _max_fails:
+                            logger.warning(
+                                f"Trainer '{cid}' unreachable after {_max_fails} consecutive "
+                                "pings — removing from registered trainers."
+                            )
+                            client = self.client_manager.clients.get(cid)
+                            if client is not None:
+                                self.client_manager.unregister(client)
+                            self._trainer_ping_fails.pop(cid, None)
+                            self._trainer_properties.pop(cid, None)
+
+        self._trainer_ping_task = asyncio.create_task(_ping_loop())
 
     async def check_health(self) -> None:
         # Test connection to the Hypha server
@@ -813,6 +864,9 @@ class FederatedTrainingOrchestrator:
         except Exception as e:
             logger.warning(f"Could not fetch properties from '{service_id}': {e}")
 
+        # Reset ping-fail counter so a freshly added trainer starts with a clean slate.
+        self._trainer_ping_fails[service_id] = 0
+
         # Mark the trainer as registered to this orchestrator (always, even on re-add)
         await trainer_service.register_to_orchestrator(orchestrator_service_id)
 
@@ -830,6 +884,8 @@ class FederatedTrainingOrchestrator:
             raise ValueError(f"Client with service ID '{service_id}' not found")
 
         self.client_manager.unregister(client)
+        self._trainer_ping_fails.pop(service_id, None)
+        self._trainer_properties.pop(service_id, None)
 
         # Clear trainer registration
         try:

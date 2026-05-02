@@ -1690,7 +1690,7 @@ const Training: React.FC = () => {
                                         <p className="font-medium text-gray-700 text-sm leading-tight">Tabula Trainer</p>
                                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs bg-gray-100 text-gray-500">
                                           <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
-                                          Worker offline
+                                          Worker disconnected
                                         </span>
                                       </div>
                                       <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{shortId}</p>
@@ -1903,7 +1903,7 @@ const Training: React.FC = () => {
                 const allDatasets = [...new Set(registeredTrainerApps.flatMap(t =>
                   Object.values(t.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean)
                 ))];
-                const globalAutoDesc = `${rounds} federated round${rounds !== 1 ? 's' : ''} · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''}: ${allDatasets.join(', ')}`;
+                const globalAutoDesc = `Tabula transformer · ${rounds} federated round${rounds !== 1 ? 's' : ''} · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''}: ${allDatasets.join(', ')}`;
 
                 const SaveCard = ({ itemKey, title, subtitle, autoDesc, actions }: {
                   itemKey: string; title: string; subtitle: string; autoDesc: string;
@@ -1919,10 +1919,9 @@ const Training: React.FC = () => {
                         <p className="text-xs text-gray-400">{subtitle}</p>
                       </div>
                       <input type="text"
-                        value={saveDescriptions[itemKey] ?? ''}
+                        value={saveDescriptions[itemKey] ?? autoDesc}
                         onChange={e => setSaveDescriptions(p => ({ ...p, [itemKey]: e.target.value }))}
-                        onBlur={e => { if (!e.target.value.trim()) setSaveDescriptions(p => ({ ...p, [itemKey]: autoDesc })); }}
-                        placeholder={autoDesc}
+                        onBlur={e => { if (!e.target.value.trim()) setSaveDescriptions(p => { const n = { ...p }; delete n[itemKey]; return n; }); }}
                         className="w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-violet-400 bg-white"
                       />
                       <div className="flex flex-wrap items-center gap-2">
@@ -1977,7 +1976,7 @@ const Training: React.FC = () => {
                         const location = geo ? `${geo.region}, ${geo.country_name}` : trainer.managerId.split('/')[1]?.split(':')[0] || trainer.managerId;
                         const datasetNames = Object.values(trainer.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean);
                         const clientRounds = trainingHistory.client_training_losses?.[svcId]?.length || rounds;
-                        const autoDesc = `${clientRounds} federated round${clientRounds !== 1 ? 's' : ''} · ${datasetNames.join(', ')}`;
+                        const autoDesc = `Tabula model (embedder + transformer + heads) · ${clientRounds} federated round${clientRounds !== 1 ? 's' : ''} · ${datasetNames.join(', ')}`;
                         const pubKey = `publish-${svcId}`;
                         const locKey = `local-${svcId}`;
                         const pubStatus = saveStatuses[pubKey] || 'idle';
@@ -1993,10 +1992,9 @@ const Training: React.FC = () => {
                               <p className="text-xs text-gray-400">{datasetNames.join(', ') || 'No datasets'}<span className="text-gray-300 ml-1">· full model</span></p>
                             </div>
                             <input type="text"
-                              value={saveDescriptions[descKey] ?? ''}
+                              value={saveDescriptions[descKey] ?? autoDesc}
                               onChange={e => setSaveDescriptions(p => ({ ...p, [descKey]: e.target.value }))}
-                              onBlur={e => { if (!e.target.value.trim()) setSaveDescriptions(p => ({ ...p, [descKey]: autoDesc })); }}
-                              placeholder={autoDesc}
+                              onBlur={e => { if (!e.target.value.trim()) setSaveDescriptions(p => { const n = { ...p }; delete n[descKey]; return n; }); }}
                               className="w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-violet-400 bg-white"
                             />
                             <div className={`flex flex-wrap items-center gap-2 rounded-lg p-1.5 -m-1.5 transition-colors ${borderCls(pubStatus === 'idle' ? locStatus : pubStatus)}`}>
@@ -2124,7 +2122,7 @@ const Training: React.FC = () => {
                           >
                             {selected ? (
                               <div className="pr-5">
-                                <p className="text-sm text-gray-800">{selectedDate && <span className="mr-1.5">{selectedDate}</span>}{selectedDatasets.join(', ')}{(selected.num_rounds > 0 || selected.total_samples_seen > 0) && <span className="text-gray-500"> · {selected.num_rounds} round{selected.num_rounds !== 1 ? 's' : ''}, {selected.total_samples_seen.toLocaleString()} samples</span>}</p>
+                                <p className="text-sm text-gray-800">{selectedDate && <span className="mr-1.5">{selectedDate}</span>}{selectedDatasets.join(', ')}{(selected.num_rounds > 0 || selected.total_samples_seen > 0) && <span className="text-gray-500"> · {selected.num_rounds} round{selected.num_rounds !== 1 ? 's' : ''}, {selected.total_samples_seen.toLocaleString()} samples seen</span>}</p>
                                 <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{selected.client_name}</p>
                               </div>
                             ) : (
@@ -2150,7 +2148,7 @@ const Training: React.FC = () => {
                                       onClick={() => { setSelectedWeightsPath(w.path); setIsWeightsDropdownOpen(false); }}
                                       className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === w.path ? 'bg-emerald-50' : ''}`}>
                                       <p className="text-sm text-gray-800">{date && <span className="mr-1.5">{date}</span>}{names.join(', ')}</p>
-                                      <p className="text-xs text-gray-500 mt-0.5">{w.num_rounds > 0 || w.total_samples_seen > 0 ? `${w.num_rounds} round${w.num_rounds !== 1 ? 's' : ''} · ${w.total_samples_seen.toLocaleString()} samples` : 'No training history'}</p>
+                                      <p className="text-xs text-gray-500 mt-0.5">{w.num_rounds > 0 || w.total_samples_seen > 0 ? `${w.num_rounds} round${w.num_rounds !== 1 ? 's' : ''} · ${w.total_samples_seen.toLocaleString()} samples seen` : 'No training history'}</p>
                                       <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{w.client_name}</p>
                                     </button>
                                   );
