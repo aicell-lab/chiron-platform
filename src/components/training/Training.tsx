@@ -1161,7 +1161,7 @@ const Training: React.FC = () => {
   const BusyBadge = () => (
     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700 ml-1" title="Currently in an active training session">
       <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-      In Training
+      Busy
     </span>
   );
 

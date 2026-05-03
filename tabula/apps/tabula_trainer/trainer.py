@@ -1187,7 +1187,7 @@ class TabulaTrainer:
             ..., description="A list of NumPy arrays containing the model weights"
         ),
         batch_size: int = Field(
-            32,
+            16,
             description="Batch size to use for training",
         ),
         learning_rate: float = Field(
@@ -1286,7 +1286,7 @@ class TabulaTrainer:
             ..., description="A list of NumPy arrays containing the model weights"
         ),
         batch_size: int = Field(
-            32,
+            16,
             description="Batch size to use for evaluation",
         ),
         limit_val_batches: int = Field(
