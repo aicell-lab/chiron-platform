@@ -108,7 +108,7 @@ interface TrainingStatus {
   current_training_round: number;
   target_round: number;
   stage: TrainingStage;
-  trainers_progress: Record<string, { current_batch: number; total_batches: number; progress: number; error?: string; }>;
+  trainers_progress: Record<string, { status?: string; current_batch: number; total_batches: number; progress: number; error?: string; }>;
 }
 
 const STAGE_LABELS: Record<NonNullable<TrainingStage>, string> = {
@@ -1227,6 +1227,18 @@ const Training: React.FC = () => {
   }, [currentStep, managers, orchestrators, trainers, registeredTrainers, selectedOrchestrator, discoveredWorkers, observedWorkspaces]);
 
   // Annotate mapWorkers with active flag (depends on trainingStatus, kept separate)
+  // Map trainer service ID → managerId for pulse/animation lookups
+  const serviceToManagerId = useMemo<Record<string, string>>(() => {
+    const map: Record<string, string> = {};
+    trainers.forEach(t => {
+      (t.serviceIds || []).forEach((svcObj: any) => {
+        const sid = svcObj?.websocket_service_id;
+        if (sid) map[sid] = t.managerId;
+      });
+    });
+    return map;
+  }, [trainers]);
+
   const mapWorkersWithActive = useMemo<MapWorker[]>(() => {
     if (!isTraining || !trainingStatus?.stage) return mapWorkers;
     const orchObj = selectedOrchestrator
@@ -1236,27 +1248,36 @@ const Training: React.FC = () => {
     const stage = trainingStatus.stage;
     const activeIds = new Set<string>();
     if (stage === 'aggregation' || stage === 'distribution') {
+      // Only orchestrator pulses — it's doing the averaging / distributing weights
       if (orchManagerId) activeIds.add(orchManagerId);
     } else {
-      if (orchManagerId) activeIds.add(orchManagerId);
-      trainers
-        .filter(t => { const s = t.serviceIds?.[0]?.websocket_service_id; return s && registeredTrainers.includes(s); })
-        .forEach(t => activeIds.add(t.managerId));
+      // fit / evaluate: only trainers that are still RUNNING pulse
+      Object.entries(trainingStatus.trainers_progress).forEach(([serviceId, prog]) => {
+        const s = prog.status;
+        if (s === 'RUNNING' || s === 'PENDING') {
+          const managerId = serviceToManagerId[serviceId];
+          if (managerId) activeIds.add(managerId);
+        }
+      });
     }
     return mapWorkers.map(w => activeIds.has(w.id) ? { ...w, active: true } : w);
-  }, [mapWorkers, isTraining, trainingStatus, selectedOrchestrator, orchestrators, trainers, registeredTrainers]);
+  }, [mapWorkers, isTraining, trainingStatus, selectedOrchestrator, orchestrators, serviceToManagerId]);
 
   // Connection lines: selected orchestrator ↔ registered trainers (steps 2 and 3)
+  // animated encodes the current training stage so that polylines are refreshed on stage change.
   const mapConnections = useMemo<MapConnection[]>(() => {
     if (!selectedOrchestrator) return [];
     const orchObj = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchObj) return [];
     const orchManagerId = orchObj.managerId;
+    const stage = trainingStatus?.stage;
+    const animated: MapConnection['animated'] =
+      isTraining && (stage === 'fit' || stage === 'evaluate' || stage === 'distribution') ? stage : undefined;
     return trainers
       .filter(t => { const svcId = t.serviceIds?.[0]?.websocket_service_id; return svcId && registeredTrainers.includes(svcId); })
       .filter(t => t.managerId !== orchManagerId)
-      .map(t => ({ from: orchManagerId, to: t.managerId }));
-  }, [selectedOrchestrator, orchestrators, trainers, registeredTrainers]);
+      .map(t => ({ from: orchManagerId, to: t.managerId, animated }));
+  }, [selectedOrchestrator, orchestrators, trainers, registeredTrainers, isTraining, trainingStatus?.stage]);
 
   // All discovered workers (flat list with workspace context)
   const allDiscoveredWorkers = useMemo(() => {

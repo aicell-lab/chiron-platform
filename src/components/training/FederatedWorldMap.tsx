@@ -17,8 +17,10 @@ export interface MapWorker {
 }
 
 export interface MapConnection {
-  from: string; // MapWorker id
-  to: string;   // MapWorker id
+  from: string; // MapWorker id — always the orchestrator
+  to: string;   // MapWorker id — always the trainer
+  /** Training stage driving this connection's animation, or undefined for static. */
+  animated?: 'fit' | 'evaluate' | 'distribution';
 }
 
 interface FederatedWorldMapProps {
@@ -66,12 +68,13 @@ const ICON_TRAINER = `
 const ICON_BOTH = `
   <path d="M15 9.5L17.5 15L22 15.5L17.5 16L15 21.5L12.5 16L8 15.5L12.5 15Z" fill="white" opacity="0.95"/>`;
 
-// Inject pulse keyframes once into document head
+// Inject pulse + connection-flow keyframes once into document head
 let pulseStyleInjected = false;
 function ensurePulseStyle() {
   if (pulseStyleInjected || typeof document === 'undefined') return;
   pulseStyleInjected = true;
   const style = document.createElement('style');
+  // dash period = dashArray 8+6 = 14 — animating dashoffset by 14 = one seamless cycle
   style.textContent = `
     @keyframes mapPinPulse {
       0%   { transform: scale(0.5); opacity: 0.8; }
@@ -80,6 +83,19 @@ function ensurePulseStyle() {
     .map-pin-pulse {
       animation: mapPinPulse 1.6s ease-out infinite;
     }
+
+    /* Trainer → Orchestrator (fit / evaluate): dashes flow toward path start (orchestrator end) */
+    @keyframes dashToOrch {
+      from { stroke-dashoffset: 0; }
+      to   { stroke-dashoffset: 14; }
+    }
+    /* Orchestrator → Trainer (distribution): dashes flow toward path end (trainer end) */
+    @keyframes dashToTrainer {
+      from { stroke-dashoffset: 0; }
+      to   { stroke-dashoffset: -14; }
+    }
+    .conn-flow-to-orch    { animation: dashToOrch     0.7s linear infinite; }
+    .conn-flow-to-trainer { animation: dashToTrainer  0.7s linear infinite; }
   `;
   document.head.appendChild(style);
 }
@@ -288,26 +304,33 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
     const posById: Record<string, [number, number]> = {};
     workers.forEach(w => { posById[w.id] = [w.lat, w.lng]; });
 
-    // Keys for current connections
-    const currentKeys = new Set(connections.map(c => `${c.from}::${c.to}`));
+    // Key encodes animated state so stage changes force polyline recreation
+    const connKey = (c: MapConnection) => `${c.from}::${c.to}::${c.animated ?? ''}`;
+    const currentKeys = new Set(connections.map(connKey));
 
-    // Remove stale polylines
+    // Remove stale polylines (including those whose animated state changed)
     polylinesRef.current.forEach((line, key) => {
       if (!currentKeys.has(key)) { map.removeLayer(line); polylinesRef.current.delete(key); }
     });
 
     // Add new polylines
-    connections.forEach(({ from, to }) => {
-      const key = `${from}::${to}`;
+    connections.forEach(conn => {
+      const key = connKey(conn);
       if (polylinesRef.current.has(key)) return;
-      const fromPos = posById[from];
-      const toPos   = posById[to];
+      const fromPos = posById[conn.from];
+      const toPos   = posById[conn.to];
       if (!fromPos || !toPos) return;
+
+      const cssClass =
+        conn.animated === 'fit' || conn.animated === 'evaluate' ? 'conn-flow-to-orch' :
+        conn.animated === 'distribution'                        ? 'conn-flow-to-trainer' :
+        '';
       const line = L.polyline([fromPos, toPos], {
-        color: '#3b82f6',
-        weight: 2,
-        opacity: 0.65,
+        color:     conn.animated ? '#60a5fa' : '#3b82f6',
+        weight:    conn.animated ? 2.5 : 2,
+        opacity:   conn.animated ? 0.85 : 0.65,
         dashArray: '8 6',
+        className: cssClass,
       }).addTo(map);
       polylinesRef.current.set(key, line);
     });
