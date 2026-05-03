@@ -2045,7 +2045,7 @@ const Training: React.FC = () => {
                       </div>
                       <div>
                         <p className="font-semibold text-sm text-gray-900">Save Weights</p>
-                        <p className="text-xs text-gray-400 mt-0.5">Edit each description, then publish to the hub or save locally.</p>
+                        <p className="text-xs text-gray-400 mt-0.5">Edit each description, then publish to the hub or save to the worker.</p>
                       </div>
                     </div>
                     <div className="space-y-3">
@@ -2096,9 +2096,9 @@ const Training: React.FC = () => {
                                 {pubStatus === 'saving' ? <>{spinner} Saving…</> : <>{publishSvg} Publish</>}
                               </button>
                               <button onClick={() => saveTrainerLocal(svcId, saveDescriptions[descKey] || autoDesc)} disabled={locStatus === 'saving' || pubStatus === 'saving'}
-                                title="Save locally to ~/.bioengine/models/ on this worker"
+                                title="Save to worker at ~/.bioengine/models/"
                                 className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-semibold rounded-lg hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all border border-gray-200">
-                                {locStatus === 'saving' ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" /> Saving…</> : <>{localSvg} Save locally</>}
+                                {locStatus === 'saving' ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" /> Saving…</> : <>{localSvg} Save to worker</>}
                               </button>
                               {pubStatus === 'success' && pubSaved?.artifactId && <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded border border-emerald-200 truncate max-w-[180px]" title={pubSaved.artifactId}>✓ {pubSaved.artifactId.split('/').pop()}</span>}
                               {locStatus === 'success' && locSaved?.path && <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded border border-emerald-200 truncate max-w-[180px]" title={locSaved.path}>✓ {locSaved.path.split('/').slice(-2).join('/')}</span>}
