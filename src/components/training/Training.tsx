@@ -109,6 +109,7 @@ interface TrainingStatus {
   target_round: number;
   stage: TrainingStage;
   trainers_progress: Record<string, { status?: string; current_batch: number; total_batches: number; progress: number; error?: string; }>;
+  pending_removal?: string[];
 }
 
 const STAGE_LABELS: Record<NonNullable<TrainingStage>, string> = {
@@ -210,6 +211,9 @@ const Training: React.FC = () => {
   const [isPreparingTraining, setIsPreparingTraining] = useState(false);
   const [isStoppingTraining, setIsStoppingTraining] = useState(false);
   const [resetStateSuccess, setResetStateSuccess] = useState(false);
+  // Trainer service IDs that have participated in at least one round of the current run.
+  // Used to distinguish "pending add" (registered but not yet active) from active trainers.
+  const [participatedTrainerIds, setParticipatedTrainerIds] = useState<Set<string>>(new Set());
 
   // Save model weights
   // Save Weights state — keyed by 'global', 'publish-{svcId}', 'local-{svcId}'
@@ -974,6 +978,7 @@ const Training: React.FC = () => {
       if (currentTrainers.length === 0) throw new Error('No trainers available. Please select at least one trainer.');
       const launchedFrom = selectedOrchestrator!;
       setIsPreparingTraining(false); setIsTraining(true); setTrainingOrchestratorId(launchedFrom); setTrainingConfigCollapsed(true);
+      setParticipatedTrainerIds(new Set());
       window.scrollTo({ top: 0, behavior: 'smooth' });
       setSavedItems({});
       setSaveStatuses({});
@@ -987,6 +992,15 @@ const Training: React.FC = () => {
         try {
           const status = await orchestratorService.get_training_status();
           setTrainingStatus(status);
+          // Accumulate trainer IDs that have appeared in trainers_progress
+          const newIds = Object.keys(status.trainers_progress);
+          if (newIds.length > 0) {
+            setParticipatedTrainerIds(prev => {
+              const next = new Set(prev);
+              newIds.forEach(id => next.add(id));
+              return next;
+            });
+          }
           if (!status.is_running) {
             setIsTraining(false); setTrainingOrchestratorId(null); clearInterval(statusInterval);
             const history = await orchestratorService.get_training_history();
@@ -1263,7 +1277,8 @@ const Training: React.FC = () => {
     return mapWorkers.map(w => activeIds.has(w.id) ? { ...w, active: true } : w);
   }, [mapWorkers, isTraining, trainingStatus, selectedOrchestrator, orchestrators, serviceToManagerId]);
 
-  // Connection lines: selected orchestrator ↔ registered trainers (steps 2 and 3)
+  // Connection lines: selected orchestrator ↔ registered trainers that have already participated.
+  // Pending-add trainers (registered but not yet active) are shown on the map without a connection.
   // animated encodes the current training stage so that polylines are refreshed on stage change.
   const mapConnections = useMemo<MapConnection[]>(() => {
     if (!selectedOrchestrator) return [];
@@ -1274,10 +1289,16 @@ const Training: React.FC = () => {
     const animated: MapConnection['animated'] =
       isTraining && (stage === 'fit' || stage === 'evaluate' || stage === 'distribution') ? stage : undefined;
     return trainers
-      .filter(t => { const svcId = t.serviceIds?.[0]?.websocket_service_id; return svcId && registeredTrainers.includes(svcId); })
+      .filter(t => {
+        const svcId = t.serviceIds?.[0]?.websocket_service_id;
+        if (!svcId || !registeredTrainers.includes(svcId)) return false;
+        // Exclude pending-add trainers (not yet participated in any round)
+        if (isTraining && participatedTrainerIds.size > 0 && !participatedTrainerIds.has(svcId)) return false;
+        return true;
+      })
       .filter(t => t.managerId !== orchManagerId)
       .map(t => ({ from: orchManagerId, to: t.managerId, animated }));
-  }, [selectedOrchestrator, orchestrators, trainers, registeredTrainers, isTraining, trainingStatus?.stage]);
+  }, [selectedOrchestrator, orchestrators, trainers, registeredTrainers, isTraining, trainingStatus?.stage, participatedTrainerIds]);
 
   // All discovered workers (flat list with workspace context)
   const allDiscoveredWorkers = useMemo(() => {
@@ -1685,12 +1706,17 @@ const Training: React.FC = () => {
                             const isRegistered = registeredTrainers.includes(trainerServiceId);
                             const isBusyElsewhere = trainer.isBusy && !isRegistered;
                             const isDisabled = !selectedOrchestrator || isLoadingRegisteredTrainers || isBusyElsewhere;
+                            const isPendingAdd = isTraining && isRegistered && !!trainerServiceId
+                              && participatedTrainerIds.size > 0
+                              && !participatedTrainerIds.has(trainerServiceId);
+                            const isPendingRemove = isTraining && isRegistered && !!trainerServiceId
+                              && (trainingStatus?.pending_removal ?? []).includes(trainerServiceId);
                             const manager = managers.find(m => m.serviceId === trainer.managerId);
                             const geo = manager?.workerInfo?.worker_info?.geo_location;
                             const datasetNames = Object.values(trainer.datasets).map((d: any) => d.name || Object.keys(trainer.datasets).find(k => trainer.datasets[k] === d)).filter(Boolean);
                             const isTrainerHighlighted = highlightedWorkerIds.includes(trainer.managerId);
-                            const trainerBorder = isRegistered ? 'border-emerald-400' : isBusyElsewhere ? 'border-amber-200' : isTrainerHighlighted ? 'border-violet-400' : 'border-transparent hover:border-gray-200';
-                            const trainerBg = isRegistered ? (isTrainerHighlighted ? 'bg-violet-50' : 'bg-emerald-50/60') : isBusyElsewhere ? 'bg-amber-50/40' : isTrainerHighlighted ? 'bg-violet-50' : 'bg-gray-50';
+                            const trainerBorder = isPendingRemove ? 'border-orange-400' : isPendingAdd ? 'border-amber-300' : isRegistered ? 'border-emerald-400' : isBusyElsewhere ? 'border-amber-200' : isTrainerHighlighted ? 'border-violet-400' : 'border-transparent hover:border-gray-200';
+                            const trainerBg = isPendingRemove ? 'bg-orange-50/60' : isPendingAdd ? 'bg-amber-50/40' : isRegistered ? (isTrainerHighlighted ? 'bg-violet-50' : 'bg-emerald-50/60') : isBusyElsewhere ? 'bg-amber-50/40' : isTrainerHighlighted ? 'bg-violet-50' : 'bg-gray-50';
                             const regOrch = isBusyElsewhere && trainer.registeredOrchestratorId
                               ? orchestrators.find(o => o.serviceIds[0]?.websocket_service_id === trainer.registeredOrchestratorId)
                               : undefined;
@@ -1703,7 +1729,17 @@ const Training: React.FC = () => {
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-center gap-1.5 flex-wrap">
                                     <p className="font-medium text-gray-900 text-sm leading-tight">{trainer.displayName || 'Tabula Trainer'}</p>
-                                    {trainer.isBusy && (
+                                    {isPendingRemove && (
+                                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />Leaving after this round
+                                      </span>
+                                    )}
+                                    {isPendingAdd && (
+                                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />Joins next round
+                                      </span>
+                                    )}
+                                    {trainer.isBusy && !isPendingAdd && !isPendingRemove && (
                                       isBusyElsewhere && trainer.registeredOrchestratorId ? (
                                         <span className="relative group/busytip">
                                           <BusyBadge />
@@ -1721,7 +1757,9 @@ const Training: React.FC = () => {
                                   {datasetNames.length > 0 && <p className="text-xs text-gray-400 mt-0.5 truncate">{datasetNames.join(', ')}</p>}
                                   {isBusyElsewhere && <p className="text-xs text-amber-600 mt-0.5">In an active training session</p>}
                                 </div>
-                                {isRegistered && <FaCheckCircle className="text-emerald-500 flex-shrink-0 mt-0.5" size={14} />}
+                                {isRegistered && !isPendingAdd && !isPendingRemove && <FaCheckCircle className="text-emerald-500 flex-shrink-0 mt-0.5" size={14} />}
+                                {isPendingAdd && <span className="text-amber-400 flex-shrink-0 mt-0.5 text-xs font-bold">+</span>}
+                                {isPendingRemove && <span className="text-orange-500 flex-shrink-0 mt-0.5 text-xs font-bold">−</span>}
                               </label>
                             );
                           })}
