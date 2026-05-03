@@ -199,7 +199,7 @@ class FederatedTrainingManager:
             raise PermissionError(
                 "Ownership of this application is not tracked in the current manager "
                 "session (it may have been deployed before the manager was last restarted). "
-                "Only a worker admin may delete it."
+                "Only a worker admin may delete it from the BioEngine dashboard."
             )
         if caller == deployed_by:
             return

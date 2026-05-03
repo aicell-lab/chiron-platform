@@ -5,7 +5,7 @@ import os
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union
 
 import flwr as fl
 import numpy as np
@@ -85,7 +85,13 @@ class FlowerClientProxy(fl.client.NumPyClient):
         )
         while True:
             await asyncio.sleep(self.check_interval)
-            fit_status = await self.service.get_fit_status()
+            try:
+                fit_status = await asyncio.wait_for(
+                    self.service.get_fit_status(), timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"get_fit_status() timed out for {self.cid} — retrying")
+                continue
             status = fit_status["status"]
             if status == "RUNNING":
                 continue
@@ -108,7 +114,13 @@ class FlowerClientProxy(fl.client.NumPyClient):
         )
         while True:
             await asyncio.sleep(self.check_interval)
-            eval_status = await self.service.get_evaluate_status()
+            try:
+                eval_status = await asyncio.wait_for(
+                    self.service.get_evaluate_status(), timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"get_evaluate_status() timed out for {self.cid} — retrying")
+                continue
             status = eval_status["status"]
             if status in ("NOT_STARTED", "RUNNING"):
                 continue
@@ -309,10 +321,16 @@ async def fit_clients(
         )
         for task in pending:
             task.cancel()
-        await asyncio.gather(
-            *[task_to_client[task].cancel_fit(orchestrator_service_id) for task in pending],
-            return_exceptions=True,
-        )
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *[task_to_client[task].cancel_fit(orchestrator_service_id) for task in pending],
+                    return_exceptions=True,
+                ),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("cancel_fit() timed out — trainer(s) may still be running")
         for task in pending:
             client = task_to_client[task]
             failures.append(
@@ -392,10 +410,16 @@ async def evaluate_clients(
         )
         for task in pending:
             task.cancel()
-        await asyncio.gather(
-            *[task_to_client[task].cancel_evaluate(orchestrator_service_id) for task in pending],
-            return_exceptions=True,
-        )
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *[task_to_client[task].cancel_evaluate(orchestrator_service_id) for task in pending],
+                    return_exceptions=True,
+                ),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("cancel_evaluate() timed out — trainer(s) may still be running")
         for task in pending:
             client = task_to_client[task]
             failures.append(
@@ -448,6 +472,8 @@ class FederatedTrainingOrchestrator:
         self.selected_evaluate_clients: List[FlowerClientProxy] = (
             []
         )  # List of clients currently in evaluate stage
+        # Trainers removed while a round is active; removed from client_manager after the round ends
+        self._pending_removal: Set[str] = set()
 
         # Hypha server connection info
         self._server_url: str = os.getenv("HYPHA_SERVER_URL")
@@ -597,11 +623,24 @@ class FederatedTrainingOrchestrator:
                 f"Setting pretrained weights on all trainers: {initial_weights}"
             )
             # This sets the weights for embedder, tabular transformer and project head on all clients
+            client_ids = list(self.client_manager.clients.keys())
             tasks = [
                 client.load_pretrained_weights(**initial_weights)
                 for client in self.client_manager.clients.values()
             ]
-            await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            failures = [
+                (cid, exc)
+                for cid, exc in zip(client_ids, results)
+                if isinstance(exc, Exception)
+            ]
+            if failures:
+                detail = "; ".join(f"{cid}: {exc}" for cid, exc in failures)
+                raise RuntimeError(
+                    f"Failed to load pretrained weights on {len(failures)} of "
+                    f"{len(client_ids)} trainer(s) — aborting to avoid heterogeneous "
+                    f"initial state: {detail}"
+                )
 
         # Get transformer weights from a random client
         logger.info("Requesting initial parameters from a random client")
@@ -753,6 +792,14 @@ class FederatedTrainingOrchestrator:
                 )
                 self.global_parameters = new_parameters
 
+                # Flush deferred removals before next round's configure_fit samples.
+                await self._flush_pending_removals()
+
+                # Successful round proves all participating trainers are reachable —
+                # reset their ping fail counters so the idle ping loop starts clean.
+                for client in self.selected_fit_clients:
+                    self._trainer_ping_fails[client.cid] = 0
+
         # Do not update the global parameters if the round did not complete
 
         except asyncio.CancelledError:
@@ -864,11 +911,27 @@ class FederatedTrainingOrchestrator:
         except Exception as e:
             logger.warning(f"Could not fetch properties from '{service_id}': {e}")
 
+        # If this trainer was pending removal, cancel the deferred removal.
+        self._pending_removal.discard(service_id)
+
         # Reset ping-fail counter so a freshly added trainer starts with a clean slate.
         self._trainer_ping_fails[service_id] = 0
 
-        # Mark the trainer as registered to this orchestrator (always, even on re-add)
-        await trainer_service.register_to_orchestrator(orchestrator_service_id)
+        # Mark the trainer as registered to this orchestrator (always, even on re-add).
+        # If this call fails the trainer-side state is inconsistent — roll back the
+        # local registration so the orchestrator and trainer agree.
+        try:
+            await trainer_service.register_to_orchestrator(orchestrator_service_id)
+        except Exception as e:
+            if not already_registered:
+                client = self.client_manager.clients.get(service_id)
+                if client is not None:
+                    self.client_manager.unregister(client)
+            self._trainer_ping_fails.pop(service_id, None)
+            self._trainer_properties.pop(service_id, None)
+            raise RuntimeError(
+                f"Failed to register trainer '{service_id}' to this orchestrator: {e}"
+            ) from e
 
     @schema_method
     async def remove_trainer(
@@ -877,22 +940,52 @@ class FederatedTrainingOrchestrator:
             ..., description="Full service ID of the Federated Trainer"
         ),
     ):
-        """Remove a Trainer from the federated training using its Hypha service ID."""
-        # Find the client with matching service_id and unregister it
+        """Remove a Trainer from the federated training using its Hypha service ID.
+
+        If the trainer is actively executing a fit or evaluate task in the current
+        round, removal is deferred: the trainer will finish the round normally and
+        be excluded starting from the next round.  Otherwise it is removed immediately.
+        """
         client = self.client_manager.clients.get(service_id)
         if client is None:
             raise ValueError(f"Client with service ID '{service_id}' not found")
 
-        self.client_manager.unregister(client)
+        training_running = self.training_task is not None and not self.training_task.done()
+        in_active_round = (
+            any(c.cid == service_id for c in self.selected_fit_clients) or
+            any(c.cid == service_id for c in self.selected_evaluate_clients)
+        )
+
+        if training_running and in_active_round:
+            # Defer: let the trainer finish the current round, exclude from the next.
+            self._pending_removal.add(service_id)
+            logger.info(
+                f"Trainer '{service_id}' marked for deferred removal — "
+                "will be unregistered after the current round completes."
+            )
+            return
+
+        await self._do_remove_trainer(service_id)
+
+    async def _do_remove_trainer(self, service_id: str) -> None:
+        """Immediately unregister a trainer from client_manager and notify it."""
+        self._pending_removal.discard(service_id)
+        client = self.client_manager.clients.get(service_id)
+        if client is not None:
+            self.client_manager.unregister(client)
         self._trainer_ping_fails.pop(service_id, None)
         self._trainer_properties.pop(service_id, None)
-
-        # Clear trainer registration
         try:
             svc = await self.hypha_client.get_service(service_id)
             await svc.unregister_from_orchestrator()
         except Exception as e:
             logger.warning(f"Could not unregister trainer '{service_id}': {e}")
+
+    async def _flush_pending_removals(self) -> None:
+        """Remove trainers that were deferred during the just-completed round."""
+        for service_id in list(self._pending_removal):
+            logger.info(f"Flushing deferred removal for trainer '{service_id}'")
+            await self._do_remove_trainer(service_id)
 
     @schema_method
     async def list_trainers(self) -> List[str]:
@@ -931,6 +1024,7 @@ class FederatedTrainingOrchestrator:
         self.target_round = 0
         self.selected_fit_clients = []
         self.selected_evaluate_clients = []
+        self._pending_removal.clear()
 
     @schema_method
     async def start_training(
@@ -982,6 +1076,33 @@ class FederatedTrainingOrchestrator:
             raise RuntimeError(
                 "Orchestrator service ID is not set. Add at least one trainer via add_trainer() before starting training."
             )
+
+        # Validate fit_config and eval_config against the trainer's schema so callers
+        # get an immediate, clear error instead of a cryptic schema failure mid-round.
+        _internal_params = {"parameters", "server_round", "orchestrator_service_id"}
+        sample_service = next(iter(self.client_manager.clients.values())).service
+        if fit_config:
+            _fit_valid = (
+                set(sample_service["start_fit"].__schema__.get("parameters", {}).get("properties", {}).keys())
+                - _internal_params
+            )
+            _fit_unknown = set(fit_config.keys()) - _fit_valid
+            if _fit_unknown:
+                raise ValueError(
+                    f"fit_config contains keys not accepted by start_fit: {sorted(_fit_unknown)}. "
+                    f"Valid keys: {sorted(_fit_valid)}"
+                )
+        if eval_config:
+            _eval_valid = (
+                set(sample_service["start_evaluate"].__schema__.get("parameters", {}).get("properties", {}).keys())
+                - _internal_params
+            )
+            _eval_unknown = set(eval_config.keys()) - _eval_valid
+            if _eval_unknown:
+                raise ValueError(
+                    f"eval_config contains keys not accepted by start_evaluate: {sorted(_eval_unknown)}. "
+                    f"Valid keys: {sorted(_eval_valid)}"
+                )
 
         _orch_id = self._service_id
 
@@ -1054,9 +1175,15 @@ class FederatedTrainingOrchestrator:
                         f"Error cancelling evaluate for client {client.cid}: {e}"
                     )
 
-        # Wait for all cancellation requests to complete
+        # Wait for all cancellation requests to complete (30 s hard cap)
         if cancellation_tasks:
-            await asyncio.gather(*cancellation_tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*cancellation_tasks, return_exceptions=True),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Cancellation requests timed out — trainer(s) may still be running")
 
         # Cancel the training task
         if self.training_task:
@@ -1119,6 +1246,8 @@ class FederatedTrainingOrchestrator:
             "target_round": self.target_round,
             "stage": self.current_stage,  # "fit" or "evaluate" or None
             "trainers_progress": trainers_progress,
+            # Trainers removed while a round was active; will be gone after this round.
+            "pending_removal": list(self._pending_removal),
         }
 
     @schema_method
@@ -1300,6 +1429,7 @@ class FederatedTrainingOrchestrator:
                     alias="chiron-models",
                     manifest={"name": "Chiron Models",
                                "description": "Trained model artifacts from federated learning runs."},
+                    config={"permissions": {"*": "r+"}},
                 )
             else:
                 raise

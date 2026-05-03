@@ -573,8 +573,8 @@ class FederatedClient(NumPyClient):
         "memory": 16 * 1024 * 1024 * 1024,  # 16GB RAM limit
         "runtime_env": {"pip": pip_requirements},
     },
-    max_ongoing_requests=1,  # Important to guarantee thread-safety
-    max_queued_requests=5,
+    max_ongoing_requests=10,  # Training serialization is enforced by start_fit/start_evaluate guards, not here
+    max_queued_requests=20,
     autoscaling_config={
         "min_replicas": 0,
         "initial_replicas": 1,
@@ -1223,6 +1223,10 @@ class TabulaTrainer:
 
         self._validate_orchestrator(orchestrator_service_id)
 
+        # The orchestrator is live — it just called us. Reset the ping fail counter
+        # so stale failures from a previous idle period do not cause auto-unregistration.
+        self._ping_fail_count = 0
+
         # Check if any task is already running
         if self.fit_task and not self.fit_task.done():
             raise RuntimeError("A fit task is already running")
@@ -1301,6 +1305,9 @@ class TabulaTrainer:
         """Start evaluating the model on the test data with the given parameters."""
 
         self._validate_orchestrator(orchestrator_service_id)
+
+        # The orchestrator is live — it just called us. Reset the ping fail counter.
+        self._ping_fail_count = 0
 
         # Ensure that a fit has been completed before evaluation (training params need to be set)
         if self.fit_status != "COMPLETED":
@@ -1549,10 +1556,19 @@ class TabulaTrainer:
 
         async def _ping_loop() -> None:
             while True:
-                await asyncio.sleep(120)
+                await asyncio.sleep(300)
                 orch_id = self._registered_orchestrator_id
                 if orch_id is None:
                     break
+                # Skip while a fit or evaluate task is running — the orchestrator is
+                # manifestly alive if it is actively driving training. Pinging during
+                # active work risks false failures from transient load, and the training
+                # protocol itself detects a crashed orchestrator via the session watchdog.
+                if (self.fit_task is not None and not self.fit_task.done()) or (
+                    self.evaluate_task is not None and not self.evaluate_task.done()
+                ):
+                    self._ping_fail_count = 0  # reset: active training proves liveness
+                    continue
                 try:
                     svc = await self.hypha_client.get_service(orch_id)
                     await svc.ping()
@@ -1560,11 +1576,11 @@ class TabulaTrainer:
                 except Exception as e:
                     self._ping_fail_count += 1
                     logger.warning(
-                        f"Orchestrator ping failed ({self._ping_fail_count}/5): {e}"
+                        f"Orchestrator ping failed ({self._ping_fail_count}/10): {e}"
                     )
-                    if self._ping_fail_count >= 5:
+                    if self._ping_fail_count >= 10:
                         logger.warning(
-                            "Orchestrator unreachable after 5 consecutive pings — auto-unregistering."
+                            "Orchestrator unreachable after 10 consecutive pings — auto-unregistering."
                         )
                         await self.unregister_from_orchestrator()
                         break
