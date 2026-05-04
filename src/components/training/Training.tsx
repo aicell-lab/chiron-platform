@@ -2190,10 +2190,12 @@ const Training: React.FC = () => {
                           const datasetNames = liveTrainer
                             ? Object.values(liveTrainer.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean)
                             : (meta?.datasets ?? []);
-                          // Manager connectivity (needed for "Save to worker")
+                          // Resolve manager for this trainer (needed for connectivity check)
                           const managerId = liveTrainer?.managerId ?? meta?.managerId;
+                          // isMgrConnected: the worker's manager service is reachable
                           const isMgrConnected = !!managers.find(m => m.serviceId === managerId && m.isConnected);
-                          // Offline = trainer not running; Disconnected = manager not even reachable
+                          // "Offline"      (red)  — manager is connected but the trainer app no longer exists on the worker
+                          // "Disconnected" (grey) — manager is not reachable; we have no information about trainer state
                           const offlineBadge = !isConnected
                             ? (isMgrConnected ? 'Offline' : 'Disconnected')
                             : null;
@@ -2231,12 +2233,12 @@ const Training: React.FC = () => {
                               />
                               <div className={`flex flex-wrap items-center gap-2 rounded-lg p-1.5 -m-1.5 transition-colors`}>
                                 <button onClick={() => saveTrainerPublish(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
-                                  title={isConnected ? "Publish full model to chiron-models artifact hub" : "Trainer is not running — cannot save"}
+                                  title={isConnected ? "Publish full model to chiron-models artifact hub" : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker — cannot save" : "Worker manager is not reachable — cannot save"}
                                   className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
                                   {pubStatus === 'saving' ? <>{spinner} Saving…</> : <>{publishSvg} Publish</>}
                                 </button>
                                 <button onClick={() => saveTrainerLocal(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
-                                  title={isConnected ? "Save to worker at ~/.bioengine/models/" : "Trainer is not running — cannot save"}
+                                  title={isConnected ? "Save to worker at ~/.bioengine/models/" : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker — cannot save" : "Worker manager is not reachable — cannot save"}
                                   className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-semibold rounded-lg hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all border border-gray-200">
                                   {locStatus === 'saving' ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" /> Saving…</> : <>{localSvg} Save to worker</>}
                                 </button>
