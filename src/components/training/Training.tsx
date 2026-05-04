@@ -2219,7 +2219,7 @@ const Training: React.FC = () => {
                                   </p>
                                 </div>
                                 {offlineBadge && (
-                                  <span className={`flex-shrink-0 text-xs font-medium px-2 py-0.5 rounded-full ${offlineBadge === 'Disconnected' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>{offlineBadge}</span>
+                                  <span className={`flex-shrink-0 text-xs font-medium px-2 py-0.5 rounded-full ${offlineBadge === 'Offline' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>{offlineBadge}</span>
                                 )}
                               </div>
                               <input type="text"
