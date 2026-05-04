@@ -201,6 +201,8 @@ const Training: React.FC = () => {
   const [datasetTimers, setDatasetTimers] = useState<Record<string, NodeJS.Timeout>>({});
 
   const [isTraining, setIsTraining] = useState(false);
+  // True when the current training run was detected (externally started), not launched by this UI session.
+  const [trainingResumed, setTrainingResumed] = useState(false);
   const [trainingOrchestratorId, setTrainingOrchestratorId] = useState<string | null>(null);
   const [trainingConfigCollapsed, setTrainingConfigCollapsed] = useState(false);
   const [trainingConfigSummary, setTrainingConfigSummary] = useState({ numRounds: 5, perRoundTimeoutMinutes: 20 });
@@ -214,6 +216,16 @@ const Training: React.FC = () => {
   // Trainer service IDs that have participated in at least one round of the current run.
   // Used to distinguish "pending add" (registered but not yet active) from active trainers.
   const [participatedTrainerIds, setParticipatedTrainerIds] = useState<Set<string>>(new Set());
+
+  // Cache of display metadata for each trainer websocket service ID.
+  // Populated whenever a trainer is visible; survives trainer going offline so Save Weights
+  // can still show name/geo/datasets for disconnected participants.
+  const [trainerMetaCache, setTrainerMetaCache] = useState<Record<string, {
+    workerName: string;
+    geoDisplay: string;
+    datasets: string[];
+    managerId: string;
+  }>>({});
 
   // Save model weights
   // Save Weights state — keyed by 'global', 'publish-{svcId}', 'local-{svcId}'
@@ -967,6 +979,63 @@ const Training: React.FC = () => {
     return () => clearInterval(historyInterval);
   }, [isTraining, trainingOrchestratorId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Auto-detect already-running training when the selected orchestrator changes or
+  // when the orchestrators list first loads.  Covers:
+  //   • User navigates away and back (selectedOrchestrator unchanged, orchestrators reloaded)
+  //   • Second device / second browser tab opening the page mid-run
+  //   • UI launched fresh while a Python-initiated run is already in progress
+  useEffect(() => {
+    // Allow re-check if we're watching a *different* orchestrator than the one now selected.
+    if (isTraining && selectedOrchestrator === trainingOrchestratorId) return;
+    if (!selectedOrchestrator) return;
+    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+    let cancelled = false;
+    const checkOngoingTraining = async () => {
+      try {
+        const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+        const [status, history] = await Promise.all([
+          orchestratorService.get_training_status(),
+          orchestratorService.get_training_history().catch(() => null),
+        ]);
+        if (cancelled) return;
+        if (history) setTrainingHistory(history);
+        if (!status?.is_running) return; // training stopped or never started — just show history
+        // Training is actively running — enter the monitoring state
+        setIsTraining(true);
+        setTrainingResumed(true);
+        setTrainingOrchestratorId(selectedOrchestrator);
+        setTrainingConfigCollapsed(true);
+        setTrainingStatus(status);
+        const ids = Object.keys(status.trainers_progress ?? {});
+        if (ids.length > 0) setParticipatedTrainerIds(new Set(ids));
+        // Poll until done
+        const statusInterval = setInterval(async () => {
+          try {
+            const s = await orchestratorService.get_training_status();
+            if (cancelled) { clearInterval(statusInterval); return; }
+            setTrainingStatus(s);
+            const newIds = Object.keys(s.trainers_progress ?? {});
+            if (newIds.length > 0) {
+              setParticipatedTrainerIds(prev => {
+                const next = new Set(prev);
+                newIds.forEach(id => next.add(id));
+                return next;
+              });
+            }
+            if (!s.is_running) {
+              setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null); clearInterval(statusInterval);
+              const h = await orchestratorService.get_training_history();
+              if (h) setTrainingHistory(h);
+            }
+          } catch { /* silent */ }
+        }, 3000);
+      } catch { /* orchestrator not yet reachable — will retry on next dep change */ }
+    };
+    checkOngoingTraining();
+    return () => { cancelled = true; };
+  }, [selectedOrchestrator, orchestrators]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const startTraining = async (config: { num_rounds: number; fit_config: Record<string, any>; eval_config: Record<string, any>; per_round_timeout: number; initial_weights: { artifact_id: string; file_path: string } | null; }) => {
     if (!selectedOrchestrator) return;
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
@@ -977,7 +1046,7 @@ const Training: React.FC = () => {
       const currentTrainers = await orchestratorService.list_trainers();
       if (currentTrainers.length === 0) throw new Error('No trainers available. Please select at least one trainer.');
       const launchedFrom = selectedOrchestrator!;
-      setIsPreparingTraining(false); setIsTraining(true); setTrainingOrchestratorId(launchedFrom); setTrainingConfigCollapsed(true);
+      setIsPreparingTraining(false); setIsTraining(true); setTrainingResumed(false); setTrainingOrchestratorId(launchedFrom); setTrainingConfigCollapsed(true);
       setParticipatedTrainerIds(new Set());
       window.scrollTo({ top: 0, behavior: 'smooth' });
       setSavedItems({});
@@ -986,7 +1055,7 @@ const Training: React.FC = () => {
       if (config.initial_weights) trainingParams.initial_weights = config.initial_weights;
       orchestratorService.start_training(trainingParams).catch((error: Error) => {
         setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true);
-        setIsTraining(false); setTrainingOrchestratorId(null);
+        setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
       });
       const statusInterval = setInterval(async () => {
         try {
@@ -1002,7 +1071,7 @@ const Training: React.FC = () => {
             });
           }
           if (!status.is_running) {
-            setIsTraining(false); setTrainingOrchestratorId(null); clearInterval(statusInterval);
+            setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null); clearInterval(statusInterval);
             const history = await orchestratorService.get_training_history();
             setTrainingHistory(history);
           }
@@ -1011,7 +1080,7 @@ const Training: React.FC = () => {
     } catch (error) {
       setErrorPopupMessage('Failed to Start Training');
       setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-      setShowErrorPopup(true); setIsPreparingTraining(false); setIsTraining(false); setTrainingOrchestratorId(null);
+      setShowErrorPopup(true); setIsPreparingTraining(false); setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
     }
   };
 
@@ -1023,7 +1092,7 @@ const Training: React.FC = () => {
     try {
       const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       await orchestratorService.stop_training();
-      setIsTraining(false); setTrainingOrchestratorId(null); setTrainingStatus(null);
+      setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null); setTrainingStatus(null);
     } catch (error) {
       setErrorPopupMessage('Failed to Stop Training');
       setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
@@ -1318,6 +1387,25 @@ const Training: React.FC = () => {
     }
     return map;
   }, [trainers, allDiscoveredWorkers]);
+
+  // Keep trainer metadata cache fresh whenever trainers or managers update.
+  // This lets Save Weights show name/geo/datasets even after a trainer goes offline.
+  useEffect(() => {
+    setTrainerMetaCache(prev => {
+      const next = { ...prev };
+      for (const trainer of trainers) {
+        const wsId = trainer.serviceIds?.[0]?.websocket_service_id;
+        if (!wsId) continue;
+        const mgr = managers.find(m => m.serviceId === trainer.managerId);
+        const geo = mgr?.workerInfo?.worker_info?.geo_location;
+        const geoDisplay = geo ? `${geo.region}, ${geo.country_name}` : '';
+        const workerName = allDiscoveredWorkers.find(w => w.serviceId === trainer.managerId)?.name || trainer.managerId;
+        const datasets = Object.values(trainer.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean);
+        next[wsId] = { workerName, geoDisplay, datasets, managerId: trainer.managerId };
+      }
+      return next;
+    });
+  }, [trainers, managers, allDiscoveredWorkers]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stepEnabled = (step: number) => {
     if (step === 1) return true;
@@ -1907,6 +1995,9 @@ const Training: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <div className="w-2.5 h-2.5 bg-blue-500 rounded-full animate-pulse" />
                       <h3 className="font-semibold text-gray-900 text-sm">Training in Progress</h3>
+                      {trainingResumed && (
+                        <span className="text-xs font-medium text-violet-700 bg-violet-100 px-2 py-0.5 rounded-full" title="Training was started outside this browser session and is being monitored">Resumed</span>
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{trainingStatus.stage ? STAGE_LABELS[trainingStatus.stage] : 'Idle'}</span>
@@ -1960,7 +2051,27 @@ const Training: React.FC = () => {
               {/* Loss Charts */}
               {trainingHistory && ((trainingHistory.training_losses?.length > 0) || (trainingHistory.validation_losses?.length > 0)) && (
                 <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
-                  <h3 className="font-semibold text-gray-900 mb-4 text-sm">Training History</h3>
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="font-semibold text-gray-900 text-sm">Training History</h3>
+                    <button
+                      onClick={async () => {
+                        const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === (trainingOrchestratorId || selectedOrchestrator));
+                        if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+                        try {
+                          const svc = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
+                          const history = await svc.get_training_history();
+                          if (history) setTrainingHistory(history);
+                        } catch { /* silent */ }
+                      }}
+                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 transition-colors"
+                      title="Refresh training history"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      Refresh
+                    </button>
+                  </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                     {trainingHistory.training_losses?.length > 0 && (
                       <LossChart
@@ -2061,52 +2172,82 @@ const Training: React.FC = () => {
                           </button>
                         }
                       />
-                      {registeredTrainerApps.map(trainer => {
-                        const svcId = trainer.serviceIds[0].websocket_service_id;
-                        const mgr = managers.find(m => m.serviceId === trainer.managerId);
-                        const geo = mgr?.workerInfo?.worker_info?.geo_location;
-                        const location = geo ? `${geo.region}, ${geo.country_name}` : trainer.managerId.split('/')[1]?.split(':')[0] || trainer.managerId;
-                        const datasetNames = Object.values(trainer.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean);
-                        const clientRounds = trainingHistory.client_training_losses?.[svcId]?.length || rounds;
-                        const autoDesc = `Tabula model (embedder + transformer + heads) · ${clientRounds} federated round${clientRounds !== 1 ? 's' : ''} · ${datasetNames.join(', ')}`;
-                        const pubKey = `publish-${svcId}`;
-                        const locKey = `local-${svcId}`;
-                        const pubStatus = saveStatuses[pubKey] || 'idle';
-                        const locStatus = saveStatuses[locKey] || 'idle';
-                        const pubSaved = savedItems[pubKey];
-                        const locSaved = savedItems[locKey];
-                        const borderCls = (st: string) => st === 'success' ? 'border-emerald-300 bg-emerald-50/30' : st === 'duplicate' ? 'border-amber-300 bg-amber-50/30' : 'border-gray-200';
-                        const descKey = `trainer-${svcId}`;
-                        return (
-                          <div key={svcId} className="rounded-xl border border-gray-200 p-3 space-y-2">
-                            <div>
-                              <p className="text-sm font-semibold text-gray-800">{location}</p>
-                              <p className="text-xs text-gray-400">{datasetNames.join(', ') || 'No datasets'}<span className="text-gray-300 ml-1">· full model</span></p>
+                      {(() => {
+                        // All service IDs that contributed to this training run (from history + registered).
+                        const historyIds = new Set([
+                          ...Object.keys(trainingHistory.client_training_losses ?? {}),
+                          ...Object.keys(trainingHistory.client_validation_losses ?? {}),
+                        ]);
+                        registeredTrainerApps.forEach(t => historyIds.add(t.serviceIds[0].websocket_service_id));
+                        return Array.from(historyIds).map(svcId => {
+                          // Connectivity: is the trainer app currently running?
+                          const liveTrainer = trainers.find(t => t.serviceIds?.[0]?.websocket_service_id === svcId);
+                          const isConnected = !!liveTrainer && liveTrainer.status === 'RUNNING';
+                          // Display metadata — prefer live data, fall back to cache
+                          const meta = trainerMetaCache[svcId];
+                          const workerName = meta?.workerName || svcId;
+                          const geoDisplay = meta?.geoDisplay || '';
+                          const datasetNames = liveTrainer
+                            ? Object.values(liveTrainer.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean)
+                            : (meta?.datasets ?? []);
+                          // Manager connectivity (needed for "Save to worker")
+                          const managerId = liveTrainer?.managerId ?? meta?.managerId;
+                          const isMgrConnected = !!managers.find(m => m.serviceId === managerId && m.isConnected);
+                          // Offline = trainer not running; Disconnected = manager not even reachable
+                          const offlineBadge = !isConnected
+                            ? (isMgrConnected ? 'Offline' : 'Disconnected')
+                            : null;
+                          const clientRounds = trainingHistory.client_training_losses?.[svcId]?.length || rounds;
+                          const autoDesc = `Tabula model (embedder + transformer + heads) · ${clientRounds} federated round${clientRounds !== 1 ? 's' : ''} · ${datasetNames.join(', ')}`;
+                          const pubKey = `publish-${svcId}`;
+                          const locKey = `local-${svcId}`;
+                          const pubStatus = saveStatuses[pubKey] || 'idle';
+                          const locStatus = saveStatuses[locKey] || 'idle';
+                          const pubSaved = savedItems[pubKey];
+                          const locSaved = savedItems[locKey];
+                          const borderCls = (st: string) => st === 'success' ? 'border-emerald-300 bg-emerald-50/30' : st === 'duplicate' ? 'border-amber-300 bg-amber-50/30' : !isConnected ? 'border-gray-200 bg-gray-50/50' : 'border-gray-200';
+                          const descKey = `trainer-${svcId}`;
+                          const savingDisabled = !isConnected || pubStatus === 'saving' || locStatus === 'saving';
+                          return (
+                            <div key={svcId} className={`rounded-xl border p-3 space-y-2 transition-colors ${borderCls(pubStatus === 'idle' ? locStatus : pubStatus)}`}>
+                              <div className="flex items-start justify-between gap-2">
+                                <div>
+                                  <p className={`text-sm font-semibold ${!isConnected ? 'text-gray-500' : 'text-gray-800'}`}>{workerName}</p>
+                                  <p className="text-xs text-gray-400">
+                                    {geoDisplay && <>{geoDisplay}<span className="text-gray-300 mx-1">·</span></>}
+                                    {datasetNames.join(', ') || 'No datasets'}<span className="text-gray-300 ml-1">· full model</span>
+                                  </p>
+                                </div>
+                                {offlineBadge && (
+                                  <span className={`flex-shrink-0 text-xs font-medium px-2 py-0.5 rounded-full ${offlineBadge === 'Disconnected' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>{offlineBadge}</span>
+                                )}
+                              </div>
+                              <input type="text"
+                                value={saveDescriptions[descKey] ?? autoDesc}
+                                onChange={e => setSaveDescriptions(p => ({ ...p, [descKey]: e.target.value }))}
+                                onBlur={e => { if (!e.target.value.trim()) setSaveDescriptions(p => { const n = { ...p }; delete n[descKey]; return n; }); }}
+                                disabled={!isConnected}
+                                className="w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-violet-400 bg-white disabled:bg-gray-50 disabled:text-gray-400"
+                              />
+                              <div className={`flex flex-wrap items-center gap-2 rounded-lg p-1.5 -m-1.5 transition-colors`}>
+                                <button onClick={() => saveTrainerPublish(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
+                                  title={isConnected ? "Publish full model to chiron-models artifact hub" : "Trainer is not running — cannot save"}
+                                  className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
+                                  {pubStatus === 'saving' ? <>{spinner} Saving…</> : <>{publishSvg} Publish</>}
+                                </button>
+                                <button onClick={() => saveTrainerLocal(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
+                                  title={isConnected ? "Save to worker at ~/.bioengine/models/" : "Trainer is not running — cannot save"}
+                                  className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-semibold rounded-lg hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all border border-gray-200">
+                                  {locStatus === 'saving' ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" /> Saving…</> : <>{localSvg} Save to worker</>}
+                                </button>
+                                {pubStatus === 'success' && pubSaved?.artifactId && <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded border border-emerald-200 truncate max-w-[180px]" title={pubSaved.artifactId}>✓ {pubSaved.artifactId.split('/').pop()}</span>}
+                                {locStatus === 'success' && locSaved?.path && <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded border border-emerald-200 truncate max-w-[180px]" title={locSaved.path}>✓ {locSaved.path.split('/').slice(-2).join('/')}</span>}
+                                {(pubStatus === 'duplicate' || locStatus === 'duplicate') && <span className="text-xs text-amber-700 bg-amber-100 px-2 py-1 rounded border border-amber-200">Already saved</span>}
+                              </div>
                             </div>
-                            <input type="text"
-                              value={saveDescriptions[descKey] ?? autoDesc}
-                              onChange={e => setSaveDescriptions(p => ({ ...p, [descKey]: e.target.value }))}
-                              onBlur={e => { if (!e.target.value.trim()) setSaveDescriptions(p => { const n = { ...p }; delete n[descKey]; return n; }); }}
-                              className="w-full px-2.5 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-violet-400 bg-white"
-                            />
-                            <div className={`flex flex-wrap items-center gap-2 rounded-lg p-1.5 -m-1.5 transition-colors ${borderCls(pubStatus === 'idle' ? locStatus : pubStatus)}`}>
-                              <button onClick={() => saveTrainerPublish(svcId, saveDescriptions[descKey] || autoDesc)} disabled={pubStatus === 'saving' || locStatus === 'saving'}
-                                title="Publish full model to chiron-models artifact hub"
-                                className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                                {pubStatus === 'saving' ? <>{spinner} Saving…</> : <>{publishSvg} Publish</>}
-                              </button>
-                              <button onClick={() => saveTrainerLocal(svcId, saveDescriptions[descKey] || autoDesc)} disabled={locStatus === 'saving' || pubStatus === 'saving'}
-                                title="Save to worker at ~/.bioengine/models/"
-                                className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-semibold rounded-lg hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all border border-gray-200">
-                                {locStatus === 'saving' ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" /> Saving…</> : <>{localSvg} Save to worker</>}
-                              </button>
-                              {pubStatus === 'success' && pubSaved?.artifactId && <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded border border-emerald-200 truncate max-w-[180px]" title={pubSaved.artifactId}>✓ {pubSaved.artifactId.split('/').pop()}</span>}
-                              {locStatus === 'success' && locSaved?.path && <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded border border-emerald-200 truncate max-w-[180px]" title={locSaved.path}>✓ {locSaved.path.split('/').slice(-2).join('/')}</span>}
-                              {(pubStatus === 'duplicate' || locStatus === 'duplicate') && <span className="text-xs text-amber-700 bg-amber-100 px-2 py-1 rounded border border-amber-200">Already saved</span>}
-                            </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        });
+                      })()}
                     </div>
                   </div>
                 );
