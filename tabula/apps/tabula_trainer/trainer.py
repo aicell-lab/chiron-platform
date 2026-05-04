@@ -860,9 +860,6 @@ class TabulaTrainer:
 
         loop = asyncio.get_running_loop()
         try:
-            # Reset flags
-            self.evaluate_status = "RUNNING"
-
             # Run evaluate in executor to avoid blocking the event loop
             val_loss, num_examples, metrics = await loop.run_in_executor(
                 self.executor,
@@ -1327,11 +1324,13 @@ class TabulaTrainer:
             raise ValueError("server_round must be a positive integer")
 
         # Reset status and progress for evaluate
-        self.evaluate_status = "NOT_STARTED"
         self.evaluate_result = None
         self.local_client.reset_evaluate_progress()
 
-        # Start background task
+        # Mark as RUNNING before creating the task so that callers polling
+        # get_evaluate_status() immediately see the correct state.  The
+        # background task overrides this with COMPLETED or FAILED when done.
+        self.evaluate_status = "RUNNING"
         self.evaluate_cancelled = False
         self.evaluate_task = asyncio.create_task(
             self._evaluate_background(
@@ -1341,16 +1340,10 @@ class TabulaTrainer:
                 server_round=server_round,
             )
         )
-
-        for _ in range(5):
-            if self.evaluate_status == "RUNNING":
-                return {
-                    "success": True,
-                    "message": "Evaluate task started successfully",
-                }
-            await asyncio.sleep(1.0)
-
-        raise RuntimeError("Failed to start evaluate task")
+        return {
+            "success": True,
+            "message": "Evaluate task started successfully",
+        }
 
     @schema_method(arbitrary_types_allowed=True)
     async def get_fit_status(
