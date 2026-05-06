@@ -5,6 +5,107 @@ import { useHyphaStore } from '../../store/hyphaStore';
 type OSType = 'linux' | 'macos' | 'windows';
 type ContainerRuntimeType = 'docker' | 'podman' | 'singularity' | 'apptainer';
 
+// Tag-badge input: space/enter commits a tag, backspace on empty field focuses last tag,
+// arrow keys navigate tags, delete/backspace removes focused tag.
+const TagInput: React.FC<{
+  tags: string[];
+  onChange: (tags: string[]) => void;
+  placeholder?: string;
+}> = ({ tags, onChange, placeholder }) => {
+  const [inputValue, setInputValue] = useState('');
+  const [focusedIdx, setFocusedIdx] = useState<number | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const commit = (value: string) => {
+    const v = value.trim();
+    if (v && !tags.includes(v)) onChange([...tags, v]);
+    setInputValue('');
+  };
+
+  const remove = (idx: number) => {
+    const next = tags.filter((_, i) => i !== idx);
+    onChange(next);
+    if (next.length === 0) { setFocusedIdx(null); inputRef.current?.focus(); }
+    else if (idx >= next.length) setFocusedIdx(next.length - 1);
+    else setFocusedIdx(idx);
+  };
+
+  useEffect(() => {
+    if (focusedIdx === null) return;
+    const els = containerRef.current?.querySelectorAll<HTMLElement>('[data-tag-badge]');
+    els?.[focusedIdx]?.focus();
+  }, [focusedIdx]);
+
+  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if ((e.key === ' ' || e.key === 'Enter') && inputValue.trim()) {
+      e.preventDefault(); commit(inputValue);
+    } else if (e.key === 'Backspace' && !inputValue && tags.length > 0) {
+      e.preventDefault(); setFocusedIdx(tags.length - 1);
+    } else if (e.key === 'ArrowLeft' && !inputValue && tags.length > 0) {
+      e.preventDefault(); setFocusedIdx(tags.length - 1);
+    }
+  };
+
+  const handleTagKeyDown = (e: React.KeyboardEvent<HTMLSpanElement>, idx: number) => {
+    if (e.key === 'Backspace' || e.key === 'Delete') {
+      e.preventDefault(); remove(idx);
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (idx > 0) setFocusedIdx(idx - 1);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (idx < tags.length - 1) setFocusedIdx(idx + 1);
+      else { setFocusedIdx(null); inputRef.current?.focus(); }
+    } else if (e.key.length === 1) {
+      setFocusedIdx(null); inputRef.current?.focus();
+    }
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      onClick={() => { if (focusedIdx === null) inputRef.current?.focus(); }}
+      className="flex flex-wrap gap-1.5 items-center min-h-[38px] px-2.5 py-1.5 border border-gray-300 rounded-lg focus-within:ring-2 focus-within:ring-blue-500 bg-white cursor-text"
+    >
+      {tags.map((tag, i) => (
+        <span
+          key={tag}
+          data-tag-badge
+          tabIndex={0}
+          onFocus={() => setFocusedIdx(i)}
+          onBlur={() => setFocusedIdx(null)}
+          onKeyDown={(e) => handleTagKeyDown(e, i)}
+          className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full border outline-none select-none
+            ${tag === '*'
+              ? 'bg-emerald-100 text-emerald-700 border-emerald-300 focus:ring-2 focus:ring-emerald-400'
+              : 'bg-blue-100 text-blue-700 border-blue-200 focus:ring-2 focus:ring-blue-400'}`}
+        >
+          {tag === '*' ? '* public' : tag}
+          <button
+            type="button"
+            tabIndex={-1}
+            onClick={(e) => { e.stopPropagation(); remove(i); }}
+            className="opacity-50 hover:opacity-100 leading-none ml-0.5"
+            aria-label={`Remove ${tag}`}
+          >×</button>
+        </span>
+      ))}
+      <input
+        ref={inputRef}
+        type="text"
+        value={inputValue}
+        placeholder={tags.length === 0 ? placeholder : ''}
+        onChange={(e) => setInputValue(e.target.value)}
+        onKeyDown={handleInputKeyDown}
+        onFocus={() => setFocusedIdx(null)}
+        onBlur={() => { if (inputValue.trim()) commit(inputValue); }}
+        className="flex-1 min-w-[140px] outline-none text-sm bg-transparent py-0.5"
+      />
+    </div>
+  );
+};
+
 const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.3.0';
 
 const BioEngineGuide: React.FC = () => {
@@ -37,6 +138,7 @@ const BioEngineGuide: React.FC = () => {
   const [workspaceResolved, setWorkspaceResolved] = useState(false);
 
   const [adminUsers, setAdminUsers] = useState('');
+  const [managerAuthorizedUsers, setManagerAuthorizedUsers] = useState<string[]>([]);
   const [workerName, setWorkerName] = useState('');
   const [workspaceDir, setWorkspaceDir] = useState('');
   const [workspace, setWorkspace] = useState('');
@@ -137,7 +239,12 @@ const BioEngineGuide: React.FC = () => {
       `--head-num-cpus ${cpus}`,
       gpus > 0 ? `--head-num-gpus ${gpus}` : '--head-num-gpus 0',
       `--head-memory-in-gb ${memory}`,
-      '--startup-applications "{\\"artifact_id\\": \\"chiron-platform/chiron-manager\\", \\"application_id\\": \\"chiron-manager\\"}"',
+      (() => {
+        const authPart = managerAuthorizedUsers.length > 0
+          ? `, \\"authorized_users\\": [${managerAuthorizedUsers.map(u => `\\"${u}\\"`).join(', ')}]`
+          : '';
+        return `--startup-applications "{\\"artifact_id\\": \\"chiron-platform/chiron-manager\\", \\"application_id\\": \\"chiron-manager\\"${authPart}}"`;
+      })(),
       adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
       workspace ? `--workspace "${workspace}"` : '',
       `--worker-name "${workerName || 'Chiron Worker'}"`,
@@ -288,7 +395,12 @@ ${bin} pull ${sif} ${image}`;
       `--head-num-cpus ${cpus}`,
       `--head-num-gpus ${gpus}`,
       `--head-memory-in-gb ${memory}`,
-      `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}'`,
+      (() => {
+        const authPart = managerAuthorizedUsers.length > 0
+          ? `,"authorized_users":[${managerAuthorizedUsers.map(u => `"${u}"`).join(',')}]`
+          : '';
+        return `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"${authPart}}'`;
+      })(),
       adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
       workspace ? `--workspace "${workspace}"` : '',
       `--worker-name "${workerName || 'Chiron Worker'}"`,
@@ -671,6 +783,20 @@ authorized_users:
                       Leave empty if running an <strong>Orchestrator only</strong>. The data server will be omitted.
                     </p>
                   </div>
+                </div>
+
+                {/* Chiron Manager Authorized Users — full-width row */}
+                <div className="md:col-span-2 lg:col-span-3">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Chiron Manager Authorized Users</label>
+                  <TagInput
+                    tags={managerAuthorizedUsers}
+                    onChange={setManagerAuthorizedUsers}
+                    placeholder="user@example.com or * — press Space or Enter to add"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Who can access the Chiron Manager app on this worker. Use <code className="bg-gray-100 px-0.5 rounded">*</code> for public access.
+                    Leave empty to restrict to admin users only.
+                  </p>
                 </div>
 
               </div>
