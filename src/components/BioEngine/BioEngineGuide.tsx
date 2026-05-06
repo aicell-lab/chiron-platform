@@ -648,6 +648,14 @@ authorized_users:
                   <p className="text-xs text-gray-500 mt-1">RAM for the Ray head node in GB</p>
                 </div>
 
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Worker Name</label>
+                  <input type="text" value={workerName} onChange={(e) => setWorkerName(e.target.value)}
+                    placeholder="Chiron Platform Worker"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  <p className="text-xs text-gray-500 mt-1">Display name for this worker in the Chiron UI</p>
+                </div>
+
                 {/* Data Import Directory */}
                 <div className="md:col-span-2 lg:col-span-3">
                   <label className="block text-sm font-medium text-gray-700 mb-1">Data Import Directory</label>
@@ -689,14 +697,6 @@ authorized_users:
                       placeholder="user1@example.com,user2@example.com or *"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-xs text-gray-500 mt-1">Users who can manage this worker. Leave empty to use the logged-in user</p>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Worker Name</label>
-                    <input type="text" value={workerName} onChange={(e) => setWorkerName(e.target.value)}
-                      placeholder="Chiron Platform Worker"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    <p className="text-xs text-gray-500 mt-1">Display name for this worker in the Chiron UI</p>
                   </div>
 
                   <div className="md:col-span-2">
