@@ -241,6 +241,13 @@ const Training: React.FC = () => {
   const [errorDetailTrainerId, setErrorDetailTrainerId] = useState<string>('');
   const [errorDetailMessage, setErrorDetailMessage] = useState<string>('');
 
+  const [showAppLogsModal, setShowAppLogsModal] = useState(false);
+  const [appLogsLabel, setAppLogsLabel] = useState<string>('');
+  const [appLogsData, setAppLogsData] = useState<any>(null);
+  const [appLogsLoading, setAppLogsLoading] = useState(false);
+  const [appLogsManagerId, setAppLogsManagerId] = useState<string>('');
+  const [appLogsAppId, setAppLogsAppId] = useState<string>('');
+
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [confirmModalTitle, setConfirmModalTitle] = useState<string>('');
   const [confirmModalMessage, setConfirmModalMessage] = useState<string>('');
@@ -1208,7 +1215,26 @@ const Training: React.FC = () => {
   const getTrainerDisplayName = (serviceId: string): string =>
     trainerServiceToWorkerName[serviceId] || serviceId;
 
-  const getStatusBadge = (status?: string) => {
+  const openAppLogsModal = async (managerId: string, appId: string, label: string) => {
+    setAppLogsManagerId(managerId);
+    setAppLogsAppId(appId);
+    setAppLogsLabel(label);
+    setAppLogsData(null);
+    setAppLogsLoading(true);
+    setShowAppLogsModal(true);
+    try {
+      const manager = managers.find(m => m.serviceId === managerId);
+      if (!manager) throw new Error('Manager not connected');
+      const data = await manager.service.get_app_logs({ application_id: appId, logs_tail: 200, _rkwargs: true });
+      setAppLogsData(data);
+    } catch (e) {
+      setAppLogsData({ error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setAppLogsLoading(false);
+    }
+  };
+
+  const getStatusBadge = (status?: string, onClick?: () => void) => {
     const displayStatus = status || 'NOT_STARTED';
     const statusConfig: Record<string, { color: string; dot: string }> = {
       'NOT_STARTED': { color: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400' },
@@ -1219,10 +1245,22 @@ const Training: React.FC = () => {
       'DELETING': { color: 'bg-orange-100 text-orange-700', dot: 'bg-orange-500 animate-pulse' },
     };
     const cfg = statusConfig[displayStatus] || statusConfig['NOT_STARTED'];
-    return (
-      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.color}`}>
+    const inner = (
+      <>
         <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
         {displayStatus}
+      </>
+    );
+    if (onClick) {
+      return (
+        <button onClick={onClick} className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.color} hover:brightness-95 cursor-pointer transition-all`} title="Click to view logs">
+          {inner}
+        </button>
+      );
+    }
+    return (
+      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.color}`}>
+        {inner}
       </span>
     );
   };
@@ -1355,8 +1393,13 @@ const Training: React.FC = () => {
     if (!orchObj) return [];
     const orchManagerId = orchObj.managerId;
     const stage = trainingStatus?.stage;
+    // fit / evaluate: Trainer → Orchestrator (trainers send weights/results)
+    // aggregation / distribution: Orchestrator → Trainers (orch sends averaged weights)
     const animated: MapConnection['animated'] =
-      isTraining && (stage === 'fit' || stage === 'evaluate' || stage === 'distribution') ? stage : undefined;
+      isTraining && stage === 'fit'          ? 'fit' :
+      isTraining && stage === 'evaluate'     ? 'evaluate' :
+      isTraining && (stage === 'aggregation' || stage === 'distribution') ? 'distribution' :
+      undefined;
     return trainers
       .filter(t => {
         const svcId = t.serviceIds?.[0]?.websocket_service_id;
@@ -1622,7 +1665,7 @@ const Training: React.FC = () => {
                                     <div className="flex flex-col gap-1 items-center">
                                       {orchestrators.filter(o => o.managerId === worker.serviceId).map(o => (
                                         <div key={o.appId} className="flex items-center gap-1 justify-center">
-                                          {getStatusBadge(o.status)}
+                                          {getStatusBadge(o.status, () => openAppLogsModal(worker.serviceId, o.appId, `Orchestrator · ${o.appId}`))}
                                           {o.isBusy && <BusyBadge />}
                                           <button onClick={() => removeOrchestrator(worker.serviceId)} className="text-red-400 hover:text-red-600 ml-0.5 flex-shrink-0" title="Remove"><FaTrash size={10} /></button>
                                         </div>
@@ -1637,7 +1680,7 @@ const Training: React.FC = () => {
                                     <div className="flex flex-col gap-1 items-center">
                                       {trainers.filter(t => t.managerId === worker.serviceId).map(t => (
                                         <div key={t.appId} className="flex items-center gap-1 justify-center">
-                                          {getStatusBadge(t.status)}
+                                          {getStatusBadge(t.status, () => openAppLogsModal(worker.serviceId, t.appId, `Trainer · ${t.appId}`))}
                                           {t.isBusy && <BusyBadge />}
                                           <button onClick={() => removeTrainer(worker.serviceId, t.appId)} className="text-red-400 hover:text-red-600 ml-0.5 flex-shrink-0" title="Remove"><FaTrash size={10} /></button>
                                         </div>
@@ -2534,6 +2577,75 @@ const Training: React.FC = () => {
                 </a>
               )}
               <button onClick={() => { setShowErrorPopup(false); setErrorPopupMessage(''); setErrorPopupDetails(''); setErrorPopupDashboardUrl(null); }} className="w-full py-2.5 bg-red-600 text-white text-sm font-medium rounded-xl hover:bg-red-700 transition-colors">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====== APP LOGS MODAL ====== */}
+      {showAppLogsModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={e => { if (e.target === e.currentTarget) setShowAppLogsModal(false); }}>
+          <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[85vh] flex flex-col overflow-hidden">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between flex-shrink-0">
+              <div>
+                <p className="font-semibold text-gray-900 text-sm">{appLogsLabel}</p>
+                <p className="text-xs text-gray-400 font-mono mt-0.5">{appLogsAppId}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => openAppLogsModal(appLogsManagerId, appLogsAppId, appLogsLabel)}
+                  disabled={appLogsLoading}
+                  className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 transition-colors disabled:opacity-40"
+                  title="Refresh logs">
+                  <svg xmlns="http://www.w3.org/2000/svg" className={`w-3.5 h-3.5 ${appLogsLoading ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Refresh
+                </button>
+                <button onClick={() => setShowAppLogsModal(false)} className="text-gray-400 hover:text-gray-600 transition-colors" title="Close">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+              </div>
+            </div>
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+              {appLogsLoading && <div className="flex items-center justify-center py-12 text-gray-400 text-sm gap-2"><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>Loading logs…</div>}
+              {!appLogsLoading && appLogsData?.error && (
+                <div className="bg-red-50 border border-red-100 rounded-xl p-4 text-sm text-red-700 font-mono">{appLogsData.error}</div>
+              )}
+              {!appLogsLoading && appLogsData && !appLogsData.error && (() => {
+                const appStatus = appLogsData.status;
+                const appMessage = appLogsData.message;
+                const deployments: Record<string, any> = appLogsData.deployments || {};
+                return (
+                  <>
+                    {/* Application-level status + message */}
+                    <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Application</span>
+                        {appStatus && <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${appStatus === 'RUNNING' ? 'bg-emerald-100 text-emerald-700' : appStatus === 'DEPLOY_FAILED' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{appStatus}</span>}
+                      </div>
+                      {appMessage ? <p className="text-xs font-mono text-gray-700 whitespace-pre-wrap">{appMessage}</p> : <p className="text-xs text-gray-400 italic">No application message</p>}
+                    </div>
+                    {/* Per-deployment sections */}
+                    {Object.entries(deployments).map(([deployName, dep]: [string, any]) => {
+                      const logs: Record<string, string[]> = dep.logs || {};
+                      const allLines = Object.values(logs).flat();
+                      return (
+                        <div key={deployName} className="border border-gray-100 rounded-xl overflow-hidden">
+                          <div className="flex items-center gap-2 px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+                            <span className="text-xs font-semibold text-gray-700">{deployName}</span>
+                            {dep.status && <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${dep.status === 'HEALTHY' ? 'bg-emerald-100 text-emerald-700' : dep.status === 'UNHEALTHY' || dep.status === 'DEPLOY_FAILED' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{dep.status}</span>}
+                          </div>
+                          {dep.message && <div className="px-4 py-2 bg-amber-50 border-b border-amber-100 text-xs font-mono text-amber-800 whitespace-pre-wrap">{dep.message}</div>}
+                          <pre className="text-xs font-mono text-gray-700 bg-gray-950 text-green-300 p-4 overflow-x-auto max-h-64 overflow-y-auto leading-relaxed">{allLines.length > 0 ? allLines.join('\n') : '(no log output)'}</pre>
+                        </div>
+                      );
+                    })}
+                    {Object.keys(deployments).length === 0 && <p className="text-sm text-gray-400 text-center py-6">No deployment information available</p>}
+                  </>
+                );
+              })()}
             </div>
           </div>
         </div>
