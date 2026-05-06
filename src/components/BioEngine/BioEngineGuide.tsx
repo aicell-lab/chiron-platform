@@ -11,7 +11,8 @@ const TagInput: React.FC<{
   tags: string[];
   onChange: (tags: string[]) => void;
   placeholder?: string;
-}> = ({ tags, onChange, placeholder }) => {
+  allowWildcard?: boolean;
+}> = ({ tags, onChange, placeholder, allowWildcard = true }) => {
   const [inputValue, setInputValue] = useState('');
   const [focusedIdx, setFocusedIdx] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -19,7 +20,7 @@ const TagInput: React.FC<{
 
   const commit = (value: string) => {
     const v = value.trim();
-    if (v && !tags.includes(v)) onChange([...tags, v]);
+    if (v && !tags.includes(v) && (allowWildcard || v !== '*')) onChange([...tags, v]);
     setInputValue('');
   };
 
@@ -137,7 +138,7 @@ const BioEngineGuide: React.FC = () => {
 
   const [workspaceResolved, setWorkspaceResolved] = useState(false);
 
-  const [adminUsers, setAdminUsers] = useState('');
+  const [adminUsers, setAdminUsers] = useState<string[]>([]);
   const [managerAuthorizedUsers, setManagerAuthorizedUsers] = useState<string[]>([]);
   const [workerName, setWorkerName] = useState('');
   const [workspaceDir, setWorkspaceDir] = useState('');
@@ -229,11 +230,9 @@ const BioEngineGuide: React.FC = () => {
 
   // Build the common worker arg list (used by both compose and singularity)
   const buildWorkerArgs = (indent: string): string => {
-    let adminUsersStr = '';
-    if (adminUsers) {
-      adminUsersStr = adminUsers === '*' ? '"*"'
-        : adminUsers.split(',').map(u => `"${u.trim()}"`).join(' ');
-    }
+    const adminUsersStr = adminUsers.length > 0
+      ? adminUsers.map(u => `"${u}"`).join(' ')
+      : '';
     return [
       '--mode single-machine',
       `--head-num-cpus ${cpus}`,
@@ -385,11 +384,9 @@ ${bin} pull ${sif} ${image}`;
     const dataDirArg = dataDir ? ' \\\n  --data-dir /data' : '';
 
     // Singularity worker args (single-quote wrapped for shell safety)
-    let adminUsersStr = '';
-    if (adminUsers) {
-      adminUsersStr = adminUsers === '*' ? '"*"'
-        : adminUsers.split(',').map(u => `"${u.trim()}"`).join(' ');
-    }
+    const adminUsersStr = adminUsers.length > 0
+      ? adminUsers.map(u => `"${u}"`).join(' ')
+      : '';
     const workerArgsList = [
       '--mode single-machine',
       `--head-num-cpus ${cpus}`,
@@ -463,7 +460,7 @@ Source code: https://github.com/aicell-lab/bioengine-worker
 - **CPUs**: ${cpus}
 - **GPUs**: ${gpus}${gpus > 0 && gpuIndices ? ` (indices: ${gpuIndices})` : ''}
 - **Memory**: ${memory} GB${isComposeRuntime() ? `\n- **Shared Memory**: ${shmSize}` : ''}
-${adminUsers ? `- **Admin Users**: ${adminUsers}` : '- **Admin Users**: Default (logged-in user)'}
+${adminUsers.length > 0 ? `- **Admin Users**: ${adminUsers.join(', ')}` : '- **Admin Users**: Default (logged-in user)'}
 ${dataDir ? `- **Data Directory**: ${dataDir}` : '- **Data Directory**: Not set (Orchestrator-only)'}
 ${customImage ? `- **Custom Image**: ${customImage}` : ''}
 
@@ -791,11 +788,11 @@ authorized_users:
                   <TagInput
                     tags={managerAuthorizedUsers}
                     onChange={setManagerAuthorizedUsers}
-                    placeholder="user@example.com or * — press Space or Enter to add"
+                    placeholder="user@example.com or *"
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    Who can access the Chiron Manager app on this worker. Use <code className="bg-gray-100 px-0.5 rounded">*</code> for public access.
-                    Leave empty to restrict to admin users only.
+                    Who can manage and use this worker in the Chiron Platform. Use <code className="bg-gray-100 px-0.5 rounded">*</code> to allow all users.
+                    Leave empty to restrict to admin users only. Press Space or Enter to add.
                   </p>
                 </div>
 
@@ -820,10 +817,15 @@ authorized_users:
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Admin Users</label>
-                    <input type="text" value={adminUsers} onChange={(e) => setAdminUsers(e.target.value)}
-                      placeholder="user1@example.com,user2@example.com or *"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    <p className="text-xs text-gray-500 mt-1">Users who can manage this worker. Leave empty to use the logged-in user</p>
+                    <TagInput
+                      tags={adminUsers}
+                      onChange={setAdminUsers}
+                      placeholder="user@example.com"
+                      allowWildcard={false}
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Users who can manage and redeploy apps on this worker. Leave empty to use the logged-in user. Press Space or Enter to add.
+                    </p>
                   </div>
 
                   <div>
