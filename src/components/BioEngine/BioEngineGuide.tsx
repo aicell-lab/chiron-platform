@@ -37,7 +37,7 @@ const BioEngineGuide: React.FC = () => {
   const [workspaceResolved, setWorkspaceResolved] = useState(false);
 
   const [adminUsers, setAdminUsers] = useState('');
-  const [workerName, setWorkerName] = useState('Chiron Platform Worker');
+  const [workerName, setWorkerName] = useState('');
   const [workspaceDir, setWorkspaceDir] = useState('');
   const [workspace, setWorkspace] = useState('');
   const [serverUrl, setServerUrl] = useState('');
@@ -140,7 +140,7 @@ const BioEngineGuide: React.FC = () => {
       '--startup-applications "{\\"artifact_id\\": \\"chiron-platform/chiron-manager\\", \\"application_id\\": \\"chiron-manager\\"}"',
       adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
       workspace ? `--workspace "${workspace}"` : '',
-      workerName ? `--worker-name "${workerName}"` : '',
+      `--worker-name "${workerName || 'Chiron Worker'}"`,
       clientId ? `--client-id "${clientId}"` : '',
       serverUrl ? `--server-url "${serverUrl}"` : '',
       '--dashboard-url "https://chiron.aicell.io/#/worker"',
@@ -150,7 +150,7 @@ const BioEngineGuide: React.FC = () => {
   const getDockerComposeContent = () => {
     const imageToUse = customImage || DEFAULT_IMAGE;
     const workspaceDirPath = getWorkspaceDirPath();
-    const workerSlug = (workerName || 'bioengine-worker')
+    const workerSlug = (workerName || 'Chiron Worker')
       .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
     const platformLine = platformOverride ? `\n    platform: ${platformOverride}` : '';
 
@@ -291,7 +291,7 @@ ${bin} pull ${sif} ${image}`;
       `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}'`,
       adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
       workspace ? `--workspace "${workspace}"` : '',
-      workerName ? `--worker-name "${workerName}"` : '',
+      `--worker-name "${workerName || 'Chiron Worker'}"`,
       clientId ? `--client-id "${clientId}"` : '',
       serverUrl ? `--server-url "${serverUrl}"` : '',
       '--dashboard-url "https://chiron.aicell.io/#/worker"',
@@ -648,28 +648,29 @@ authorized_users:
                   <p className="text-xs text-gray-500 mt-1">RAM for the Ray head node in GB</p>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Worker Name</label>
-                  <input type="text" value={workerName} onChange={(e) => setWorkerName(e.target.value)}
-                    placeholder="Chiron Platform Worker"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                  <p className="text-xs text-gray-500 mt-1">Display name for this worker in the Chiron UI</p>
-                </div>
-
-                {/* Data Import Directory */}
-                <div className="md:col-span-2 lg:col-span-3">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Data Import Directory</label>
-                  <input
-                    type="text"
-                    value={dataDir}
-                    onChange={(e) => setDataDir(e.target.value)}
-                    placeholder="/path/to/your/single-cell/data"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Path to your local single-cell datasets for model training. Required for a <strong>Tabula Trainer</strong>.
-                    Leave empty if running an <strong>Orchestrator only</strong>. The data server will be omitted.
-                  </p>
+                {/* Worker Name (1/3) + Training Data Directory (2/3) */}
+                <div className="md:col-span-2 lg:col-span-3 grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Worker Name</label>
+                    <input type="text" value={workerName} onChange={(e) => setWorkerName(e.target.value)}
+                      placeholder="Chiron Worker"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <p className="text-xs text-gray-500 mt-1">Display name for this worker in the Chiron UI</p>
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Training Data Directory</label>
+                    <input
+                      type="text"
+                      value={dataDir}
+                      onChange={(e) => setDataDir(e.target.value)}
+                      placeholder="/path/to/your/single-cell/data"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Path to your local single-cell datasets for model training. Required for a <strong>Tabula Trainer</strong>.
+                      Leave empty if running an <strong>Orchestrator only</strong>. The data server will be omitted.
+                    </p>
+                  </div>
                 </div>
 
               </div>
@@ -699,7 +700,7 @@ authorized_users:
                     <p className="text-xs text-gray-500 mt-1">Users who can manage this worker. Leave empty to use the logged-in user</p>
                   </div>
 
-                  <div className="md:col-span-2">
+                  <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">BioEngine Workspace Directory</label>
                     <input type="text" value={workspaceDir} onChange={(e) => setWorkspaceDir(e.target.value)}
                       placeholder={os === 'windows' ? '%USERPROFILE%\\.bioengine' : '$HOME/.bioengine'}
