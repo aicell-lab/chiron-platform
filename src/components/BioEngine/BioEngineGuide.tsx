@@ -824,7 +824,7 @@ authorized_users:
                       allowWildcard={false}
                     />
                     <p className="text-xs text-gray-500 mt-1">
-                      Users who can manage and redeploy apps on this worker. Leave empty to use the logged-in user. Press Space or Enter to add.
+                      Users who can deploy and manage apps on this worker. Leave empty to use the logged-in user. Press Space or Enter to add.
                     </p>
                   </div>
 
