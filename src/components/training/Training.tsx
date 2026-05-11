@@ -235,10 +235,13 @@ const Training: React.FC = () => {
 
   // Checkpoint selectors — fetched when Save Weights panel becomes visible
   type CheckpointEntry = { round: number; path: string; saved_at: string };
+  type TrainerSession = { session_id: string; is_current: boolean; checkpoints: CheckpointEntry[] };
   const [globalCheckpoints, setGlobalCheckpoints] = useState<CheckpointEntry[]>([]);
   const [selectedGlobalRound, setSelectedGlobalRound] = useState<number | null>(null);
-  const [trainerCheckpoints, setTrainerCheckpoints] = useState<Record<string, CheckpointEntry[]>>({});
-  const [selectedTrainerRounds, setSelectedTrainerRounds] = useState<Record<string, number | null>>({});
+  // keyed by trainer websocket service ID → list of sessions (newest first)
+  const [trainerCheckpoints, setTrainerCheckpoints] = useState<Record<string, TrainerSession[]>>({});
+  // keyed by trainer service ID → { session_id, round }
+  const [selectedTrainerCkpt, setSelectedTrainerCkpt] = useState<Record<string, { session_id: string; round: number } | null>>({});
 
   const [trainerParams, setTrainerParams] = useState<any>(null);
   const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
@@ -1174,8 +1177,8 @@ const Training: React.FC = () => {
     try {
       const orchSvc = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
       const params: any = { client_ids: [svcId], description: desc, _rkwargs: true };
-      const selRound = selectedTrainerRounds[svcId];
-      if (selRound != null) params.checkpoint_round = selRound;
+      const selCkpt = selectedTrainerCkpt[svcId];
+      if (selCkpt) { params.checkpoint_round = selCkpt.round; params.session_id = selCkpt.session_id; }
       const artifactIds = await orchSvc.save_model_weights(params);
       const artifactId = Object.values(artifactIds as Record<string, string>)[0] || '';
       setSavedItems(p => ({ ...p, [key]: { artifactId, description: desc } }));
@@ -1197,8 +1200,8 @@ const Training: React.FC = () => {
     try {
       const trainerSvc = await server.getService(svcId);
       const localParams: any = { description: desc, _rkwargs: true };
-      const selRound = selectedTrainerRounds[svcId];
-      if (selRound != null) localParams.checkpoint_round = selRound;
+      const selCkpt = selectedTrainerCkpt[svcId];
+      if (selCkpt) { localParams.checkpoint_round = selCkpt.round; localParams.session_id = selCkpt.session_id; }
       const savedPath = await trainerSvc.save_local_model(localParams);
       setSavedItems(p => ({ ...p, [key]: { path: savedPath as string, description: desc } }));
       setSaveStatus(key, 'success');
@@ -1497,12 +1500,14 @@ const Training: React.FC = () => {
       if (!liveTrainer || liveTrainer.status !== 'RUNNING') return;
       try {
         const svc = await server.getService(svcId);
-        const ckpts: CheckpointEntry[] = await svc.list_weight_checkpoints();
-        setTrainerCheckpoints(prev => ({ ...prev, [svcId]: ckpts || [] }));
-        setSelectedTrainerRounds(prev => {
+        const sessions: TrainerSession[] = await svc.list_weight_checkpoints();
+        setTrainerCheckpoints(prev => ({ ...prev, [svcId]: sessions || [] }));
+        setSelectedTrainerCkpt(prev => {
           if (prev[svcId] != null) return prev;
-          const latest = ckpts?.[0]?.round ?? null;
-          return { ...prev, [svcId]: latest };
+          const currentOrFirst = sessions?.find(s => s.is_current) ?? sessions?.[0];
+          const latestCkpt = currentOrFirst?.checkpoints?.[0];
+          if (!latestCkpt) return prev;
+          return { ...prev, [svcId]: { session_id: currentOrFirst!.session_id, round: latestCkpt.round } };
         });
       } catch { /* silent */ }
     });
@@ -2326,7 +2331,9 @@ const Training: React.FC = () => {
                           const borderCls = (st: string) => st === 'success' ? 'border-emerald-300 bg-emerald-50/30' : st === 'duplicate' ? 'border-amber-300 bg-amber-50/30' : !isConnected ? 'border-gray-200 bg-gray-50/50' : 'border-gray-200';
                           const descKey = `trainer-${svcId}`;
                           const savingDisabled = !isConnected || pubStatus === 'saving' || locStatus === 'saving';
-                          const ckpts = trainerCheckpoints[svcId] || [];
+                          const sessions = trainerCheckpoints[svcId] || [];
+                          const hasMultipleCkpts = sessions.reduce((n, s) => n + s.checkpoints.length, 0) > 1 || sessions.length > 1;
+                          const selCkpt = selectedTrainerCkpt[svcId];
                           return (
                             <div key={svcId} className={`rounded-xl border p-3 space-y-2 transition-colors ${borderCls(pubStatus === 'idle' ? locStatus : pubStatus)}`}>
                               <div className="flex items-start justify-between gap-2">
@@ -2341,19 +2348,28 @@ const Training: React.FC = () => {
                                   <span className={`flex-shrink-0 text-xs font-medium px-2 py-0.5 rounded-full ${offlineBadge === 'Offline' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>{offlineBadge}</span>
                                 )}
                               </div>
-                              {/* Checkpoint picker — shown only when multiple checkpoints exist */}
-                              {ckpts.length > 1 && isConnected && (
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs text-gray-500 flex-shrink-0">Checkpoint:</span>
-                                  <div className="flex gap-1 flex-wrap">
-                                    {ckpts.map(ck => (
-                                      <button key={ck.round}
-                                        onClick={() => setSelectedTrainerRounds(p => ({ ...p, [svcId]: ck.round }))}
-                                        className={`px-2 py-0.5 rounded-full text-xs font-medium transition-colors ${selectedTrainerRounds[svcId] === ck.round ? 'bg-violet-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
-                                        Round {ck.round}
-                                      </button>
-                                    ))}
-                                  </div>
+                              {/* Session + checkpoint picker */}
+                              {hasMultipleCkpts && isConnected && (
+                                <div className="space-y-1.5">
+                                  {sessions.map(sess => (
+                                    <div key={sess.session_id} className="flex items-center gap-2 flex-wrap">
+                                      <span className={`text-xs font-medium flex-shrink-0 ${sess.is_current ? 'text-violet-700' : 'text-gray-400'}`}>
+                                        {sess.is_current ? 'Current' : sess.session_id.slice(0, 8)}
+                                      </span>
+                                      <div className="flex gap-1 flex-wrap">
+                                        {sess.checkpoints.map(ck => {
+                                          const isSelected = selCkpt?.session_id === sess.session_id && selCkpt?.round === ck.round;
+                                          return (
+                                            <button key={ck.round}
+                                              onClick={() => setSelectedTrainerCkpt(p => ({ ...p, [svcId]: { session_id: sess.session_id, round: ck.round } }))}
+                                              className={`px-2 py-0.5 rounded-full text-xs font-medium transition-colors ${isSelected ? 'bg-violet-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                                              R{ck.round}
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  ))}
                                 </div>
                               )}
                               <input type="text"
