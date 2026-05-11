@@ -519,6 +519,7 @@ class FederatedTrainingOrchestrator:
         self._run_round_meta: List[dict] = []  # appended after each round
         self._run_published_global: List[dict] = []  # global weight publish events
         self._run_base_manifest: dict = {}  # stable fields from _create_run_artifact
+        self._run_artifact_status: str = "running"  # last written status; guards against downgrade
 
         # Session ID — a short unique token that identifies one uninterrupted training
         # run (from fresh start or after reset_training_state).  Passed to trainers
@@ -1091,6 +1092,7 @@ class FederatedTrainingOrchestrator:
         self._run_config = {}
         self._run_published_global = []
         self._run_base_manifest = {}
+        self._run_artifact_status = "running"
         self._session_id = None
         # Remove on-disk checkpoints so a fresh run starts clean
         try:
@@ -1724,6 +1726,13 @@ class FederatedTrainingOrchestrator:
         if self._artifact_manager is None or self._run_artifact_id is None:
             return
         try:
+            # Determine effective status — never downgrade from a terminal state
+            _terminal = {"completed", "stopped"}
+            desired = status or "running"
+            if self._run_artifact_status in _terminal and desired not in _terminal:
+                return  # Stale background sync — ignore
+            self._run_artifact_status = desired
+
             history = self._build_training_history_dict()
             manifest = {
                 **self._run_base_manifest,
@@ -1735,7 +1744,7 @@ class FederatedTrainingOrchestrator:
                     "client_validation_losses": history["client_validation_losses"],
                 },
                 "published_global_weights": self._run_published_global,
-                "status": status or "running",
+                "status": desired,
             }
             await self._artifact_manager.edit(
                 artifact_id=self._run_artifact_id,
