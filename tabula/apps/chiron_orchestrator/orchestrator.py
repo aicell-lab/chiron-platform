@@ -1,8 +1,10 @@
 import asyncio
+import datetime
 import io
 import logging
 import os
 import time
+import uuid
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union
@@ -174,11 +176,16 @@ class FlowerClientProxy(fl.client.NumPyClient):
         self,
         description: Optional[str] = None,
         upload_timeout: int = 300,
+        checkpoint_round: Optional[int] = None,
+        session_id: Optional[str] = None,
     ) -> str:
-        """Save the last model checkpoint as a Hypha artifact and return the artifact ID."""
-        return await self.service.save_model_weights(
-            description=description, upload_timeout=upload_timeout
-        )
+        """Save a model checkpoint as a Hypha artifact and return the artifact ID."""
+        kwargs: dict = {"description": description, "upload_timeout": upload_timeout}
+        if checkpoint_round is not None:
+            kwargs["checkpoint_round"] = checkpoint_round
+        if session_id is not None:
+            kwargs["session_id"] = session_id
+        return await self.service.save_model_weights(**kwargs)
 
     async def get_transformer_keys(self) -> List[str]:
         """Return the ordered list of transformer state_dict keys from the trainer."""
@@ -499,6 +506,25 @@ class FederatedTrainingOrchestrator:
         self._trainer_ping_fails: Dict[str, int] = {}
         self._trainer_ping_task: Optional[asyncio.Task] = None
 
+        # Artifact manager (set in async_init)
+        self._artifact_manager = None
+
+        # On-disk global parameter checkpoints (3 newest kept)
+        self._checkpoint_dir = Path("./global_checkpoints")
+
+        # Per-run artifact tracking
+        self._run_artifact_id: Optional[str] = None
+        self._run_started_at: Optional[str] = None
+        self._run_config: dict = {}
+        self._run_round_meta: List[dict] = []  # appended after each round
+        self._run_published_global: List[dict] = []  # global weight publish events
+        self._run_base_manifest: dict = {}  # stable fields from _create_run_artifact
+
+        # Session ID — a short unique token that identifies one uninterrupted training
+        # run (from fresh start or after reset_training_state).  Passed to trainers
+        # via fit/evaluate config so they can organise per-session checkpoints.
+        self._session_id: Optional[str] = None
+
     # === BioEngine App Method - will be called when the deployment is started ===
 
     async def async_init(self):
@@ -509,6 +535,29 @@ class FederatedTrainingOrchestrator:
             }
         )
         logger.info(f"Connected to Hypha Server at {self._server_url}")
+
+        # Bootstrap artifact manager and ensure the training-runs collection exists.
+        try:
+            self._artifact_manager = await self.hypha_client.get_service("public/artifact-manager")
+            workspace = self.hypha_client.config.workspace
+            collection_id = f"{workspace}/chiron-training-runs"
+            try:
+                await self._artifact_manager.read(collection_id)
+            except Exception as e:
+                if "does not exist" in str(e).lower() or "not found" in str(e).lower():
+                    await self._artifact_manager.create(
+                        type="collection",
+                        alias="chiron-training-runs",
+                        manifest={
+                            "name": "Training Runs",
+                            "description": "Chiron federated training run history",
+                        },
+                        config={"permissions": {"*": "r+"}},
+                    )
+                    logger.info("Created 'chiron-training-runs' collection")
+        except Exception as e:
+            logger.warning(f"Could not initialise artifact manager: {e}")
+
         self._start_trainer_ping_loop()
 
     async def test_deployment(self):
@@ -782,6 +831,7 @@ class FederatedTrainingOrchestrator:
             )
             for _ in range(num_rounds):
                 self.current_round += 1
+                _round_started_at = datetime.datetime.utcnow().isoformat() + "Z"
 
                 new_parameters = await self._training_round(
                     server_round=self.current_round, timeout=timeout
@@ -791,6 +841,11 @@ class FederatedTrainingOrchestrator:
                     f"Progress: {self.current_round}/{self.target_round}"
                 )
                 self.global_parameters = new_parameters
+
+                # Save on-disk checkpoint and sync run artifact after each round.
+                self._save_global_checkpoint(self.current_round)
+                self._record_round_meta(self.current_round, _round_started_at)
+                asyncio.create_task(self._sync_run_artifact())
 
                 # Flush deferred removals before next round's configure_fit samples.
                 await self._flush_pending_removals()
@@ -811,6 +866,7 @@ class FederatedTrainingOrchestrator:
             self.history.clean_incomplete_round(incompleted_round=self.current_round)
             # Roll back to last completed round
             self.current_round -= 1
+            asyncio.create_task(self._sync_run_artifact(status="stopped"))
             raise
 
         except Exception as e:
@@ -822,7 +878,12 @@ class FederatedTrainingOrchestrator:
             self.history.clean_incomplete_round(incompleted_round=self.current_round)
             # Roll back to last completed round
             self.current_round -= 1
+            asyncio.create_task(self._sync_run_artifact(status="stopped"))
             raise
+
+        else:
+            # All rounds completed without error
+            asyncio.create_task(self._sync_run_artifact(status="completed"))
 
         finally:
             elapsed_time = time.time() - start_time
@@ -1025,6 +1086,19 @@ class FederatedTrainingOrchestrator:
         self.selected_fit_clients = []
         self.selected_evaluate_clients = []
         self._pending_removal.clear()
+        self._run_artifact_id = None
+        self._run_round_meta = []
+        self._run_config = {}
+        self._run_published_global = []
+        self._run_base_manifest = {}
+        self._session_id = None
+        # Remove on-disk checkpoints so a fresh run starts clean
+        try:
+            import shutil
+            if self._checkpoint_dir.exists():
+                shutil.rmtree(self._checkpoint_dir)
+        except Exception:
+            pass
 
     @schema_method
     async def start_training(
@@ -1112,8 +1186,8 @@ class FederatedTrainingOrchestrator:
             min_fit_clients=1,  # Minimum number of clients to train
             min_evaluate_clients=1,  # Minimum number of clients to evaluate
             min_available_clients=1,  # Minimum number of available clients
-            on_fit_config_fn=lambda server_round: {**(fit_config or {}), "orchestrator_service_id": _orch_id},
-            on_evaluate_config_fn=lambda server_round: {**(eval_config or {}), "orchestrator_service_id": _orch_id},
+            on_fit_config_fn=lambda server_round: {**(fit_config or {}), "orchestrator_service_id": _orch_id, "session_id": self._session_id or ""},
+            on_evaluate_config_fn=lambda server_round: {**(eval_config or {}), "orchestrator_service_id": _orch_id, "session_id": self._session_id or ""},
             initial_parameters=None,  # Will be set at start of training
             evaluate_metrics_aggregation_fn=weighted_average,
             fit_metrics_aggregation_fn=weighted_average,
@@ -1122,6 +1196,39 @@ class FederatedTrainingOrchestrator:
         if initial_weights is not None:
             # Reset training state if initial weights are provided
             await self.reset_training_state()
+
+        # Create a new run artifact only when there is no existing one.
+        # reset_training_state() clears _run_artifact_id, so a fresh run always
+        # gets a new artifact.  Continuing training (adding more rounds without
+        # a reset) reuses the existing artifact and just appends new round data.
+        if self._run_artifact_id is None:
+            self._run_config = {
+                "num_rounds": num_rounds,
+                "fit_config": fit_config or {},
+                "eval_config": eval_config or {},
+                "per_round_timeout": per_round_timeout,
+                "initial_weights": initial_weights,
+            }
+            self._run_round_meta = []
+            await self._create_run_artifact()
+        else:
+            # Continuing — update the target round count in the stored config.
+            self._run_config["num_rounds"] = self.current_round + num_rounds
+
+        # Re-register all trainers to this orchestrator before starting. This recovers from
+        # situations where a trainer replica was restarted (e.g. after an OOM crash) and
+        # lost its in-memory registration state.
+        async def _ensure_registered(service_id: str) -> None:
+            try:
+                svc = await self.hypha_client.get_service(service_id)
+                await svc.register_to_orchestrator(_orch_id)
+            except Exception as e:
+                logger.warning(f"Could not re-register trainer {service_id}: {e}")
+
+        await asyncio.gather(
+            *[_ensure_registered(client.cid) for client in self.client_manager.clients.values()],
+            return_exceptions=True,
+        )
 
         # Notify all registered trainers that a session is starting.
         # Pass per_round_timeout so trainers can auto-clear session_active if
@@ -1141,6 +1248,10 @@ class FederatedTrainingOrchestrator:
             *[_set_active(client.cid, True) for client in self.client_manager.clients.values()],
             return_exceptions=True,
         )
+
+        # If continuing an existing run, mark the artifact as running again.
+        if self._run_artifact_id is not None:
+            asyncio.create_task(self._sync_run_artifact(status="running"))
 
         self.training_task = asyncio.create_task(
             self._run_federated_training(
@@ -1248,6 +1359,7 @@ class FederatedTrainingOrchestrator:
             "trainers_progress": trainers_progress,
             # Trainers removed while a round was active; will be gone after this round.
             "pending_removal": list(self._pending_removal),
+            "run_artifact_id": self._run_artifact_id,
         }
 
     @schema_method
@@ -1274,6 +1386,33 @@ class FederatedTrainingOrchestrator:
         }
 
     @schema_method
+    async def list_global_checkpoints(self) -> List[dict]:
+        """List available on-disk global parameter checkpoints (up to 3 newest).
+
+        Returns a list sorted newest-first, each entry:
+            {"round": int, "path": str, "saved_at": str (ISO timestamp)}
+        """
+        if not self._checkpoint_dir.exists():
+            return []
+        files = sorted(
+            self._checkpoint_dir.glob("round_*.npz"),
+            key=lambda p: int(p.stem.split("_")[1]),
+            reverse=True,
+        )
+        result = []
+        for f in files:
+            try:
+                stat = f.stat()
+                result.append({
+                    "round": int(f.stem.split("_")[1]),
+                    "path": str(f),
+                    "saved_at": datetime.datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z",
+                })
+            except Exception:
+                pass
+        return result
+
+    @schema_method
     async def is_busy(self) -> bool:
         """Check if federated training is currently running."""
         return self.training_task is not None and not self.training_task.done()
@@ -1288,6 +1427,16 @@ class FederatedTrainingOrchestrator:
         description: Optional[str] = Field(
             None,
             description="Optional description for the saved model artifacts.",
+        ),
+        checkpoint_round: Optional[int] = Field(
+            None,
+            description="Round number of the checkpoint to publish. Defaults to the latest "
+                        "checkpoint in the current (or specified) session.",
+        ),
+        session_id: Optional[str] = Field(
+            None,
+            description="Session ID to load the checkpoint from. Defaults to the trainer's "
+                        "current session. Use list_weight_checkpoints() on each trainer to see available sessions.",
         ),
     ) -> Dict[str, str]:
         """Save the full local model (embedder + transformer + projection heads) for each trainer.
@@ -1311,8 +1460,12 @@ class FederatedTrainingOrchestrator:
             )
 
         results = await asyncio.gather(
-            *[client.save_model_weights(description=description, upload_timeout=300)
-              for client in clients],
+            *[client.save_model_weights(
+                description=description,
+                upload_timeout=300,
+                checkpoint_round=checkpoint_round,
+                session_id=session_id,
+              ) for client in clients],
             return_exceptions=True,
         )
         artifact_ids = {}
@@ -1335,6 +1488,12 @@ class FederatedTrainingOrchestrator:
             300,
             description="Timeout in seconds for uploading the checkpoint file.",
         ),
+        checkpoint_round: Optional[int] = Field(
+            None,
+            description="Round number of the on-disk checkpoint to publish. "
+                        "Defaults to the latest in-memory parameters (current round). "
+                        "Use list_global_checkpoints() to see available rounds.",
+        ),
     ) -> str:
         """Save the aggregated transformer weights plus training history as a new artifact.
 
@@ -1345,18 +1504,30 @@ class FederatedTrainingOrchestrator:
         The artifact can be used as initial_weights for any future training run.
         Returns the artifact ID.
         """
-        import datetime
         import httpx
         import json as json_module
         import torch
 
-        if self.global_parameters is None:
+        if self.global_parameters is None and checkpoint_round is None:
             raise RuntimeError(
                 "No global parameters available. Run at least one training round first."
             )
 
         # ── transformer weights ──────────────────────────────────────────────────
-        ndarrays = parameters_to_ndarrays(self.global_parameters)
+        if checkpoint_round is not None:
+            # Load from on-disk checkpoint
+            ckpt_path = self._checkpoint_dir / f"round_{checkpoint_round}.npz"
+            if not ckpt_path.exists():
+                raise RuntimeError(
+                    f"Checkpoint for round {checkpoint_round} not found at {ckpt_path}. "
+                    "Use list_global_checkpoints() to see available rounds."
+                )
+            loaded = np.load(str(ckpt_path))
+            ndarrays = [loaded[k] for k in sorted(loaded.files, key=lambda k: int(k.lstrip("arr_")))]
+            round_num = checkpoint_round
+        else:
+            ndarrays = parameters_to_ndarrays(self.global_parameters)
+            round_num = self.current_round
 
         keys = self._transformer_keys
         if keys is None:
@@ -1380,7 +1551,6 @@ class FederatedTrainingOrchestrator:
         checkpoint_bytes = weights_buf.getvalue()
 
         # ── build training history ────────────────────────────────────────────────
-        round_num = self.current_round
         history = self._build_training_history_dict()
 
         # ── build dataset summary from cached trainer properties ─────────────────
@@ -1472,6 +1642,16 @@ class FederatedTrainingOrchestrator:
 
         await artifact_manager.commit(artifact.id)
         logger.info(f"Saved global transformer weights to artifact {artifact.id} (model.pth)")
+
+        # Record publish event in run artifact
+        self._run_published_global.append({
+            "artifact_id": artifact.id,
+            "round": round_num,
+            "description": description,
+            "published_at": datetime.datetime.utcnow().isoformat() + "Z",
+        })
+        asyncio.create_task(self._sync_run_artifact())
+
         return artifact.id
 
     def _build_training_history_dict(self) -> dict:
@@ -1488,3 +1668,135 @@ class FederatedTrainingOrchestrator:
                 for cid, m in self.history.client_metrics_evaluate.items()
             },
         }
+
+    # ── run artifact helpers ────────────────────────────────────────────────────
+
+    async def _create_run_artifact(self) -> None:
+        """Create a new training-run artifact in the chiron-training-runs collection."""
+        if self._artifact_manager is None:
+            return
+        try:
+            workspace = self.hypha_client.config.workspace
+            now = datetime.datetime.utcnow()
+            alias = f"run-{now.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+            trainers_meta = {}
+            for svc_id, props in self._trainer_properties.items():
+                client_name = props.get("client_name") or svc_id.split(":")[-1]
+                dataset_info = props.get("dataset_info", {})
+                datasets = [
+                    {"id": ds_id, "name": m.get("name", ds_id)}
+                    for ds_id, m in dataset_info.items()
+                ]
+                trainers_meta[svc_id] = {
+                    "client_name": client_name,
+                    "datasets": datasets,
+                    "train_samples": props.get("train_samples", 0),
+                }
+            self._run_base_manifest = {
+                "name": f"Training Run {now.strftime('%Y-%m-%d %H:%M UTC')}",
+                "orchestrator_service_id": self._service_id,
+                "started_at": now.isoformat() + "Z",
+                "config": self._run_config,
+                "trainers": trainers_meta,
+                "saved_trainer_models": {},
+            }
+            artifact = await self._artifact_manager.create(
+                type="model",
+                parent_id=f"{workspace}/chiron-training-runs",
+                alias=alias,
+                manifest={
+                    **self._run_base_manifest,
+                    "status": "running",
+                    "rounds": [],
+                    "published_global_weights": [],
+                },
+                stage=True,
+            )
+            self._run_artifact_id = artifact.id
+            self._session_id = uuid.uuid4().hex[:12]
+            logger.info(f"Created training-run artifact: {self._run_artifact_id} (session {self._session_id})")
+        except Exception as e:
+            logger.warning(f"Could not create run artifact: {e}")
+
+    async def _sync_run_artifact(self, status: Optional[str] = None) -> None:
+        """Push the current run state (rounds, history, status) to the artifact manifest."""
+        if self._artifact_manager is None or self._run_artifact_id is None:
+            return
+        try:
+            history = self._build_training_history_dict()
+            manifest = {
+                **self._run_base_manifest,
+                "rounds": self._run_round_meta,
+                "history": {
+                    "training_losses": history["training_losses"],
+                    "validation_losses": history["validation_losses"],
+                    "client_training_losses": history["client_training_losses"],
+                    "client_validation_losses": history["client_validation_losses"],
+                },
+                "published_global_weights": self._run_published_global,
+                "status": status or "running",
+            }
+            await self._artifact_manager.edit(
+                artifact_id=self._run_artifact_id,
+                manifest=manifest,
+            )
+        except Exception as e:
+            logger.warning(f"Could not sync run artifact: {e}")
+
+    def _record_round_meta(self, server_round: int, round_started_at: str) -> None:
+        """Append metadata for the just-completed round."""
+        history = self._build_training_history_dict()
+        train_loss = next((l for r, l in history["training_losses"] if r == server_round), None)
+        val_loss = next((l for r, l in history["validation_losses"] if r == server_round), None)
+        fit_client_ids = [c.cid for c in self.selected_fit_clients]
+        eval_client_ids = [c.cid for c in self.selected_evaluate_clients]
+        trainer_details = []
+        for svc_id in set(fit_client_ids + eval_client_ids):
+            props = self._trainer_properties.get(svc_id, {})
+            client_name = props.get("client_name") or svc_id.split(":")[-1]
+            dataset_info = props.get("dataset_info", {})
+            trainer_details.append({
+                "service_id": svc_id,
+                "client_name": client_name,
+                "datasets": [{"id": k, "name": v.get("name", k)} for k, v in dataset_info.items()],
+                "fit": svc_id in fit_client_ids,
+                "evaluate": svc_id in eval_client_ids,
+                "train_loss": next(
+                    (l for r, l in history["client_training_losses"].get(svc_id, []) if r == server_round),
+                    None,
+                ),
+                "val_loss": next(
+                    (l for r, l in history["client_validation_losses"].get(svc_id, []) if r == server_round),
+                    None,
+                ),
+            })
+        self._run_round_meta.append({
+            "round": server_round,
+            "started_at": round_started_at,
+            "completed_at": datetime.datetime.utcnow().isoformat() + "Z",
+            "training_loss": train_loss,
+            "validation_loss": val_loss,
+            "trainers": trainer_details,
+        })
+
+    # ── on-disk global parameter checkpoint helpers ─────────────────────────────
+
+    def _save_global_checkpoint(self, server_round: int) -> None:
+        """Save current global_parameters to disk; keep only the 3 newest."""
+        if self.global_parameters is None:
+            return
+        try:
+            self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            arrays = parameters_to_ndarrays(self.global_parameters)
+            out_path = self._checkpoint_dir / f"round_{server_round}.npz"
+            np.savez(out_path, *arrays)
+            # Prune — keep newest 3
+            existing = sorted(
+                self._checkpoint_dir.glob("round_*.npz"),
+                key=lambda p: int(p.stem.split("_")[1]),
+            )
+            for old in existing[:-3]:
+                old.unlink(missing_ok=True)
+            logger.info(f"Saved global checkpoint for round {server_round} → {out_path}")
+        except Exception as e:
+            logger.warning(f"Could not save global checkpoint: {e}")

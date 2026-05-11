@@ -663,3 +663,36 @@ class FederatedTrainingManager:
 
         logger.info(f"Cleared {len(deleted)} local model weight directory(ies)")
         return deleted
+
+    @schema_method
+    async def get_app_logs(
+        self,
+        application_id: str = Field(
+            ..., description="Application ID of the orchestrator or trainer to fetch logs for."
+        ),
+        logs_tail: int = Field(
+            200, description="Number of log lines to retrieve per deployment replica."
+        ),
+    ) -> dict:
+        """Fetch Ray Serve status and deployment logs for a specific application.
+
+        Returns the full app-status dict from the BioEngine worker for the given
+        application, including per-deployment Ray Serve messages and the last
+        ``logs_tail`` lines of stdout/stderr from each replica.
+
+        Returns:
+            Dict with keys:
+                status (str): Ray Serve application status.
+                message (str | None): Application-level message from Ray Serve.
+                deployments (dict): Per-deployment info with ``status``, ``message``,
+                    and ``logs`` (dict of replica → list[str]).
+        """
+        try:
+            result = await self.worker_service.get_app_status(
+                application_ids=[application_id],
+                logs_tail=logs_tail,
+                n_previous_replica=1,
+            )
+            return result if result is not None else {}
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch logs for '{application_id}': {e}") from e

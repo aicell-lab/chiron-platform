@@ -362,16 +362,24 @@ class FederatedClient(NumPyClient):
         self.model.transformer.load_state_dict(state_dict, strict=True)
 
     def _save_weights(self, server_round: int) -> None:
-        """Save model weights after training."""
-        weights_folder = Path("./trained_weights")
-        weights_folder.mkdir(parents=True, exist_ok=True)
-        previous_weights = next(weights_folder.glob(f"*.pth"), None)
-        weights_name = f"model_weights-round={server_round}.pth"
-        new_weights = weights_folder / weights_name
+        """Save model weights after training; keep the 3 most recent checkpoints per session."""
+        # Use getattr so this works even when called on FederatedClient before
+        # TabulaTrainer has set _current_session_dir (e.g. during test_deployment).
+        session_dir = getattr(self, '_current_session_dir', None)
+        if session_dir is None:
+            # Fallback: no session assigned yet (e.g. pre-session test fit)
+            session_dir = Path("./trained_weights/_default")
+        session_dir.mkdir(parents=True, exist_ok=True)
+        new_weights = session_dir / f"round_{server_round}.pth"
         logger.info(f"Saving model weights to {new_weights}")
         torch.save(self.model.state_dict(), new_weights)
-        if previous_weights is not None and previous_weights != new_weights:
-            previous_weights.unlink()
+        # Prune within this session only — other sessions are never touched
+        existing = sorted(
+            session_dir.glob("round_*.pth"),
+            key=lambda p: int(p.stem.split("_")[1]),
+        )
+        for old in existing[:-3]:
+            old.unlink(missing_ok=True)
 
     def _add_metrics_to_train_history(
         self, server_round: int, loss: float, num_examples: int
@@ -672,6 +680,14 @@ class TabulaTrainer:
         self._ping_task: Optional[asyncio.Task] = None
         self._ping_fail_count: int = 0
 
+        # Per-session checkpoint directory tracking.
+        # A session is defined by a unique session_id supplied by the orchestrator
+        # (generated fresh after reset_training_state or on first run).
+        # Different sessions always use separate sub-directories so checkpoints
+        # from one session are never pruned or overwritten by another.
+        self._current_session_id: Optional[str] = None
+        self._current_session_dir: Optional[Path] = None
+
     # === BioEngine App Method - will be called when the deployment is started ===
 
     async def async_init(self):
@@ -753,6 +769,32 @@ class TabulaTrainer:
         await self.test_completed.wait()
 
     # === Internal Methods ===
+
+    def _set_session(self, session_id: str, orchestrator_service_id: str) -> None:
+        """Activate a checkpoint session directory.
+
+        A session groups the checkpoints produced under one uninterrupted training
+        run (same orchestrator, no reset_training_state in between).  When the
+        session_id changes (new orchestrator or orchestrator reset) a fresh
+        sub-directory is created; the old one is never deleted.
+
+        ``session_id`` comes from the orchestrator's _session_id field, which is
+        regenerated on every fresh training start.  When empty (older orchestrator)
+        we fall back to a sanitized short hash of the orchestrator service ID so
+        that different orchestrators still get separate directories.
+        """
+        effective_id = (session_id or "").strip()
+        if not effective_id:
+            # Backward-compat: derive from orchestrator_service_id
+            effective_id = "orch_" + orchestrator_service_id.replace("/", "_").replace(":", "_")[-20:]
+        if effective_id == self._current_session_id:
+            return  # Same session — reuse existing directory
+        self._current_session_id = effective_id
+        self._current_session_dir = Path("./trained_weights") / effective_id
+        self._current_session_dir.mkdir(parents=True, exist_ok=True)
+        # Propagate to the FederatedClient so _save_weights uses the same directory.
+        self.local_client._current_session_dir = self._current_session_dir
+        logger.info(f"Checkpoint session set to '{effective_id}' → {self._current_session_dir}")
 
     async def _download_from_artifact(
         self, artifact_id: str, file_path: str, timeout: int
@@ -985,6 +1027,16 @@ class TabulaTrainer:
         description: Optional[str] = Field(
             None, description="Optional note stored in the metadata file."
         ),
+        checkpoint_round: Optional[int] = Field(
+            None,
+            description="Round number of the checkpoint to save. Defaults to the current "
+                        "in-memory model state. Use list_weight_checkpoints() for available sessions/rounds.",
+        ),
+        session_id: Optional[str] = Field(
+            None,
+            description="Session ID to load the checkpoint from. Defaults to the current session. "
+                        "Use list_weight_checkpoints() to see available session IDs.",
+        ),
     ) -> str:
         """Save the full local model (embedder + transformer + projection heads) to the
         BioEngine workspace models directory (~/.bioengine/models/<client_name>/).
@@ -1005,12 +1057,33 @@ class TabulaTrainer:
         model_path = model_dir / "model.pth"
         meta_path  = model_dir / "metadata.json"
 
-        # Save full model state dict (all components)
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            self.executor,
-            lambda: torch.save(self.local_client.model.state_dict(), model_path),
-        )
+        if checkpoint_round is not None:
+            # Resolve which session directory to load from
+            sess = session_id or self._current_session_id
+            if sess:
+                ckpt_path = Path("./trained_weights") / sess / f"round_{checkpoint_round}.pth"
+            else:
+                ckpt_path = None
+            # Backward-compat: also try the legacy flat path
+            if ckpt_path is None or not ckpt_path.exists():
+                ckpt_path = Path("./trained_weights") / f"model_weights-round={checkpoint_round}.pth"
+            if not ckpt_path.exists():
+                raise RuntimeError(
+                    f"Checkpoint for round {checkpoint_round} not found. "
+                    "Use list_weight_checkpoints() to see available sessions and rounds."
+                )
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                self.executor,
+                lambda p=ckpt_path: model_path.write_bytes(p.read_bytes()),
+            )
+        else:
+            # Save current in-memory model state
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                self.executor,
+                lambda: torch.save(self.local_client.model.state_dict(), model_path),
+            )
 
         # Build metadata
         props = self.local_client.get_properties()
@@ -1215,10 +1288,15 @@ class TabulaTrainer:
             ...,
             description="INTERNAL: Service ID of the calling orchestrator for validation.",
         ),
+        session_id: str = Field(
+            "",
+            description="INTERNAL: Session token from the orchestrator identifying this training run.",
+        ),
     ) -> Dict[str, Union[bool, str]]:
         """Start fitting the model to the training data with the given parameters."""
 
         self._validate_orchestrator(orchestrator_service_id)
+        self._set_session(session_id, orchestrator_service_id)
 
         # The orchestrator is live — it just called us. Reset the ping fail counter
         # so stale failures from a previous idle period do not cause auto-unregistration.
@@ -1298,10 +1376,15 @@ class TabulaTrainer:
             ...,
             description="INTERNAL: Service ID of the calling orchestrator for validation.",
         ),
+        session_id: str = Field(
+            "",
+            description="INTERNAL: Session token from the orchestrator identifying this training run.",
+        ),
     ) -> Dict[str, Union[bool, str]]:
         """Start evaluating the model on the test data with the given parameters."""
 
         self._validate_orchestrator(orchestrator_service_id)
+        self._set_session(session_id, orchestrator_service_id)
 
         # The orchestrator is live — it just called us. Reset the ping fail counter.
         self._ping_fail_count = 0
@@ -1482,10 +1565,57 @@ class TabulaTrainer:
 
     @schema_method
     async def is_busy(self) -> bool:
-        """Check if the trainer is busy (registered to an orchestrator, or in active fit/evaluate)."""
+        """Return True only when an active fit or evaluate task is running.
+
+        Registration to an orchestrator does not count as busy so that API calls
+        such as model saving remain available even while the trainer is enrolled in a
+        session.  The caller (e.g. UI) uses get_registered_orchestrator() separately
+        to determine whether the trainer is already part of a session.
+        """
         fit_busy = self.fit_task is not None and not self.fit_task.done()
         evaluate_busy = self.evaluate_task is not None and not self.evaluate_task.done()
-        return self._registered_orchestrator_id is not None or self.session_active or fit_busy or evaluate_busy
+        return fit_busy or evaluate_busy
+
+    @schema_method
+    async def list_weight_checkpoints(self) -> List[dict]:
+        """List available on-disk model weight checkpoints grouped by session.
+
+        Returns a list of session entries sorted newest-first (most recently modified
+        session first), each containing:
+            {
+                "session_id": str,
+                "is_current": bool,
+                "checkpoints": [{"round": int, "path": str, "saved_at": str}, ...]
+            }
+        Each session contains at most 3 checkpoint entries, newest-first.
+        """
+        weights_folder = Path("./trained_weights")
+        if not weights_folder.exists():
+            return []
+        sessions = []
+        for session_dir in sorted(weights_folder.iterdir(),
+                                  key=lambda p: p.stat().st_mtime, reverse=True):
+            if not session_dir.is_dir():
+                continue
+            ckpts = []
+            for f in sorted(session_dir.glob("round_*.pth"),
+                             key=lambda p: int(p.stem.split("_")[1]), reverse=True):
+                try:
+                    stat = f.stat()
+                    ckpts.append({
+                        "round": int(f.stem.split("_")[1]),
+                        "path": str(f),
+                        "saved_at": datetime.datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z",
+                    })
+                except Exception:
+                    pass
+            if ckpts:
+                sessions.append({
+                    "session_id": session_dir.name,
+                    "is_current": session_dir.name == self._current_session_id,
+                    "checkpoints": ckpts,
+                })
+        return sessions
 
     @schema_method
     async def get_registered_orchestrator(self) -> Optional[str]:
@@ -1735,13 +1865,50 @@ class TabulaTrainer:
         upload_timeout: int = Field(
             300, description="Timeout in seconds for uploading the model checkpoint"
         ),
+        checkpoint_round: Optional[int] = Field(
+            None,
+            description="Round number of the checkpoint to publish. Defaults to the latest "
+                        "checkpoint in the current session. Use list_weight_checkpoints() to see available sessions/rounds.",
+        ),
+        session_id: Optional[str] = Field(
+            None,
+            description="Session ID to load the checkpoint from. Defaults to the current session. "
+                        "Use list_weight_checkpoints() to see available session IDs.",
+        ),
     ) -> str:
-        """Save the last model checkpoint as a Hypha artifact and return the artifact ID."""
-        weights_folder = Path("./trained_weights")
-        if not weights_folder.exists():
-            checkpoint = None
+        """Save a model checkpoint as a Hypha artifact and return the artifact ID."""
+        weights_root = Path("./trained_weights")
+        sess = session_id or self._current_session_id
+        sess_dir = (weights_root / sess) if sess else None
+
+        if checkpoint_round is not None:
+            # Explicit round: try session dir first, then legacy flat layout
+            if sess_dir is not None:
+                checkpoint = sess_dir / f"round_{checkpoint_round}.pth"
+            else:
+                checkpoint = None
+            if checkpoint is None or not checkpoint.exists():
+                checkpoint = weights_root / f"model_weights-round={checkpoint_round}.pth"
+            if not checkpoint.exists():
+                raise RuntimeError(
+                    f"Checkpoint for round {checkpoint_round} not found. "
+                    "Use list_weight_checkpoints() to see available sessions and rounds."
+                )
+        elif sess_dir is not None and sess_dir.exists():
+            existing = sorted(
+                sess_dir.glob("round_*.pth"),
+                key=lambda p: int(p.stem.split("_")[1]),
+            )
+            checkpoint = existing[-1] if existing else None
+        elif weights_root.exists():
+            # Legacy flat layout fallback
+            existing = sorted(
+                weights_root.glob("model_weights-round=*.pth"),
+                key=lambda p: int(p.stem.split("=")[1]),
+            )
+            checkpoint = existing[-1] if existing else None
         else:
-            checkpoint = next(weights_folder.glob(f"*.pth"), None)
+            checkpoint = None
 
         if checkpoint is None:
             raise RuntimeError(
