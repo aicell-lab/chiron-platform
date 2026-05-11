@@ -882,8 +882,8 @@ class FederatedTrainingOrchestrator:
             raise
 
         else:
-            # All rounds completed without error
-            asyncio.create_task(self._sync_run_artifact(status="completed"))
+            # All rounds completed without error — await directly so "completed" is always the last write
+            await self._sync_run_artifact(status="completed")
 
         finally:
             elapsed_time = time.time() - start_time
@@ -1249,8 +1249,9 @@ class FederatedTrainingOrchestrator:
             return_exceptions=True,
         )
 
-        # If continuing an existing run, mark the artifact as running again.
-        if self._run_artifact_id is not None:
+        # If continuing an existing run (not a fresh one just created above),
+        # mark the artifact as running again.
+        if self._run_artifact_id is not None and self._run_round_meta:
             asyncio.create_task(self._sync_run_artifact(status="running"))
 
         self.training_task = asyncio.create_task(
