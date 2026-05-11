@@ -3,8 +3,8 @@ import { Link, useLocation } from 'react-router-dom';
 import LoginButton from './LoginButton';
 import { BiCube } from 'react-icons/bi';
 import { TbEngine } from 'react-icons/tb';
-import { RiTestTubeLine } from 'react-icons/ri';
 import { TbTopologyStar } from 'react-icons/tb';
+import { MdHistory } from 'react-icons/md';
 
 const Navbar: React.FC = () => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -58,11 +58,11 @@ const Navbar: React.FC = () => {
               </span>
               Training
             </Link>
-            <Link to="/lab" className={navLinkClasses("/lab")}>
+            <Link to="/runs" className={navLinkClasses("/runs")}>
               <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <RiTestTubeLine size={20} />
+                <MdHistory size={20} />
               </span>
-              Chiron Lab
+              Runs
             </Link>
           </div>
 
@@ -107,14 +107,14 @@ const Navbar: React.FC = () => {
               </span>
               Training
             </Link>
-            <Link 
-              to="/lab" 
-              className={mobileNavLinkClasses("/lab")}
+            <Link
+              to="/runs"
+              className={mobileNavLinkClasses("/runs")}
             >
               <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <RiTestTubeLine size={20} />
+                <MdHistory size={20} />
               </span>
-              Chiron Lab
+              Runs
             </Link>
 
             {/* Add divider */}

@@ -233,6 +233,13 @@ const Training: React.FC = () => {
   const [saveStatuses, setSaveStatuses] = useState<Record<string, 'idle'|'saving'|'success'|'duplicate'>>({});
   const [savedItems, setSavedItems] = useState<Record<string, {artifactId?: string; path?: string; description: string; round?: number}>>({});
 
+  // Checkpoint selectors — fetched when Save Weights panel becomes visible
+  type CheckpointEntry = { round: number; path: string; saved_at: string };
+  const [globalCheckpoints, setGlobalCheckpoints] = useState<CheckpointEntry[]>([]);
+  const [selectedGlobalRound, setSelectedGlobalRound] = useState<number | null>(null);
+  const [trainerCheckpoints, setTrainerCheckpoints] = useState<Record<string, CheckpointEntry[]>>({});
+  const [selectedTrainerRounds, setSelectedTrainerRounds] = useState<Record<string, number | null>>({});
+
   const [trainerParams, setTrainerParams] = useState<any>(null);
   const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
   const [trainerParamsError, setTrainerParamsError] = useState<string | null>(null);
@@ -1142,7 +1149,9 @@ const Training: React.FC = () => {
     setSaveStatus('global', 'saving');
     try {
       const orchSvc = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      const artifactId = await orchSvc.save_global_weights({ description: desc, _rkwargs: true });
+      const params: any = { description: desc, _rkwargs: true };
+      if (selectedGlobalRound !== null) params.checkpoint_round = selectedGlobalRound;
+      const artifactId = await orchSvc.save_global_weights(params);
       setSavedItems(p => ({ ...p, 'global': { artifactId, description: desc, round: currentRound } }));
       setSaveStatus('global', 'success');
     } catch (error) {
@@ -1164,7 +1173,10 @@ const Training: React.FC = () => {
     setSaveStatus(key, 'saving');
     try {
       const orchSvc = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      const artifactIds = await orchSvc.save_model_weights({ client_ids: [svcId], description: desc, _rkwargs: true });
+      const params: any = { client_ids: [svcId], description: desc, _rkwargs: true };
+      const selRound = selectedTrainerRounds[svcId];
+      if (selRound != null) params.checkpoint_round = selRound;
+      const artifactIds = await orchSvc.save_model_weights(params);
       const artifactId = Object.values(artifactIds as Record<string, string>)[0] || '';
       setSavedItems(p => ({ ...p, [key]: { artifactId, description: desc } }));
       setSaveStatus(key, 'success');
@@ -1184,7 +1196,10 @@ const Training: React.FC = () => {
     setSaveStatus(key, 'saving');
     try {
       const trainerSvc = await server.getService(svcId);
-      const savedPath = await trainerSvc.save_local_model({ description: desc, _rkwargs: true });
+      const localParams: any = { description: desc, _rkwargs: true };
+      const selRound = selectedTrainerRounds[svcId];
+      if (selRound != null) localParams.checkpoint_round = selRound;
+      const savedPath = await trainerSvc.save_local_model(localParams);
       setSavedItems(p => ({ ...p, [key]: { path: savedPath as string, description: desc } }));
       setSaveStatus(key, 'success');
     } catch (error) {
@@ -1449,6 +1464,49 @@ const Training: React.FC = () => {
       return next;
     });
   }, [trainers, managers, allDiscoveredWorkers]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch checkpoint lists when the Save Weights panel should be visible
+  // (training done and there is history). Re-runs when selectedOrchestrator changes.
+  useEffect(() => {
+    const orchId = trainingOrchestratorId || selectedOrchestrator;
+    if (!orchId) return;
+    const orchObj = orchestrators.find(o => `${o.managerId}::${o.appId}` === orchId);
+    if (!orchObj || orchObj.status !== 'RUNNING') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const orchSvc = await server.getService(orchObj.serviceIds[0].websocket_service_id);
+        const ckpts: CheckpointEntry[] = await orchSvc.list_global_checkpoints();
+        if (cancelled) return;
+        setGlobalCheckpoints(ckpts || []);
+        if (ckpts && ckpts.length > 0) setSelectedGlobalRound(prev => prev ?? ckpts[0].round);
+      } catch { /* silent */ }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedOrchestrator, trainingOrchestratorId, isTraining]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch per-trainer checkpoints for all history participants
+  useEffect(() => {
+    if (!trainingHistory) return;
+    const ids = [
+      ...Object.keys(trainingHistory.client_training_losses ?? {}),
+      ...Object.keys(trainingHistory.client_validation_losses ?? {}),
+    ];
+    ids.forEach(async (svcId) => {
+      const liveTrainer = trainers.find(t => t.serviceIds?.[0]?.websocket_service_id === svcId);
+      if (!liveTrainer || liveTrainer.status !== 'RUNNING') return;
+      try {
+        const svc = await server.getService(svcId);
+        const ckpts: CheckpointEntry[] = await svc.list_weight_checkpoints();
+        setTrainerCheckpoints(prev => ({ ...prev, [svcId]: ckpts || [] }));
+        setSelectedTrainerRounds(prev => {
+          if (prev[svcId] != null) return prev;
+          const latest = ckpts?.[0]?.round ?? null;
+          return { ...prev, [svcId]: latest };
+        });
+      } catch { /* silent */ }
+    });
+  }, [trainingHistory, isTraining]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stepEnabled = (step: number) => {
     if (step === 1) return true;
@@ -2203,10 +2261,25 @@ const Training: React.FC = () => {
                       </div>
                     </div>
                     <div className="space-y-3">
+                      {/* Global checkpoint picker */}
+                      {globalCheckpoints.length > 1 && (
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-gray-500 flex-shrink-0">Checkpoint:</span>
+                          <div className="flex gap-1 flex-wrap">
+                            {globalCheckpoints.map(ck => (
+                              <button key={ck.round}
+                                onClick={() => setSelectedGlobalRound(ck.round)}
+                                className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-colors ${selectedGlobalRound === ck.round ? 'bg-violet-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                                Round {ck.round}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       <SaveCard
                         itemKey="global"
                         title="Global averaged transformer"
-                        subtitle={`FedAvg result · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''} · round ${rounds}`}
+                        subtitle={`FedAvg result · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''} · round ${selectedGlobalRound ?? rounds}`}
                         autoDesc={globalAutoDesc}
                         actions={
                           <button onClick={() => saveGlobalWeights(globalAutoDesc)} disabled={globalStatus === 'saving'}
@@ -2253,6 +2326,7 @@ const Training: React.FC = () => {
                           const borderCls = (st: string) => st === 'success' ? 'border-emerald-300 bg-emerald-50/30' : st === 'duplicate' ? 'border-amber-300 bg-amber-50/30' : !isConnected ? 'border-gray-200 bg-gray-50/50' : 'border-gray-200';
                           const descKey = `trainer-${svcId}`;
                           const savingDisabled = !isConnected || pubStatus === 'saving' || locStatus === 'saving';
+                          const ckpts = trainerCheckpoints[svcId] || [];
                           return (
                             <div key={svcId} className={`rounded-xl border p-3 space-y-2 transition-colors ${borderCls(pubStatus === 'idle' ? locStatus : pubStatus)}`}>
                               <div className="flex items-start justify-between gap-2">
@@ -2267,6 +2341,21 @@ const Training: React.FC = () => {
                                   <span className={`flex-shrink-0 text-xs font-medium px-2 py-0.5 rounded-full ${offlineBadge === 'Offline' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>{offlineBadge}</span>
                                 )}
                               </div>
+                              {/* Checkpoint picker — shown only when multiple checkpoints exist */}
+                              {ckpts.length > 1 && isConnected && (
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs text-gray-500 flex-shrink-0">Checkpoint:</span>
+                                  <div className="flex gap-1 flex-wrap">
+                                    {ckpts.map(ck => (
+                                      <button key={ck.round}
+                                        onClick={() => setSelectedTrainerRounds(p => ({ ...p, [svcId]: ck.round }))}
+                                        className={`px-2 py-0.5 rounded-full text-xs font-medium transition-colors ${selectedTrainerRounds[svcId] === ck.round ? 'bg-violet-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                                        Round {ck.round}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
                               <input type="text"
                                 value={saveDescriptions[descKey] ?? autoDesc}
                                 onChange={e => setSaveDescriptions(p => ({ ...p, [descKey]: e.target.value }))}
