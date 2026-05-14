@@ -1,0 +1,20 @@
+authors:
+- {affiliation: Stanford University, github_user: JiayuanDing100, name: Jiayuan Ding}
+- {affiliation: KTH, github_user: nilsmechtel, name: Nils Mechtel}
+covers: []
+description: Tabula is a privacy-preserving federated foundational model and a tabular learning-based framework for single-cell analysis.
+documentation: 'README.md'
+tutorial: ''
+format_version: 0.5.0
+git_repo: 'https://github.com/oeway/tabula'
+id: tabula-trainer
+id_emoji: '🏥'
+license: MIT
+links: []
+maintainers: []
+name: Tabula Trainer
+tags: ["tabular", "federated learning", "single-cell analysis"]
+type: ray-serve
+version: 0.1.0
+deployments:
+  - trainer:TabulaTrainer

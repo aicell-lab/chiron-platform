@@ -1,0 +1,19 @@
+authors:
+- {affiliation: KTH, github_user: nilsmechtel, name: Nils Mechtel}
+covers: []
+description: Orchestrator application that aggregates and distributes model updates to/from clients using Flower framework.
+documentation: 'README.md'
+tutorial: ''
+format_version: 0.5.0
+git_repo: 'https://github.com/oeway/tabula'
+id: chiron-orchestrator
+id_emoji: '🌐'
+license: MIT
+links: []
+maintainers: []
+name: Chiron Orchestrator
+tags: ["federated learning"]
+type: ray-serve
+version: 0.1.0
+deployments:
+  - orchestrator:FederatedTrainingOrchestrator
