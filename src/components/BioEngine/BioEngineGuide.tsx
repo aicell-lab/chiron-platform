@@ -107,10 +107,10 @@ const TagInput: React.FC<{
   );
 };
 
-const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.3.0';
+const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.3.1';
 
 const BioEngineGuide: React.FC = () => {
-  const { server, isLoggedIn } = useHyphaStore();
+  const { server, isLoggedIn, user } = useHyphaStore();
 
   const [os, setOS] = useState<OSType>('linux');
   const [containerRuntime, setContainerRuntime] = useState<ContainerRuntimeType>('docker');
@@ -211,6 +211,14 @@ const BioEngineGuide: React.FC = () => {
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
+
+  // Pre-populate Admin Users with the logged-in user's email on first load.
+  useEffect(() => {
+    if (isLoggedIn && user?.email && adminUsers.length === 0) {
+      setAdminUsers([user.email]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoggedIn, user?.email]);
 
   const isComposeRuntime = () => containerRuntime === 'docker' || containerRuntime === 'podman';
 
@@ -824,7 +832,7 @@ authorized_users:
                       allowWildcard={false}
                     />
                     <p className="text-xs text-gray-500 mt-1">
-                      Users who can deploy and manage apps on this worker. Leave empty to use the logged-in user. Press Space or Enter to add.
+                      Users who can deploy and manage apps on this worker. Press Space or Enter to add.
                     </p>
                   </div>
 
@@ -912,7 +920,6 @@ authorized_users:
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">GPU Indices</label>
                       <input type="text" value={gpuIndices} onChange={(e) => setGpuIndices(e.target.value)}
-                        placeholder="0,1,2 (leave empty to use count)"
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       <p className="text-xs text-gray-500 mt-1">Comma-separated GPU device IDs. Leave empty to use the GPU count above</p>
                     </div>

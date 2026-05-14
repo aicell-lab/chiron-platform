@@ -37,6 +37,7 @@ type ServiceStatus = {
   service_start_time: number;
   service_uptime?: number;
   bioengine_version?: string;
+  ray_version?: string;
   worker_mode?: string;
   workspace?: string;
   client_id?: string;
@@ -1071,6 +1072,13 @@ const BioEngineWorker: React.FC = () => {
                         {[status.geo_location.region, status.geo_location.country_name]
                           .filter(Boolean).join(', ')}
                       </span>
+                    </div>
+                  )}
+
+                  {status?.ray_version && (
+                    <div>
+                      <span className="text-xs font-medium text-gray-500 block">Ray Version</span>
+                      <span className="text-sm font-semibold text-gray-900 font-mono break-all">{status.ray_version}</span>
                     </div>
                   )}
                 </div>
