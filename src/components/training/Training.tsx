@@ -1707,7 +1707,7 @@ const Training: React.FC = () => {
                                     <CountryFlag countryName={geo.country_name} countryCode={geo.country_code} className="w-4 h-3 object-cover rounded-sm flex-shrink-0" />
                                     <span className="text-gray-600 text-xs">{geo.region}, {geo.country_name}</span>
                                   </div>
-                                ) : <span className="text-gray-300 text-xs">—</span>}
+                                ) : <span className="text-gray-300 text-xs">-</span>}
                               </td>
                               <td className="px-4 py-3.5">
                                 {isConnected ? (
@@ -1720,7 +1720,7 @@ const Training: React.FC = () => {
                                   ) : <span className="text-gray-300 text-xs">None</span>
                                 ) : datasetCount !== undefined ? (
                                   <span className="text-xs text-gray-400">{datasetCount} dataset{datasetCount !== 1 ? 's' : ''}</span>
-                                ) : <span className="text-gray-300 text-xs">—</span>}
+                                ) : <span className="text-gray-300 text-xs">-</span>}
                               </td>
                               <td className="px-4 py-3.5 text-center">
                                 {isConnected ? (
@@ -1735,7 +1735,7 @@ const Training: React.FC = () => {
                                       ))}
                                     </div>
                                   ) : <span className="text-gray-300 text-xs">None</span>
-                                ) : <span className="text-gray-300 text-xs">—</span>}
+                                ) : <span className="text-gray-300 text-xs">-</span>}
                               </td>
                               <td className="px-4 py-3.5 text-center">
                                 {isConnected ? (
@@ -1750,7 +1750,7 @@ const Training: React.FC = () => {
                                       ))}
                                     </div>
                                   ) : <span className="text-gray-300 text-xs">None</span>
-                                ) : <span className="text-gray-300 text-xs">—</span>}
+                                ) : <span className="text-gray-300 text-xs">-</span>}
                               </td>
                               <td className="px-6 py-3.5 text-right">
                                 <div className="flex items-center justify-end gap-2">
@@ -2381,12 +2381,12 @@ const Training: React.FC = () => {
                               />
                               <div className={`flex flex-wrap items-center gap-2 rounded-lg p-1.5 -m-1.5 transition-colors`}>
                                 <button onClick={() => saveTrainerPublish(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
-                                  title={isConnected ? "Publish full model to chiron-models artifact hub" : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker — cannot save" : "Worker manager is not reachable — cannot save"}
+                                  title={isConnected ? "Publish full model to chiron-models artifact hub" : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker; cannot save" : "Worker manager is not reachable; cannot save"}
                                   className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
                                   {pubStatus === 'saving' ? <>{spinner} Saving…</> : <>{publishSvg} Publish</>}
                                 </button>
                                 <button onClick={() => saveTrainerLocal(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
-                                  title={isConnected ? "Save to worker at ~/.bioengine/models/" : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker — cannot save" : "Worker manager is not reachable — cannot save"}
+                                  title={isConnected ? "Save to worker at ~/.bioengine/models/" : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker; cannot save" : "Worker manager is not reachable; cannot save"}
                                   className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-semibold rounded-lg hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all border border-gray-200">
                                   {locStatus === 'saving' ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" /> Saving…</> : <>{localSvg} Save to worker</>}
                                 </button>
@@ -2620,8 +2620,8 @@ const Training: React.FC = () => {
                                       {manifest.zarr_files.map((f: any) => (
                                         <tr key={f.name} className="border-t border-gray-200">
                                           <td className="py-0.5 font-mono text-gray-600 text-xs">{f.name}</td>
-                                          <td className="py-0.5 text-right text-gray-600">{f.n_samples?.toLocaleString() ?? '—'}</td>
-                                          <td className="py-0.5 text-right text-gray-600">{f.n_vars?.toLocaleString() ?? '—'}</td>
+                                          <td className="py-0.5 text-right text-gray-600">{f.n_samples?.toLocaleString() ?? '-'}</td>
+                                          <td className="py-0.5 text-right text-gray-600">{f.n_vars?.toLocaleString() ?? '-'}</td>
                                         </tr>
                                       ))}
                                     </tbody>

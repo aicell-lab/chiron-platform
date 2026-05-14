@@ -1036,6 +1036,16 @@ const BioEngineWorker: React.FC = () => {
                       </>
                     );
                   })()}
+
+                  {status?.geo_location && (
+                    <div>
+                      <span className="text-xs font-medium text-gray-500 block">Location</span>
+                      <span className="text-sm font-semibold text-gray-900">
+                        {[status.geo_location.region, status.geo_location.country_name]
+                          .filter(Boolean).join(', ')}
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="space-y-4">
@@ -1062,16 +1072,6 @@ const BioEngineWorker: React.FC = () => {
                     <div>
                       <span className="text-xs font-medium text-gray-500 block">BioEngine Version</span>
                       <span className="text-sm font-semibold text-gray-900 font-mono break-all">{status.bioengine_version}</span>
-                    </div>
-                  )}
-
-                  {status?.geo_location && (
-                    <div>
-                      <span className="text-xs font-medium text-gray-500 block">Location</span>
-                      <span className="text-sm font-semibold text-gray-900">
-                        {[status.geo_location.region, status.geo_location.country_name]
-                          .filter(Boolean).join(', ')}
-                      </span>
                     </div>
                   )}
 

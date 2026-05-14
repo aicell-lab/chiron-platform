@@ -417,7 +417,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
                     const sub = [rounds ? `${rounds} rounds` : '', datasets].filter(Boolean).join(' · ');
                     return (
                       <option key={a.id} value={a.id}>
-                        {label}{sub ? ` — ${sub}` : ''}
+                        {label}{sub ? ` - ${sub}` : ''}
                       </option>
                     );
                   })}

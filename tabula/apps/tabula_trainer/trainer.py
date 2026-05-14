@@ -74,7 +74,7 @@ pip_requirements = [
     # pip install torch==1.13.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
     "torchmetrics==1.2.0",
     "tqdm==4.67.1",
-    "typing_extensions==4.12.2",
+    "typing_extensions==4.14.1",  # pydantic==2.12.0 requires >=4.14.1
     "urllib3==1.26.18",
     "wrapt==1.16.0",
     "zarr==3.1.3",  # Directly used
@@ -82,7 +82,7 @@ pip_requirements = [
 
 if os.getenv("ENABLE_FLASH_ATTENTION") == "1":
     # Optional performance packages
-    pip_requirements.extend(["flash-attn==2.3.5 --no-build-isolation"])
+    pip_requirements.extend(["flash-attn==2.3.5"])
 
 
 # ---------------------------------------------------------------------------

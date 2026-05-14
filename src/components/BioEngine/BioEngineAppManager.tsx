@@ -335,7 +335,7 @@ const BioEngineAppManager = React.forwardRef<
     if (!isEditableFile(filePath)) {
       setLoadedFiles(prev => ({
         ...prev,
-        [filePath]: { content: `// Binary file — not editable`, language: 'plaintext', isEditable: false },
+        [filePath]: { content: `// Binary file (not editable)`, language: 'plaintext', isEditable: false },
       }));
       setSelectedFile(filePath);
       return;
@@ -389,7 +389,7 @@ const BioEngineAppManager = React.forwardRef<
         const toAdd = normalized.filter(f => !existingNames.has(f.name));
         return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
       });
-    } catch (_) { /* silently ignore — directory will appear empty */ }
+    } catch (_) { /* silently ignore; directory will appear empty */ }
   }, [artifact, fetchedDirs, getArtifactManager]);
 
   // ─── Open view dialog ─────────────────────────────────────────────────────
@@ -548,7 +548,7 @@ const BioEngineAppManager = React.forwardRef<
       }
 
       if (!filesToUpload.some(f => f.name === 'manifest.yaml')) {
-        throw new Error('manifest.yaml was not loaded — open the file first, then try again.');
+        throw new Error('manifest.yaml was not loaded; open the file first, then try again.');
       }
 
       await bioengineWorker.save_application({ files: filesToUpload, _rkwargs: true });
@@ -905,7 +905,7 @@ const BioEngineAppManager = React.forwardRef<
                     <>
                       {!selectedFileData?.isEditable && (
                         <div className="px-4 py-2 bg-amber-50 border-b border-amber-200 text-xs text-amber-800">
-                          Binary / non-text file — read only
+                          Binary / non-text file (read only)
                         </div>
                       )}
                       {fileLoading ? (

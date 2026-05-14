@@ -61,7 +61,7 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
 };
 
 const formatTs = (iso?: string) => {
-  if (!iso) return '—';
+  if (!iso) return '-';
   try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); }
   catch { return iso; }
 };
@@ -160,7 +160,7 @@ const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean }> = ({ run, d
                 {Object.entries(m.trainers).map(([svcId, t]) => (
                   <div key={svcId} className="text-xs bg-gray-50 border border-gray-100 rounded-lg px-3 py-1.5">
                     <p className="font-medium text-gray-800">{t.client_name}</p>
-                    <p className="text-gray-400">{t.datasets?.map((d: any) => d.name || d.id).join(', ') || '—'}</p>
+                    <p className="text-gray-400">{t.datasets?.map((d: any) => d.name || d.id).join(', ') || '-'}</p>
                   </div>
                 ))}
               </div>
@@ -185,8 +185,8 @@ const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean }> = ({ run, d
                     {m.rounds.map(r => (
                       <tr key={r.round} className="border-b border-gray-50 last:border-0">
                         <td className="py-1.5 pr-4 font-medium text-gray-700">{r.round}</td>
-                        <td className="py-1.5 pr-4 text-blue-600">{r.training_loss != null ? r.training_loss.toFixed(4) : '—'}</td>
-                        <td className="py-1.5 pr-4 text-emerald-600">{r.validation_loss != null ? r.validation_loss.toFixed(4) : '—'}</td>
+                        <td className="py-1.5 pr-4 text-blue-600">{r.training_loss != null ? r.training_loss.toFixed(4) : '-'}</td>
+                        <td className="py-1.5 pr-4 text-emerald-600">{r.validation_loss != null ? r.validation_loss.toFixed(4) : '-'}</td>
                         <td className="py-1.5 text-gray-500">{r.trainers?.map(t => t.client_name).join(', ')}</td>
                       </tr>
                     ))}
