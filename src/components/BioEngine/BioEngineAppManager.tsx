@@ -42,7 +42,10 @@ interface BioEngineAppManagerProps {
   serviceId: string;
   server: any;
   isLoggedIn: boolean;
-  onArtifactUpdated?: () => void;
+  adminUsers?: string[];
+  currentUserEmail?: string;
+  availableWorkspaces?: string[];
+  onArtifactUpdated?: (workspace?: string) => void;
   ref?: React.Ref<{
     openCreateDialog: () => void;
     openEditDialog: (artifact: ArtifactType) => void;
@@ -204,7 +207,11 @@ class MyNewApp:
 const BioEngineAppManager = React.forwardRef<
   { openCreateDialog: () => void; openEditDialog: (artifact: ArtifactType) => void },
   BioEngineAppManagerProps
->(({ serviceId, server, isLoggedIn, onArtifactUpdated }, ref) => {
+>(({ serviceId, server, isLoggedIn, adminUsers = [], currentUserEmail, availableWorkspaces = [], onArtifactUpdated }, ref) => {
+
+  const userWs: string = server?.config?.workspace || '';
+  const getWorkerWorkspace = () => serviceId ? serviceId.split('/')[0] : '';
+  const userIsAdmin = adminUsers.includes(currentUserEmail || '') || adminUsers.includes('*');
 
   // ─ Mode & artifact
   const [mode, setMode] = useState<DialogMode>('closed');
@@ -236,6 +243,7 @@ const BioEngineAppManager = React.forwardRef<
 
   // ─ Copy dialog state
   const [copySaving, setCopySaving] = useState(false);
+  const [copyWorkspace, setCopyWorkspace] = useState('');
 
   // ─ New file/folder input
   const [newEntryName, setNewEntryName] = useState('');
@@ -496,7 +504,7 @@ const BioEngineAppManager = React.forwardRef<
       }
 
       await bioengineWorker.save_application({ files: filesToUpload, _rkwargs: true });
-      onArtifactUpdated?.();
+      onArtifactUpdated?.(artifact?.id.split('/')[0]);
       handleCloseDialog();
     } catch (err) {
       setError(`Failed to update app: ${err instanceof Error ? err.message : String(err)}`);
@@ -509,13 +517,15 @@ const BioEngineAppManager = React.forwardRef<
   // ─── Save as copy (into user's workspace) ────────────────────────────────
 
   const handleOpenCopyDialog = useCallback(() => {
+    setCopyWorkspace(userWs || getWorkerWorkspace());
     setMode('copy');
-  }, []);
+  }, [userWs]);
 
   const handleCreateCopy = useCallback(async () => {
     if (!artifact) return;
     setCopySaving(true);
     setError(null);
+    const targetWs = copyWorkspace.trim() || userWs || getWorkerWorkspace();
     try {
       const am = await getArtifactManager();
       const bioengineWorker = await server.getService(serviceId);
@@ -551,15 +561,15 @@ const BioEngineAppManager = React.forwardRef<
         throw new Error('manifest.yaml was not loaded; open the file first, then try again.');
       }
 
-      await bioengineWorker.save_application({ files: filesToUpload, _rkwargs: true });
-      onArtifactUpdated?.();
+      await bioengineWorker.save_application({ files: filesToUpload, target_workspace: targetWs || undefined, _rkwargs: true });
+      onArtifactUpdated?.(targetWs);
       handleCloseDialog();
     } catch (err) {
       setError(`Failed to create copy: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setCopySaving(false);
     }
-  }, [artifact, serviceId, server, loadedFiles, onArtifactUpdated,
+  }, [artifact, serviceId, server, loadedFiles, copyWorkspace, userWs, onArtifactUpdated,
       getArtifactManager, collectAllFiles, handleCloseDialog]);
 
   // ─── Create new app ───────────────────────────────────────────────────────
@@ -589,7 +599,7 @@ const BioEngineAppManager = React.forwardRef<
         name, content, type: 'text' as const,
       }));
       await bioengineWorker.save_application({ files: filesToUpload, _rkwargs: true });
-      onArtifactUpdated?.();
+      onArtifactUpdated?.(getWorkerWorkspace());
       handleCloseDialog();
     } catch (err) {
       setError(`Failed to create app: ${err instanceof Error ? err.message : String(err)}`);
@@ -613,7 +623,7 @@ const BioEngineAppManager = React.forwardRef<
         await bioengineWorker.delete_application({ artifact_id: artifact.id, _rkwargs: true });
       }
       setDeleteOpen(false);
-      onArtifactUpdated?.();
+      onArtifactUpdated?.(artifact?.id.split('/')[0]);
       handleCloseDialog();
     } catch (err) {
       setError(`Failed to delete: ${err instanceof Error ? err.message : String(err)}`);
@@ -1121,35 +1131,49 @@ const BioEngineAppManager = React.forwardRef<
 
   // ─── Copy dialog ──────────────────────────────────────────────────────────
 
-  const renderCopyDialog = () => (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="bg-white rounded-xl shadow-lg w-full max-w-md mx-4 p-6">
-        <h3 className="text-base font-semibold text-gray-900 mb-3">Save as Copy</h3>
-        <p className="text-sm text-gray-600 mb-4">
-          Copies all files from{' '}
-          <span className="font-mono text-xs bg-gray-100 px-1 rounded">{artifact?.id}</span>{' '}
-          into your workspace. The <code>id</code> field in <code>manifest.yaml</code> will have the workspace prefix stripped.
-        </p>
-        {error && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 max-h-40 overflow-y-auto">
-            <pre className="whitespace-pre-wrap break-all font-sans">{error}</pre>
+  const renderCopyDialog = () => {
+    const wsOptions = [...new Set([userWs, getWorkerWorkspace(), ...availableWorkspaces])].filter(Boolean);
+    return (
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+        <div className="bg-white rounded-xl shadow-lg w-full max-w-md mx-4 p-6">
+          <h3 className="text-base font-semibold text-gray-900 mb-3">Save as Copy</h3>
+          <p className="text-sm text-gray-600 mb-4">
+            Copies all files from{' '}
+            <span className="font-mono text-xs bg-gray-100 px-1 rounded">{artifact?.id}</span>{' '}
+            into the target workspace. The <code>id</code> field in <code>manifest.yaml</code> will have the workspace prefix stripped.
+          </p>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Target Workspace</label>
+          <input
+            list="copy-ws-options"
+            value={copyWorkspace}
+            onChange={e => setCopyWorkspace(e.target.value)}
+            placeholder={userWs || 'workspace-name'}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 mb-4"
+          />
+          <datalist id="copy-ws-options">
+            {wsOptions.map(ws => <option key={ws} value={ws} />)}
+          </datalist>
+          {error && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 max-h-40 overflow-y-auto">
+              <pre className="whitespace-pre-wrap break-all font-sans">{error}</pre>
+            </div>
+          )}
+          <div className="flex justify-end gap-3">
+            <button onClick={() => { setMode('edit'); setError(null); }} className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
+            <button
+              onClick={handleCreateCopy}
+              disabled={copySaving}
+              className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2"
+            >
+              {copySaving
+                ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Creating…</>
+                : 'Create Copy'}
+            </button>
           </div>
-        )}
-        <div className="flex justify-end gap-3">
-          <button onClick={() => { setMode('edit'); setError(null); }} className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
-          <button
-            onClick={handleCreateCopy}
-            disabled={copySaving}
-            className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2"
-          >
-            {copySaving
-              ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Creating…</>
-              : 'Create Copy'}
-          </button>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   // ─── Delete confirm dialog ────────────────────────────────────────────────
 

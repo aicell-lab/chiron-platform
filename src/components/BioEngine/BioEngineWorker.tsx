@@ -157,7 +157,7 @@ const BioEngineWorker: React.FC = () => {
   const searchParams = new URLSearchParams(location.search);
   const serviceId = searchParams.get('service_id');
 
-  const { server, isLoggedIn } = useHyphaStore();
+  const { server, isLoggedIn, user } = useHyphaStore();
   const [status, setStatus] = useState<ServiceStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1165,6 +1165,8 @@ const BioEngineWorker: React.FC = () => {
         {/* BioEngine Apps Section - handles both deployed and available apps */}
         <BioEngineApps
           serviceId={serviceId}
+          adminUsers={status?.admin_users || []}
+          currentUserEmail={user?.email}
           onArtifactUpdated={handleArtifactUpdated}
           // Pass deployment-related props and handlers
           deployingArtifactId={deployingArtifactId}
