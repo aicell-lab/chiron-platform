@@ -212,10 +212,11 @@ const BioEngineGuide: React.FC = () => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
-  // Pre-populate Admin Users with the logged-in user's email on first load.
+  // Pre-populate Admin Users and Manager Authorized Users with the logged-in user's email on first load.
   useEffect(() => {
-    if (isLoggedIn && user?.email && adminUsers.length === 0) {
-      setAdminUsers([user.email]);
+    if (isLoggedIn && user?.email) {
+      if (adminUsers.length === 0) setAdminUsers([user.email]);
+      if (managerAuthorizedUsers.length === 0) setManagerAuthorizedUsers([user.email]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoggedIn, user?.email]);
