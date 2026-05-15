@@ -801,7 +801,7 @@ authorized_users:
                   />
                   <p className="text-xs text-gray-500 mt-1">
                     Who can manage and use this worker in the Chiron Platform. Use <code className="bg-gray-100 px-0.5 rounded">*</code> to allow all users.
-                    Leave empty to restrict to admin users only. Press Space or Enter to add.
+                    Leave empty to restrict to worker admin users only. Press Space or Enter to add.
                   </p>
                 </div>
 
