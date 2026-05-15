@@ -696,6 +696,31 @@ authorized_users:
               <h5 className="text-sm font-semibold text-gray-700 mb-3">Container &amp; Compute</h5>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
 
+                {/* Worker Name (1/3) + Training Data Directory (2/3) */}
+                <div className="md:col-span-2 lg:col-span-3 grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Worker Name</label>
+                    <input type="text" value={workerName} onChange={(e) => setWorkerName(e.target.value)}
+                      placeholder="Chiron Worker"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <p className="text-xs text-gray-500 mt-1">Display name for this worker in the Chiron UI</p>
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Training Data Directory</label>
+                    <input
+                      type="text"
+                      value={dataDir}
+                      onChange={(e) => setDataDir(e.target.value)}
+                      placeholder="/path/to/your/single-cell/data"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Path to your local single-cell datasets for model training. Required for a <strong>Tabula Trainer</strong>.
+                      Leave empty if running an <strong>Orchestrator only</strong>. The data server will be omitted.
+                    </p>
+                  </div>
+                </div>
+
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Operating System</label>
                   <select value={os} onChange={(e) => setOS(e.target.value as OSType)}
@@ -763,31 +788,6 @@ authorized_users:
                     onChange={(e) => setMemory(parseInt(e.target.value) || 4)}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   <p className="text-xs text-gray-500 mt-1">RAM for the Ray head node in GB</p>
-                </div>
-
-                {/* Worker Name (1/3) + Training Data Directory (2/3) */}
-                <div className="md:col-span-2 lg:col-span-3 grid grid-cols-3 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Worker Name</label>
-                    <input type="text" value={workerName} onChange={(e) => setWorkerName(e.target.value)}
-                      placeholder="Chiron Worker"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    <p className="text-xs text-gray-500 mt-1">Display name for this worker in the Chiron UI</p>
-                  </div>
-                  <div className="col-span-2">
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Training Data Directory</label>
-                    <input
-                      type="text"
-                      value={dataDir}
-                      onChange={(e) => setDataDir(e.target.value)}
-                      placeholder="/path/to/your/single-cell/data"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                    <p className="text-xs text-gray-500 mt-1">
-                      Path to your local single-cell datasets for model training. Required for a <strong>Tabula Trainer</strong>.
-                      Leave empty if running an <strong>Orchestrator only</strong>. The data server will be omitted.
-                    </p>
-                  </div>
                 </div>
 
                 {/* Chiron Manager Authorized Users — full-width row */}
