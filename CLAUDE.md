@@ -230,6 +230,7 @@ Resource baseline per site:
   ```bash
   git -c user.name="nilsmechtel" -c user.email="nils.mechtel@gmail.com" commit ...
   ```
+- **Never push without explicit user confirmation.** Commit locally, show the diff/summary, then ask before running `git push`.
 
 ---
 
