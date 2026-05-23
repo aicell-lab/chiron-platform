@@ -809,7 +809,7 @@ authorized_users:
             </div>
 
             {/* Advanced Options */}
-            <div className="border-t border-gray-200 mt-4 pt-4">
+            <div className="pt-6">
               <button
                 onClick={() => setShowAdvanced(!showAdvanced)}
                 className="flex items-center text-sm text-gray-600 hover:text-gray-800 transition-colors"
@@ -954,7 +954,7 @@ authorized_users:
           </div>
 
           {/* ── Steps 1–3 ── */}
-          <div className="space-y-3">
+          <div className="border-t border-gray-200 pt-4">
 
             {/* Step 1 */}
             {isComposeRuntime() ? (
