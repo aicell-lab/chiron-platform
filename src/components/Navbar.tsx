@@ -2,8 +2,7 @@ import React, { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import LoginButton from './LoginButton';
 import { BiCube } from 'react-icons/bi';
-import { TbEngine } from 'react-icons/tb';
-import { TbTopologyStar } from 'react-icons/tb';
+import { TbServer, TbTopologyStar } from 'react-icons/tb';
 import { MdHistory } from 'react-icons/md';
 
 const Navbar: React.FC = () => {
@@ -15,71 +14,68 @@ const Navbar: React.FC = () => {
   };
 
   const navLinkClasses = (path: string): string => {
-    const baseClasses = "flex items-center px-3 py-2";
-    const activeClasses = "text-blue-600 font-medium";
-    const inactiveClasses = "text-gray-700 hover:text-gray-900";
+    const baseClasses = "flex items-center px-4 py-2 rounded-xl transition-all duration-300";
+    const activeClasses = "text-blue-700 font-semibold";
+    const inactiveClasses = "text-gray-700 hover:text-blue-600";
     
     return `${baseClasses} ${isActivePath(path) ? activeClasses : inactiveClasses}`;
   };
 
   const mobileNavLinkClasses = (path: string): string => {
-    const baseClasses = "flex items-center px-3 py-2 rounded-md hover:bg-gray-50";
-    const activeClasses = "text-blue-600 font-medium bg-blue-50";
-    const inactiveClasses = "text-gray-700 hover:text-gray-900";
+    const baseClasses = "flex items-center px-4 py-3 rounded-xl transition-all duration-300";
+    const activeClasses = "text-blue-700 font-semibold";
+    const inactiveClasses = "text-gray-700 hover:text-blue-600";
     
     return `${baseClasses} ${isActivePath(path) ? activeClasses : inactiveClasses}`;
   };
 
   return (
-    <nav className="sticky top-0 z-50 bg-white border-b border-gray-200">
-      <div className="max-w-[1400px] mx-auto px-4">
-        <div className="relative flex items-center justify-between h-16">
-          {/* Left: logo */}
+    <nav className="sticky top-0 z-50 bg-gradient-to-r from-blue-100/90 via-purple-100/85 to-cyan-100/90 backdrop-blur-lg border-b border-blue-200/40 shadow-xl shadow-blue-300/20 h-16">
+      <div className="max-w-[1400px] mx-auto px-6 h-full">
+        <div className="flex items-center justify-between h-full relative">
+          {/* Left section with logo */}
           <div className="flex items-center">
-            <Link to="/" className="flex items-center">
-              <div className="flex items-center text-2xl font-bold text-blue-600">
-                <BiCube className="mr-2" size={24} />
+            <Link to="/" className="flex items-center group">
+              <div className="flex items-center text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-700 to-purple-700 group-hover:scale-105 transition-transform duration-300">
                 Chiron Platform
               </div>
             </Link>
           </div>
 
-          {/* Center: Worker · Training · Chiron Lab */}
-          <div className="hidden md:flex items-center space-x-1 absolute left-1/2 -translate-x-1/2">
+          {/* Center section with navigation */}
+          <div className="hidden lg:flex items-center space-x-2 absolute left-1/2 -translate-x-1/2">
+            <Link to="/models" className={navLinkClasses("/models")}>
+              <BiCube className="mr-2" size={20} />
+              Models
+            </Link>
             <Link to="/worker" className={navLinkClasses("/worker")}>
-              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <TbEngine size={20} />
-              </span>
+              <TbServer className="mr-2" size={20} />
               Worker
             </Link>
             <Link to="/training" className={navLinkClasses("/training")}>
-              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <TbTopologyStar size={20} />
-              </span>
+              <TbTopologyStar className="mr-2" size={20} />
               Training
             </Link>
             <Link to="/runs" className={navLinkClasses("/runs")}>
-              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <MdHistory size={20} />
-              </span>
+              <MdHistory className="mr-2" size={20} />
               Runs
             </Link>
           </div>
 
-          {/* Right: Login */}
-          <div className="flex items-center space-x-4">
-            <div className="hidden md:flex items-center">
+          {/* Right section with Login */}
+          <div className="flex items-center space-x-3">
+            <div className="hidden lg:flex items-center space-x-3">
               <LoginButton />
             </div>
             
             {/* Mobile menu button */}
             <button 
-              className="md:hidden"
+              className="lg:hidden p-2.5 rounded-xl bg-white/80 hover:bg-white/95 transition-all duration-300 backdrop-blur-sm border border-blue-200/50 hover:border-blue-300/60 hover:shadow-lg"
               onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
               aria-label="Toggle mobile menu"
               title="Toggle mobile menu"
             >
-              <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg className="h-6 w-6 text-gray-600 hover:text-blue-600 transition-colors duration-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
               </svg>
             </button>
@@ -87,41 +83,46 @@ const Navbar: React.FC = () => {
         </div>
 
         {/* Mobile menu */}
-        <div className={`md:hidden ${isMobileMenuOpen ? 'block' : 'hidden'}`}>
-          <div className="px-2 pt-2 pb-3 space-y-1">
+        <div className={`lg:hidden ${isMobileMenuOpen ? 'block' : 'hidden'}`}>
+          <div className="px-4 pt-4 pb-6 space-y-3 bg-white/90 backdrop-blur-lg rounded-2xl mt-4 mb-4 border border-blue-200/50 shadow-2xl shadow-blue-200/30">
+            <Link 
+              to="/models" 
+              className={mobileNavLinkClasses("/models")}
+              onClick={() => setIsMobileMenuOpen(false)}
+            >
+              <BiCube className="mr-3" size={20} />
+              Models
+            </Link>
             <Link 
               to="/worker" 
               className={mobileNavLinkClasses("/worker")}
+              onClick={() => setIsMobileMenuOpen(false)}
             >
-              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <TbEngine size={20} />
-              </span>
+              <TbServer className="mr-3" size={20} />
               Worker
             </Link>
             <Link
               to="/training"
               className={mobileNavLinkClasses("/training")}
+              onClick={() => setIsMobileMenuOpen(false)}
             >
-              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <TbTopologyStar size={20} />
-              </span>
+              <TbTopologyStar className="mr-3" size={20} />
               Training
             </Link>
             <Link
               to="/runs"
               className={mobileNavLinkClasses("/runs")}
+              onClick={() => setIsMobileMenuOpen(false)}
             >
-              <span className="mr-2 inline-flex h-5 w-5 items-center justify-center">
-                <MdHistory size={20} />
-              </span>
+              <MdHistory className="mr-3" size={20} />
               Runs
             </Link>
 
             {/* Add divider */}
-            <div className="border-t border-gray-200 my-2"></div>
+            <div className="border-t border-blue-200/50 my-4"></div>
 
             {/* Login button in mobile menu */}
-            <div className="px-3 py-2">
+            <div className="px-4 py-2">
               <LoginButton />
             </div>
           </div>
@@ -131,4 +132,4 @@ const Navbar: React.FC = () => {
   );
 };
 
-export default Navbar; 
+export default Navbar;

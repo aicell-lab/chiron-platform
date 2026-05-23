@@ -20,6 +20,7 @@ import Orchestrator from './components/BioEngine/Orchestrator';
 import AgentLab from './pages/AgentLab';
 import Training from './components/training/Training';
 import Runs from './pages/Runs';
+import Models from './pages/Models';
 
 // Create a wrapper component that uses Router hooks
 const AppContent: React.FC = () => {
@@ -91,6 +92,7 @@ const AppContent: React.FC = () => {
           <Route path="/bioengine/worker" element={<Navigate to="/worker/dashboard" replace />} />
           <Route path="/orchestrator" element={<div className="container mx-auto px-4"><Orchestrator /></div>} />
           <Route path="/training" element={<Training />} />
+          <Route path="/models" element={<div className="container mx-auto px-4"><Models /></div>} />
           <Route path="/runs" element={<Runs />} />
           <Route path="/lab" element={<AgentLab />} />
           <Route path="/notebook" element={<Navigate to="/lab" replace />} />
