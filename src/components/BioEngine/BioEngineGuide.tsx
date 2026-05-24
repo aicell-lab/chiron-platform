@@ -107,7 +107,7 @@ const TagInput: React.FC<{
   );
 };
 
-const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.3.1';
+const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.3.3';
 
 const BioEngineGuide: React.FC = () => {
   const { server, isLoggedIn, user } = useHyphaStore();
@@ -233,8 +233,8 @@ const BioEngineGuide: React.FC = () => {
   const getSifFilename = () => {
     const img = customImage || DEFAULT_IMAGE;
     const parts = img.split('/');
-    const nameTag = parts[parts.length - 1]; // e.g. "tabula:0.3.0"
-    return nameTag.replace(':', '_') + '.sif'; // "tabula_0.3.0.sif"
+    const nameTag = parts[parts.length - 1]; // e.g. "tabula:0.3.3"
+    return nameTag.replace(':', '_') + '.sif'; // "tabula_0.3.3.sif"
   };
 
   // Build the common worker arg list (used by both compose and singularity)
