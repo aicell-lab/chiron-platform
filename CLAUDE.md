@@ -104,7 +104,7 @@ Understanding this is essential before editing anything in the training or worke
 - **AnnData** + **Zarr** for single-cell data serialization
 
 ### Infrastructure
-- **Docker** (conda/miniforge3, CUDA 11.7) — `ghcr.io/aicell-lab/tabula:0.3.0`
+- **Docker** (conda/miniforge3, CUDA 11.7) — `ghcr.io/aicell-lab/tabula:0.3.3`
 - **Kubernetes** for production deployment
 - **Docker Compose** for local development
 
