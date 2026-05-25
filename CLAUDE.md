@@ -19,9 +19,15 @@ Chiron is the platform that makes this deployable. It coordinates BioEngine Work
 | Repo | Location | Purpose |
 |------|----------|---------|
 | `chiron-platform` | this repo | React UI + federated orchestration apps |
-| `tabula` | `./tabula/` (separate git repo) | Tabula model, training code, FL client/server apps |
+| `tabula` | `../tabula/` (sibling directory; separate git repo) | Tabula model, training code, FL client/server apps |
+| `bioengine` | `../bioengine/` (sibling directory; separate git repo) | Underlying worker/runtime framework that Tabula builds on |
 
-The `tabula/` folder is a **separate git repository** checked out alongside this one. Do not commit platform changes into it or vice versa.
+The `tabula` repo is a **separate git repository** checked out alongside this one at `../tabula/`. If it is not available locally, clone it from https://github.com/aicell-lab/tabula. Do not commit platform changes into it or vice versa.
+
+**BioEngine** is the underlying framework that Tabula (and the BioEngine Workers) are built on. The repo lives at `../bioengine/`; if it isn't present locally, it's at https://github.com/aicell-lab/bioengine.
+
+- **You may read files in `../bioengine/` for context**, but **do not make changes there yourself** — leave bioengine edits to the user.
+- **Do not patch BioEngine bugs inside `tabula/`** as a workaround. If you find a bug that originates in BioEngine, surface it to the user so it can be fixed in the bioengine repo directly. Workarounds in Tabula mask the real problem and accumulate technical debt.
 
 ---
 
@@ -44,19 +50,20 @@ chiron-platform/
 │   ├── file_manager.py         # Dataset file operations
 │   ├── ray_deployment_manager.py # Ray job orchestration
 │   └── start_worker.py         # Worker initialization
-├── tabula/                     # Separate git repo — Tabula model + FL apps
-│   ├── tabula/
-│   │   ├── model/              # Tabula transformer architecture
-│   │   ├── training/           # Training loop and utilities
-│   │   ├── datasets/           # AnnData/.h5ad dataset handling
-│   │   └── distributed/        # FL client implementation (federated_client.py)
-│   └── apps/
-│       ├── chiron_manager/     # Control plane — worker lifecycle management
-│       ├── chiron_orchestrator/# Flower-based federated server (FedAvg aggregation)
-│       └── tabula_trainer/     # Local FL client — trains on local datasets, shares only weights
 ├── deployment.yaml             # Kubernetes deployment spec
-├── tabula/docker-compose.yaml  # Local development orchestration
 └── tabula_submission_NBT (official).txt  # Manuscript (NBT submission)
+
+../tabula/                      # Sibling repo — Tabula model + FL apps (separate git repo)
+├── tabula/
+│   ├── model/                  # Tabula transformer architecture
+│   ├── training/               # Training loop and utilities
+│   ├── datasets/               # AnnData/.h5ad dataset handling
+│   └── distributed/            # FL client implementation (federated_client.py)
+├── apps/
+│   ├── chiron_manager/         # Control plane — worker lifecycle management
+│   ├── chiron_orchestrator/    # Flower-based federated server (FedAvg aggregation)
+│   └── tabula_trainer/         # Local FL client — trains on local datasets, shares only weights
+└── docker-compose.yaml         # Local development orchestration
 ```
 
 ---
@@ -95,7 +102,7 @@ Understanding this is essential before editing anything in the training or worke
 - **Recharts** for charts
 - **hypha-core** + **hypha-rpc** for backend communication
 
-### Backend (`tabula/`)
+### Backend (`../tabula/`)
 - **Python 3.11**
 - **PyTorch 1.13.1** (CUDA 11.7) + **PyTorch Lightning 2.2**
 - **Flower (flwr 1.22.0)** for FL coordination (FedAvg)
@@ -121,6 +128,9 @@ pnpm test           # Run tests
 ```
 
 ### Tabula backend
+All commands below assume the `tabula` repo is checked out at `../tabula/` (sibling of this repo).
+If not present locally, clone it first: `git clone https://github.com/aicell-lab/tabula ../tabula`.
+
 ```bash
 # Conda setup
 conda create -n tabula python=3.11 -y && conda activate tabula
@@ -128,7 +138,7 @@ pip install torch==1.13.1+cu117 --extra-index-url https://download.pytorch.org/w
 MAX_JOBS=4 pip install flash-attn==2.3.5 --no-build-isolation
 pip install anndata==0.12.6
 pip install "git+https://github.com/aicell-lab/bioengine.git@141f4c7#egg=bioengine[datasets,worker]"
-pip install -r tabula/requirements.txt && pip install -e tabula/
+pip install -r ../tabula/requirements.txt && pip install -e ../tabula/
 
 # Start dataset server
 python -m tabula.datasets --data-dir /path/to/data
@@ -140,14 +150,14 @@ python -m bioengine.worker \
   --startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}'
 
 # Docker — preferred way to run the worker locally
-# The .env file in tabula/ must contain HYPHA_TOKEN, DATA_DIR, BIOENGINE_HOME, UID, GID
+# The .env file in ../tabula/ must contain HYPHA_TOKEN, DATA_DIR, BIOENGINE_HOME, UID, GID
 # IMPORTANT: unset HYPHA_TOKEN from the shell before running docker compose, otherwise
 # the shell variable overrides the .env file value.
-cd tabula/
+cd ../tabula/
 unset HYPHA_TOKEN && docker compose up -d worker-tabula
 
 # To restart the worker with an updated token:
-cd tabula/
+cd ../tabula/
 unset HYPHA_TOKEN && docker compose down worker-tabula && docker compose up -d worker-tabula
 ```
 
@@ -155,7 +165,7 @@ unset HYPHA_TOKEN && docker compose down worker-tabula && docker compose up -d w
 
 **Always use the local BioEngine worker to upload apps** — do not use `npx hypha-cli art cp` directly, as it bypasses the worker's upload pipeline and may not stage/commit correctly.
 
-The token in `tabula/.env` must be valid for the `chiron-platform` workspace. Check expiry before running:
+The token in `../tabula/.env` must be valid for the `chiron-platform` workspace. Check expiry before running:
 
 ```python
 import base64, json, time
@@ -171,9 +181,9 @@ Upload and deploy via the worker (Python):
 import asyncio
 from hypha_rpc import connect_to_server
 
-HYPHA_TOKEN = "<chiron-platform token from tabula/.env>"
+HYPHA_TOKEN = "<chiron-platform token from ../tabula/.env>"
 WORKER_ID   = "chiron-platform/<worker-id>:bioengine-worker"  # discover via list_services()
-APP_DIR     = "tabula/apps/chiron_manager"   # or whichever app
+APP_DIR     = "../tabula/apps/chiron_manager"   # or whichever app
 
 async def main():
     server = await connect_to_server({'server_url': 'https://hypha.aicell.io', 'token': HYPHA_TOKEN})
@@ -279,9 +289,9 @@ Resource baseline per site:
 | Hypha connection, auth, artifact state | `src/store/hyphaStore.ts` |
 | Worker dashboard and deployment UI | `src/components/BioEngine/` |
 | Dataset and worker services | `worker/` |
-| FL client implementation | `tabula/tabula/distributed/federated_client.py` |
-| Federated server (FedAvg) | `tabula/apps/chiron_orchestrator/` |
-| Local trainer app | `tabula/apps/tabula_trainer/` |
-| Control plane | `tabula/apps/chiron_manager/` |
+| FL client implementation | `../tabula/tabula/distributed/federated_client.py` |
+| Federated server (FedAvg) | `../tabula/apps/chiron_orchestrator/` |
+| Local trainer app | `../tabula/apps/tabula_trainer/` |
+| Control plane | `../tabula/apps/chiron_manager/` |
 | Platform + training context (manuscript) | `resources/tabula_submission_NBT (official).txt` |
 | Platform context (methods) | `resources/tabula_online_methods.md` |
