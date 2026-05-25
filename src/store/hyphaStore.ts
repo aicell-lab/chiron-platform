@@ -19,6 +19,12 @@ interface LoginConfig {
 export interface HyphaState {
   client: typeof hyphaWebsocketClient | null;
   server: any;
+  /**
+   * The bearer token used for the active connection. We mirror it here so HTTP
+   * service calls (src/utils/hyphaHttp.ts) can authenticate without re-deriving
+   * it from the websocket client.
+   */
+  hyphaToken: string | null;
   setServer: (server: any) => void;
   user: any;
   setUser: (user: any) => void;
@@ -63,6 +69,7 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
   itemsPerPage: 12,
   totalItems: 0,
   artifactManager: null,
+  hyphaToken: null,
   isConnected: false,
   isLoggingIn: false,
   isAuthenticated: false,
@@ -91,6 +98,7 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
     server: null,
     user: null,
     artifactManager: null,
+    hyphaToken: null,
     isConnected: false,
     isAuthenticated: false,
     isLoggedIn: false,
@@ -114,6 +122,7 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
         client,
         server,
         artifactManager,
+        hyphaToken: config.token ?? null,
         isConnected: true,
         isAuthenticated,
         isLoggedIn: isAuthenticated,
@@ -124,10 +133,11 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
       return server;
     } catch (error) {
       console.error('Failed to connect to Hypha:', error);
-      set({ 
+      set({
         client: null,
         server: null,
         artifactManager: null,
+        hyphaToken: null,
         isConnected: false,
         isAuthenticated: false,
         isLoggedIn: false,

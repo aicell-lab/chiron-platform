@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useHyphaStore } from '../../store/hyphaStore';
+import { callHyphaService, listHyphaServices } from '../../utils/hyphaHttp';
 import { FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
@@ -68,10 +69,16 @@ interface WorkerInfo {
   trainers_status?: Record<string, TrainerStatus>;
 }
 
+/**
+ * A discovered chiron-manager. With the HTTP transport we no longer hold a
+ * websocket proxy — only the metadata we need to render the worker row plus
+ * the last good get_worker_info payload. `isConnected` is now derived from
+ * whether the most recent HTTP poll succeeded (we no longer require an
+ * explicit user-driven Connect step).
+ */
 interface ManagerConnection {
   workspace: string;
   serviceId: string;
-  service: any;
   isConnected: boolean;
   workerInfo?: WorkerInfo;
   datasetsInfo?: Record<string, any>;
@@ -173,7 +180,6 @@ const Training: React.FC = () => {
   const [workspaceInput, setWorkspaceInput] = useState('');
   const [discoveredWorkers, setDiscoveredWorkers] = useState<Record<string, DiscoveredWorker[]>>({});
   const [wsDiscoveryStatus, setWsDiscoveryStatus] = useState<Record<string, WsDiscoveryStatus>>({});
-  const [connectingServiceId, setConnectingServiceId] = useState<string | null>(null);
 
   const [showErrorPopup, setShowErrorPopup] = useState(false);
   const [errorPopupMessage, setErrorPopupMessage] = useState('');
@@ -230,8 +236,14 @@ const Training: React.FC = () => {
   // Save model weights
   // Save Weights state — keyed by 'global', 'publish-{svcId}', 'local-{svcId}'
   const [saveDescriptions, setSaveDescriptions] = useState<Record<string, string>>({});
-  const [saveStatuses, setSaveStatuses] = useState<Record<string, 'idle'|'saving'|'success'|'duplicate'>>({});
-  const [savedItems, setSavedItems] = useState<Record<string, {artifactId?: string; path?: string; description: string; round?: number}>>({});
+  const [saveStatuses, setSaveStatuses] = useState<Record<string, 'idle'|'saving'|'success'>>({});
+  // History of completed saves per slot key (`global`, `publish-<svc>`, `local-<svc>`).
+  // We track every (description, session_id, round) tuple that's already been written
+  // so the pre-save duplicate check can warn the user only when the exact same
+  // checkpoint is being re-saved — different rounds of the same trainer model are
+  // independent saves and should not trigger the warning.
+  type SavedEntry = { artifactId?: string; path?: string; description: string; round?: number; sessionId?: string; savedAt: number };
+  const [savedItems, setSavedItems] = useState<Record<string, SavedEntry[]>>({});
 
   // Checkpoint selectors — fetched when Save Weights panel becomes visible
   type CheckpointEntry = { round: number; path: string; saved_at: string };
@@ -270,11 +282,6 @@ const Training: React.FC = () => {
   const [infoModalType, setInfoModalType] = useState<'manager' | 'orchestrator' | 'trainer'>('manager');
   const [isInfoModalLoading, setIsInfoModalLoading] = useState(false);
 
-  const [showServiceSelectionModal, setShowServiceSelectionModal] = useState(false);
-  const [availableServices, setAvailableServices] = useState<string[]>([]);
-  const [selectedServices, setSelectedServices] = useState<Set<string>>(new Set());
-  const [pendingWorkspace, setPendingWorkspace] = useState<string>('');
-
   // Step navigation
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
   useEffect(() => { window.scrollTo({ top: 0, behavior: 'smooth' }); }, [currentStep]);
@@ -310,75 +317,54 @@ const Training: React.FC = () => {
     return all;
   }, [defaultWorkspaces, customWorkspaces]);
 
-  const parseMultipleServicesFromError = (errStr: string): string[] => {
-    const regex = /services:public\|bioengine-worker:([^@']+)@\*/g;
-    const ids: string[] = [];
-    let match;
-    while ((match = regex.exec(errStr)) !== null) {
-      if (!ids.includes(match[1])) ids.push(match[1]);
-    }
-    return ids;
-  };
-
+  // Discovery via HTTP: list the workspace's services, correlate each
+  // bioengine-worker (worker name/description) with its chiron-manager
+  // (the manager service id is what we POST to). The legacy flow first
+  // opened a websocket to each worker just to find its manager — we now do
+  // it with a single GET /services/ call per workspace.
+  //
+  // NOTE: HTTP GET /services/ returns IDs WITHOUT the workspace prefix
+  // (e.g. "abc123:bioengine-worker"), unlike the SDK's listServices() which
+  // returns the fully qualified "workspace/abc123:bioengine-worker". We
+  // re-prepend the workspace here so every downstream consumer (callHyphaService,
+  // map widgets, sort comparator, etc.) sees the canonical fully-qualified id.
   const discoverWorkspace = useCallback(async (workspace: string) => {
     if (!server) return;
     setWsDiscoveryStatus(prev => ({ ...prev, [workspace]: 'loading' }));
     try {
-      let serviceIds: string[] = [];
-      if (isLoggedIn && workspace === userWorkspace) {
-        const list = await server.listServices({ type: 'bioengine-worker' });
-        serviceIds = list.map((s: any) => s.id);
-      } else {
-        try {
-          const svc = await server.getService(`${workspace}/bioengine-worker`);
-          serviceIds = [svc.id];
-        } catch (err) {
-          const errStr = String(err);
-          if (errStr.includes('Multiple services found')) {
-            serviceIds = parseMultipleServicesFromError(errStr);
-          }
-        }
+      const services: any[] = await listHyphaServices(workspace, { timeoutMs: 12000 });
+      const stripWs = (id: string) => id.includes('/') ? id.slice(id.indexOf('/') + 1) : id;
+      const qualify = (id: string) => id.includes('/') ? id : `${workspace}/${id}`;
+      // Index workers by their client-id prefix so we can join them to managers.
+      const workerByClientId: Record<string, { name?: string; description?: string }> = {};
+      for (const s of services) {
+        if (!s.id || typeof s.id !== 'string') continue;
+        if (!s.id.endsWith(':bioengine-worker') || s.id.includes('rtc')) continue;
+        const clientId = stripWs(s.id).split(':')[0];
+        if (clientId) workerByClientId[clientId] = { name: s.name, description: s.description };
       }
-
+      // Each chiron-manager bare id looks like "<workerClientId>-<managerClientId>:chiron-manager".
       const workers: DiscoveredWorker[] = [];
-      await Promise.allSettled(serviceIds.map(async (svcId) => {
-        try {
-          const worker = await server.getService(svcId, { mode: 'random' });
-          const name = worker.name || svcId;
-          const description = worker.description || '';
-          let hasChironManager = false;
-          let geo_location: GeoLocation | undefined;
-          let datasetCount: number | undefined;
-          try {
-            const appStatus = await worker.get_app_status({ _rkwargs: true });
-            const managerKey = appStatus && typeof appStatus === 'object'
-              ? Object.keys(appStatus).find(k => k.includes('chiron-manager') || (appStatus[k]?.artifact_id || '').includes('chiron-manager'))
-              : undefined;
-            if (managerKey) {
-              hasChironManager = true;
-              try {
-                const managerServiceId = appStatus[managerKey]?.service_ids?.[0]?.websocket_service_id;
-                if (managerServiceId) {
-                  const managerSvc = await server.getService(managerServiceId);
-                  const workerInfo = await managerSvc.get_worker_info();
-                  geo_location = workerInfo?.worker_info?.geo_location;
-                  datasetCount = workerInfo?.datasets ? Object.keys(workerInfo.datasets).length : 0;
-                }
-              } catch { /* enrichment optional */ }
-            }
-          } catch { /* no app status */ }
-          if (hasChironManager) {
-            workers.push({ serviceId: svcId, name, description, hasChironManager: true, geo_location, datasetCount });
-          }
-        } catch { /* unreachable */ }
-      }));
-
+      for (const s of services) {
+        if (!s.id || typeof s.id !== 'string') continue;
+        if (!s.id.endsWith(':chiron-manager') || s.id.includes('rtc')) continue;
+        const fullClient = stripWs(s.id).split(':')[0];
+        const workerClientId = fullClient.split('-')[0];
+        const w = workerByClientId[workerClientId];
+        const fallbackName = `Chiron Worker (${workerClientId.slice(0, 6)})`;
+        workers.push({
+          serviceId: qualify(s.id), // canonical "workspace/client:service" — HTTP target
+          name: w?.name || fallbackName,
+          description: w?.description || '',
+          hasChironManager: true,
+        });
+      }
       setDiscoveredWorkers(prev => ({ ...prev, [workspace]: workers }));
       setWsDiscoveryStatus(prev => ({ ...prev, [workspace]: 'loaded' }));
     } catch (err) {
       setWsDiscoveryStatus(prev => ({ ...prev, [workspace]: 'error' }));
     }
-  }, [server, isLoggedIn, userWorkspace]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [server]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (server) observedWorkspaces.forEach(ws => discoverWorkspace(ws));
@@ -403,227 +389,177 @@ const Training: React.FC = () => {
     setWsDiscoveryStatus(prev => { const n = { ...prev }; delete n[ws]; return n; });
   };
 
-  const connectWorker = async (serviceId: string, workspace: string) => {
-    if (managers.find(m => m.serviceId === serviceId)) return;
-    setConnectingServiceId(serviceId);
-    setConnectError(null);
+  // Tracks managers with an in-flight create_*/remove_* RPC. While in the set, the
+  // 10s polling refresh is a no-op for that manager — preventing the polling
+  // get_worker_info from racing against (and timing out behind) a long-running
+  // deploy on the same single-threaded manager actor.
+  const mutatingManagersRef = React.useRef<Set<string>>(new Set());
+
+  const withManagerLock = async <T,>(managerId: string, fn: () => Promise<T>): Promise<T> => {
+    mutatingManagersRef.current.add(managerId);
     try {
-      await connectToManagerService(workspace, [serviceId]);
-    } catch { /* handled */ }
-    setConnectingServiceId(null);
+      return await fn();
+    } finally {
+      mutatingManagersRef.current.delete(managerId);
+    }
   };
 
+  const toOrchestratorApp = (managerId: string, appId: string, s: any): OrchestratorApp => ({
+    managerId,
+    appId,
+    status: s.status,
+    serviceIds: s.service_ids || [],
+    artifactId: s.artifact_id || 'chiron-platform/chiron-orchestrator',
+    displayName: s.display_name,
+    applicationId: appId,
+    isBusy: s.is_busy ?? false,
+  });
+
+  const toTrainerApp = (managerId: string, appId: string, s: any): TrainerApp => ({
+    managerId,
+    appId,
+    status: s.status,
+    serviceIds: s.service_ids || [],
+    datasets: s.datasets || {},
+    artifactId: s.artifact_id || 'chiron-platform/tabula-trainer',
+    displayName: s.display_name,
+    applicationId: appId,
+    isBusy: s.is_busy ?? false,
+    registeredOrchestratorId: s.registered_orchestrator_id ?? undefined,
+  });
+
+  // Workspace add — just kicks off discovery. No more manager-resolution dance.
   const addManager = async (workspaceArg: string) => {
     if (!workspaceArg.trim()) return;
     setConnectingWorkspace(workspaceArg);
     setConnectError(null);
     try {
-      const url = `https://hypha.aicell.io/${workspaceArg}/services/chiron-manager`;
-      let response;
-      let data;
-      try {
-        response = await fetch(url);
-        data = await response.json();
-      } catch (fetchError) {
-        throw new Error(`Failed to fetch manager service information. Error: ${fetchError instanceof Error ? fetchError.message : 'Network error'}`);
-      }
-      if (data.id) { await connectToManagerService(workspaceArg, [data.id]); return; }
-      if (!data.success && data.detail) {
-        const detail = data.detail;
-        if (detail.includes('Multiple services found')) {
-          const servicePattern = /b'services:[^:]+:([^@]+):chiron-manager@\*'/g;
-          const matches = [...detail.matchAll(servicePattern)];
-          const serviceIds = matches.map((match: RegExpMatchArray) => `${match[1]}:chiron-manager`);
-          if (serviceIds.length > 0) {
-            const uniqueServiceIds = Array.from(new Set(serviceIds)) as string[];
-            setAvailableServices(uniqueServiceIds);
-            setSelectedServices(new Set(uniqueServiceIds));
-            setPendingWorkspace(workspaceArg);
-            setShowServiceSelectionModal(true);
-            setConnectingWorkspace(null);
-            return;
-          }
-        }
-        if (detail.includes('Service not found')) {
-          throw new Error('Manager service not found in workspace. Please ensure the chiron-manager service is running.');
-        }
-        throw new Error(`Failed to fetch manager service: ${detail}`);
-      }
-      throw new Error('Unexpected response format from service endpoint.');
+      await discoverWorkspace(workspaceArg);
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to connect to manager';
-      setErrorPopupMessage('Failed to Add Worker');
-      setErrorPopupDetails(errorMessage);
+      const msg = error instanceof Error ? error.message : 'Failed to discover workspace';
+      setErrorPopupMessage('Failed to Add Workspace');
+      setErrorPopupDetails(msg);
       setShowErrorPopup(true);
-      setConnectError(errorMessage);
+      setConnectError(msg);
+    } finally {
       setConnectingWorkspace(null);
     }
   };
 
-  const connectToManagerService = async (workspace: string, serviceIds: string[]) => {
-    try {
-      for (const serviceId of serviceIds) {
-        if (managers.find(m => m.serviceId === serviceId)) {
-          throw new Error(`This worker (${serviceId}) is already connected.`);
+  // Synchronise the `managers` list with whatever's been discovered. New
+  // managers get auto-loaded (no "Connect" click); managers that have vanished
+  // are dropped together with their orchestrators / trainers / timers.
+  //
+  // The initial worker-info fetch is **batched** across all newly-discovered
+  // managers in a single Promise.allSettled, then a single setManagers /
+  // setOrchestrators / setTrainers commits everyone at once. Without this, each
+  // per-manager HTTP completion triggers its own re-render and the Federation
+  // Map appeared to load workers one-by-one over a couple of seconds.
+  useEffect(() => {
+    const discoveredIds = new Set<string>();
+    const discoveredByWs: Array<{ ws: string; serviceId: string }> = [];
+    for (const ws of observedWorkspaces) {
+      for (const w of (discoveredWorkers[ws] || [])) {
+        if (!discoveredIds.has(w.serviceId)) {
+          discoveredIds.add(w.serviceId);
+          discoveredByWs.push({ ws, serviceId: w.serviceId });
         }
       }
-      const newManagers: ManagerConnection[] = [];
-      const newOrchestrators: OrchestratorApp[] = [];
+    }
+
+    // Drop managers whose discovery entry has disappeared (workspace removed,
+    // manager undeployed, etc). Keep their orchestrators/trainers consistent.
+    const gone = managers.filter(m => !discoveredIds.has(m.serviceId)).map(m => m.serviceId);
+    if (gone.length > 0) {
+      setManagers(prev => prev.filter(m => !gone.includes(m.serviceId)));
+      setOrchestrators(prev => prev.filter(o => !gone.includes(o.managerId)));
+      setTrainers(prev => prev.filter(t => !gone.includes(t.managerId)));
+      setWorkerTimers(prev => {
+        const n = { ...prev };
+        for (const id of gone) { if (n[id]) clearTimeout(n[id]); delete n[id]; }
+        return n;
+      });
+      setDatasetTimers(prev => {
+        const n = { ...prev };
+        for (const id of gone) { if (n[id]) clearTimeout(n[id]); delete n[id]; }
+        return n;
+      });
+    }
+
+    // Batched first-load for newly-appeared managers.
+    const newOnes = discoveredByWs.filter(({ serviceId }) => !managers.some(m => m.serviceId === serviceId));
+    if (newOnes.length === 0) return;
+
+    // Phase 1: insert placeholders so the Setup Workers table shows rows immediately.
+    setManagers(prev => {
+      const existing = new Set(prev.map(m => m.serviceId));
+      const toAdd = newOnes
+        .filter(({ serviceId }) => !existing.has(serviceId))
+        .map(({ ws, serviceId }) => ({ workspace: ws, serviceId, isConnected: false } as ManagerConnection));
+      return [...prev, ...toAdd];
+    });
+
+    // Phase 2: fan out get_worker_info in parallel, then commit everyone in
+    // a single state update so the map paints all markers at once.
+    void Promise.allSettled(
+      newOnes.map(({ serviceId }) =>
+        callHyphaService<WorkerInfo>(serviceId, 'get_worker_info', {}, { timeoutMs: 10000 })
+          .then(workerInfo => ({ ok: true as const, serviceId, workerInfo }))
+          .catch(error => ({ ok: false as const, serviceId, error: String(error) }))
+      )
+    ).then(results => {
+      const loaded: Record<string, WorkerInfo> = {};
+      const newOrchs: OrchestratorApp[] = [];
       const newTrainers: TrainerApp[] = [];
-
-      for (const serviceId of serviceIds) {
-        // If serviceId is a BioEngine worker (not a chiron-manager), resolve to the manager service ID
-        let managerServiceId = serviceId;
-        if (!serviceId.includes(':chiron-manager')) {
-          try {
-            const workerSvc = await server.getService(serviceId, { mode: 'random' });
-            const appStatus = await workerSvc.get_app_status({ _rkwargs: true });
-            const managerKey = appStatus && typeof appStatus === 'object'
-              ? Object.keys(appStatus).find((k: string) => k.includes('chiron-manager') || (appStatus[k]?.artifact_id || '').includes('chiron-manager'))
-              : undefined;
-            if (managerKey) {
-              const foundId = appStatus[managerKey]?.service_ids?.[0]?.websocket_service_id;
-              if (foundId) managerServiceId = foundId;
-            }
-          } catch { /* keep original serviceId if resolution fails */ }
+      for (const r of results) {
+        if (r.status !== 'fulfilled' || !r.value.ok) continue;
+        const { serviceId, workerInfo } = r.value;
+        loaded[serviceId] = workerInfo;
+        for (const [appId, orchStatus] of Object.entries(workerInfo.orchestrators_status || {})) {
+          newOrchs.push(toOrchestratorApp(serviceId, appId, orchStatus));
         }
-
-        let managerService;
-        try { managerService = await server.getService(managerServiceId); } catch (serviceError) {
-          throw new Error(`Failed to connect to manager service (${serviceId}). Error: ${serviceError instanceof Error ? serviceError.message : 'Connection error'}`);
+        for (const [appId, trainerStatus] of Object.entries(workerInfo.trainers_status || {})) {
+          newTrainers.push(toTrainerApp(serviceId, appId, trainerStatus));
         }
-        let workerInfo;
-        let retryCount = 0;
-        const maxRetries = 12;
-        const retryDelay = 2500;
-        while (retryCount < maxRetries) {
-          try { workerInfo = await managerService.get_worker_info(); break; } catch (workerInfoError) {
-            const errorMessage = workerInfoError instanceof Error ? workerInfoError.message : '';
-            if (errorMessage.includes("'NoneType' object has no attribute 'get_status'")) {
-              retryCount++;
-              if (retryCount < maxRetries) {
-                await new Promise(resolve => setTimeout(resolve, retryDelay));
-                continue;
-              } else { throw new Error(`Failed after ${maxRetries} retries: ${errorMessage}`); }
-            } else { throw new Error(`Failed to retrieve worker information: ${errorMessage}`); }
-          }
-        }
-        let datasetsInfo: Record<string, any> | undefined;
-        try { datasetsInfo = await managerService.get_datasets_info(); } catch { /* not critical */ }
-        newManagers.push({ workspace, serviceId, service: managerService, isConnected: true, workerInfo, datasetsInfo });
-        const managerId = serviceId;
-        if (workerInfo!.orchestrators_status) {
-          for (const [appId, orchStatus] of Object.entries(workerInfo!.orchestrators_status)) {
-            newOrchestrators.push({ managerId, appId, status: (orchStatus as any).status, serviceIds: (orchStatus as any).service_ids || [], artifactId: (orchStatus as any).artifact_id || 'chiron-platform/chiron-orchestrator', displayName: (orchStatus as any).display_name, applicationId: appId });
-          }
-        }
-        if (workerInfo!.trainers_status) {
-          for (const [appId, trainerStatus] of Object.entries(workerInfo!.trainers_status)) {
-            newTrainers.push({ managerId, appId, status: (trainerStatus as any).status, serviceIds: (trainerStatus as any).service_ids || [], datasets: (trainerStatus as any).datasets || {}, artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer', displayName: (trainerStatus as any).display_name, applicationId: appId });
-          }
-        }
+      }
+      const loadedIds = new Set(Object.keys(loaded));
+      // Single commit for everyone — map paints all markers in one frame.
+      setManagers(prev => prev.map(m =>
+        loadedIds.has(m.serviceId)
+          ? { ...m, isConnected: true, workerInfo: loaded[m.serviceId] }
+          : m
+      ));
+      setOrchestrators(prev => [
+        ...prev.filter(o => !loadedIds.has(o.managerId)),
+        ...newOrchs,
+      ]);
+      setTrainers(prev => [
+        ...prev.filter(t => !loadedIds.has(t.managerId)),
+        ...newTrainers,
+      ]);
+      // Now schedule per-manager polling loops (10s for status, 60s for datasets).
+      for (const { serviceId } of newOnes) {
         scheduleWorkerRefresh(serviceId);
         scheduleDatasetRefresh(serviceId);
       }
-      setManagers(prev => [...prev, ...newManagers]);
-      setOrchestrators(prev => [...prev, ...newOrchestrators]);
-      setTrainers(prev => [...prev, ...newTrainers]);
-      setConnectingWorkspace(null);
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to connect to manager';
-      setErrorPopupMessage('Failed to Add Worker');
-      setErrorPopupDetails(errorMessage);
-      setShowErrorPopup(true);
-      setConnectError(errorMessage);
-      setConnectingWorkspace(null);
-      throw error;
-    }
-  };
-
-  const handleServiceSelectionConfirm = async () => {
-    if (selectedServices.size === 0) {
-      setErrorPopupMessage('No Services Selected');
-      setErrorPopupDetails('Please select at least one manager service to connect.');
-      setShowErrorPopup(true);
-      return;
-    }
-    setShowServiceSelectionModal(false);
-    setConnectingWorkspace(pendingWorkspace);
-    try { await connectToManagerService(pendingWorkspace, Array.from(selectedServices)); } catch { /* handled */ } finally {
-      setPendingWorkspace(''); setAvailableServices([]); setSelectedServices(new Set());
-    }
-  };
-
-  const removeManager = (serviceId: string) => {
-    const managerId = serviceId;
-    const manager = managers.find(m => m.serviceId === serviceId);
-    const workspace = manager?.workspace || 'Unknown';
-    const hasSelectedOrchestrator = selectedOrchestrator && orchestrators.some(o => o.managerId === managerId && `${o.managerId}::${o.appId}` === selectedOrchestrator);
-    const managersTrainers = trainers.filter(t => t.managerId === managerId);
-    const hasRegisteredTrainers = managersTrainers.some(t => { const tid = t.serviceIds[0]?.websocket_service_id; return registeredTrainers.includes(tid); });
-    let warningMessage = `Disconnecting from "${workspace}" will:\n\n• Remove this worker connection\n• Keep apps running on the worker\n`;
-    if (hasSelectedOrchestrator) warningMessage += '• Deselect the current orchestrator\n';
-    if (hasRegisteredTrainers) warningMessage += '• Deselect trainers from this worker\n';
-    warningMessage += '\nAre you sure?';
-    setConfirmModalTitle('Disconnect Worker');
-    setConfirmModalMessage(warningMessage);
-    setConfirmModalAction(() => () => { performRemoveManager(serviceId); });
-    setShowConfirmModal(true);
-  };
-
-  const performRemoveManager = async (serviceId: string) => {
-    const managerId = serviceId;
-    const managersTrainers = trainers.filter(t => t.managerId === managerId);
-    for (const trainer of managersTrainers) {
-      const trainerId = `${trainer.managerId}::${trainer.appId}`;
-      const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
-      if (registeredTrainers.includes(trainerServiceId)) { await unregisterTrainer(trainerId); }
-    }
-    if (selectedOrchestrator && orchestrators.some(o => o.managerId === managerId && `${o.managerId}::${o.appId}` === selectedOrchestrator)) {
-      setSelectedOrchestrator(null); setTrainingHistory(null);
-    }
-    setManagers(prev => prev.filter(m => m.serviceId !== serviceId));
-    setWorkerTimers(prev => {
-      const timer = prev[managerId];
-      if (timer) { clearTimeout(timer); const n = { ...prev }; delete n[managerId]; return n; }
-      return prev;
     });
-    setDatasetTimers(prev => {
-      const timer = prev[managerId];
-      if (timer) { clearTimeout(timer); const n = { ...prev }; delete n[managerId]; return n; }
-      return prev;
-    });
-    setOrchestrators(prev => prev.filter(o => o.managerId !== managerId));
-    setTrainers(prev => prev.filter(t => t.managerId !== managerId));
-  };
+  }, [discoveredWorkers, observedWorkspaces]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refreshWorkerInfo = useCallback(async (serviceId: string) => {
+    // Skip while a deploy / remove is in flight on this manager — those calls
+    // block the manager actor, so the polling get_worker_info would only race
+    // and falsely mark the worker as disconnected.
+    if (mutatingManagersRef.current.has(serviceId)) return;
     const managerId = serviceId;
-    const manager = managers.find(m => m.serviceId === serviceId);
-    if (!manager) return;
     try {
-      let workerInfo;
-      let retryOnce = true;
-      try {
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000));
-        workerInfo = await Promise.race([manager.service.get_worker_info(), timeoutPromise]);
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : '';
-        if (msg.includes('timeout')) throw new Error('Worker is not responding (timeout)');
-        if (retryOnce && msg.includes("'NoneType' object has no attribute 'get_status'")) {
-          retryOnce = false;
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          const t2 = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000));
-          workerInfo = await Promise.race([manager.service.get_worker_info(), t2]);
-        } else { throw error; }
-      }
+      const workerInfo: WorkerInfo = await callHyphaService(serviceId, 'get_worker_info', {}, { timeoutMs: 10000 });
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: true, workerInfo } : m));
       setOrchestrators(prev => {
         const filtered = prev.filter(o => o.managerId !== managerId);
         const newO: OrchestratorApp[] = [];
         if (workerInfo.orchestrators_status) {
           for (const [appId, orchStatus] of Object.entries(workerInfo.orchestrators_status)) {
-            newO.push({ managerId, appId, status: (orchStatus as any).status, serviceIds: (orchStatus as any).service_ids || [], artifactId: (orchStatus as any).artifact_id || 'chiron-platform/chiron-orchestrator', displayName: (orchStatus as any).display_name, applicationId: appId, isBusy: (orchStatus as any).is_busy ?? false });
+            newO.push(toOrchestratorApp(managerId, appId, orchStatus));
           }
         }
         return [...filtered, ...newO];
@@ -633,18 +569,18 @@ const Training: React.FC = () => {
         const newT: TrainerApp[] = [];
         if (workerInfo.trainers_status) {
           for (const [appId, trainerStatus] of Object.entries(workerInfo.trainers_status)) {
-            newT.push({ managerId, appId, status: (trainerStatus as any).status, serviceIds: (trainerStatus as any).service_ids || [], datasets: (trainerStatus as any).datasets || {}, artifactId: (trainerStatus as any).artifact_id || 'chiron-platform/tabula-trainer', displayName: (trainerStatus as any).display_name, applicationId: appId, isBusy: (trainerStatus as any).is_busy ?? false, registeredOrchestratorId: (trainerStatus as any).registered_orchestrator_id ?? undefined });
+            newT.push(toTrainerApp(managerId, appId, trainerStatus));
           }
         }
         return [...filtered, ...newT];
       });
     } catch (error) {
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: false } : m));
-      // Clear stale app data for this manager when it becomes unreachable
+      // Clear stale app data for this manager when it becomes unreachable.
       setOrchestrators(prev => prev.filter(o => o.managerId !== managerId));
       setTrainers(prev => prev.filter(t => t.managerId !== managerId));
     }
-  }, [managers]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const scheduleWorkerRefresh = useCallback((serviceId: string) => {
     const managerId = serviceId;
@@ -658,13 +594,11 @@ const Training: React.FC = () => {
   }, [refreshWorkerInfo]);
 
   const refreshDatasetInfo = useCallback(async (serviceId: string) => {
-    const manager = managers.find(m => m.serviceId === serviceId);
-    if (!manager || !manager.isConnected) return;
     try {
-      const datasetsInfo = await manager.service.get_datasets_info();
+      const datasetsInfo = await callHyphaService<Record<string, any>>(serviceId, 'get_datasets_info', {}, { timeoutMs: 15000 });
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, datasetsInfo } : m));
     } catch { /* get_datasets_info may not be available on older managers */ }
-  }, [managers]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const scheduleDatasetRefresh = useCallback((serviceId: string) => {
     const timer = setTimeout(async () => {
@@ -687,44 +621,103 @@ const Training: React.FC = () => {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Optimistic deploy: close the dialog immediately, drop a NOT_STARTED placeholder
+  // into local state, and fire the long-running create_* RPC in the background. The
+  // manager lock is acquired *synchronously* before the optimistic update so the
+  // 10 s poll cannot fire in the gap and wipe the placeholder. On success, the
+  // post-RPC refreshWorkerInfo replaces the placeholder with the real (server-
+  // assigned) app entry; on failure, the placeholder is rolled back.
   const createOrchestrator = async (managerId: string) => {
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
-    setIsCreatingOrchestrator(true);
-    try {
-      const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
-      const ownerId = user?.id as string | undefined;
-      await manager.service.create_orchestrator({ token: applicationToken, owner_id: ownerId, _rkwargs: true });
-      setShowCreateOrchestrator(false); setShowLaunchDialog(false); setCreatingFor(null); setIsCreatingOrchestrator(false);
+    // Close UI immediately
+    setShowCreateOrchestrator(false);
+    setShowLaunchDialog(false);
+    setCreatingFor(null);
+    setIsCreatingOrchestrator(false);
+    // Acquire lock first, then optimistic placeholder
+    mutatingManagersRef.current.add(managerId);
+    const pendingAppId = `pending-${Date.now().toString(36)}`;
+    setOrchestrators(prev => [...prev, {
+      managerId,
+      appId: pendingAppId,
+      status: 'NOT_STARTED',
+      serviceIds: [],
+      artifactId: 'chiron-platform/chiron-orchestrator',
+      displayName: undefined,
+      applicationId: pendingAppId,
+      isBusy: false,
+    }]);
+    // Fire in background; do not await
+    (async () => {
+      try {
+        const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
+        const ownerId = user?.id as string | undefined;
+        await callHyphaService(managerId, 'create_orchestrator', { token: applicationToken, owner_id: ownerId }, { timeoutMs: 120000 });
+      } catch (error) {
+        setOrchestrators(prev => prev.filter(o => o.appId !== pendingAppId));
+        setErrorPopupMessage('Failed to Create Orchestrator');
+        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
+        setShowErrorPopup(true);
+      } finally {
+        mutatingManagersRef.current.delete(managerId);
+      }
+      // Lock released; refresh picks up real state (replacing the placeholder on success)
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
-    } catch (error) {
-      setErrorPopupMessage('Failed to Create Orchestrator');
-      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-      setShowErrorPopup(true);
-      setIsCreatingOrchestrator(false);
-    }
+    })();
   };
 
   const createTrainer = async (managerId: string) => {
-    const manager = managers.find(m => m.serviceId === managerId);
-    if (!manager || newTrainerDatasets.length === 0) return;
-    setIsCreatingTrainer(true);
-    try {
-      const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
-      const ownerId = user?.id as string | undefined;
-      const trainerParams: Record<string, any> = { token: applicationToken, datasets: newTrainerDatasets, trainer_artifact_id: newTrainerArtifactId, owner_id: ownerId, _rkwargs: true };
-      if (selectedWeightsPath) trainerParams.pretrained_weights_path = selectedWeightsPath;
-      await manager.service.create_trainer(trainerParams);
-      setShowCreateTrainer(false); setShowLaunchDialog(false); setCreatingFor(null); setNewTrainerDatasets([]); setLocalModelWeights(null); setSelectedWeightsPath(null); setIsWeightsDropdownOpen(false); setIsCreatingTrainer(false);
+    if (newTrainerDatasets.length === 0) return;
+    // Snapshot user-input state before clearing the form
+    const datasetsArg = newTrainerDatasets;
+    const trainerArtifactArg = newTrainerArtifactId;
+    const pretrainedPathArg = selectedWeightsPath;
+    // Close UI immediately and reset the form
+    setShowCreateTrainer(false);
+    setShowLaunchDialog(false);
+    setCreatingFor(null);
+    setNewTrainerDatasets([]);
+    setLocalModelWeights(null);
+    setSelectedWeightsPath(null);
+    setIsWeightsDropdownOpen(false);
+    setIsCreatingTrainer(false);
+    // Acquire lock first, then optimistic placeholder
+    mutatingManagersRef.current.add(managerId);
+    const pendingAppId = `pending-${Date.now().toString(36)}`;
+    const optimisticDatasets: Record<string, any> = {};
+    for (const d of datasetsArg) optimisticDatasets[d] = { name: d };
+    setTrainers(prev => [...prev, {
+      managerId,
+      appId: pendingAppId,
+      status: 'NOT_STARTED',
+      serviceIds: [],
+      datasets: optimisticDatasets,
+      artifactId: trainerArtifactArg || 'chiron-platform/tabula-trainer',
+      displayName: undefined,
+      applicationId: pendingAppId,
+      isBusy: false,
+    }]);
+    // Fire in background; do not await
+    (async () => {
+      try {
+        const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
+        const ownerId = user?.id as string | undefined;
+        const trainerParams: Record<string, any> = { token: applicationToken, datasets: datasetsArg, trainer_artifact_id: trainerArtifactArg, owner_id: ownerId };
+        if (pretrainedPathArg) trainerParams.pretrained_weights_path = pretrainedPathArg;
+        await callHyphaService(managerId, 'create_trainer', trainerParams, { timeoutMs: 180000 });
+      } catch (error) {
+        setTrainers(prev => prev.filter(t => t.appId !== pendingAppId));
+        setErrorPopupMessage('Failed to Create Trainer');
+        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
+        setShowErrorPopup(true);
+      } finally {
+        mutatingManagersRef.current.delete(managerId);
+      }
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
-    } catch (error) {
-      setErrorPopupMessage('Failed to Create Trainer');
-      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-      setShowErrorPopup(true);
-      setIsCreatingTrainer(false);
-    }
+    })();
   };
 
   const showConfirmDialog = (title: string, message: string, action: () => void, danger = false, confirmLabel?: string) => {
@@ -775,14 +768,14 @@ const Training: React.FC = () => {
   };
 
   const performRemoveOrchestrator = async (managerId: string, force: boolean) => {
-    const manager = managers.find(m => m.serviceId === managerId);
-    if (!manager) return;
     const orchestrator = orchestrators.find(o => o.managerId === managerId);
     if (!orchestrator) return;
     setOrchestrators(prev => prev.map(o => o.managerId === managerId ? { ...o, status: 'DELETING' } : o));
     try {
       const callerId = user?.id as string | undefined;
-      await manager.service.remove_orchestrator({ application_id: orchestrator.appId, force, caller_id: callerId, _rkwargs: true });
+      await withManagerLock(managerId, () =>
+        callHyphaService(managerId, 'remove_orchestrator', { application_id: orchestrator.appId, force, caller_id: callerId }, { timeoutMs: 60000 })
+      );
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
       const msg = extractRemoteError(error instanceof Error ? error.message : 'Unknown error');
@@ -803,12 +796,12 @@ const Training: React.FC = () => {
       const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
       if (registeredTrainers.includes(trainerServiceId)) { await unregisterTrainer(trainerId); }
     }
-    const manager = managers.find(m => m.serviceId === managerId);
-    if (!manager) return;
     setTrainers(prev => prev.map(t => t.managerId === managerId && t.appId === appId ? { ...t, status: 'DELETING' } : t));
     try {
       const callerId = user?.id as string | undefined;
-      await manager.service.remove_trainer({ application_id: appId, force, caller_id: callerId, _rkwargs: true });
+      await withManagerLock(managerId, () =>
+        callHyphaService(managerId, 'remove_trainer', { application_id: appId, force, caller_id: callerId }, { timeoutMs: 60000 })
+      );
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
       const msg = extractRemoteError(error instanceof Error ? error.message : 'Unknown error');
@@ -857,8 +850,7 @@ const Training: React.FC = () => {
     try {
       let workerInfo = manager.workerInfo;
       if (!workerInfo) {
-        const t = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10000));
-        workerInfo = await Promise.race([manager.service.get_worker_info(), t]);
+        workerInfo = await callHyphaService<WorkerInfo>(manager.serviceId, 'get_worker_info', {}, { timeoutMs: 10000 });
       }
       if (!workerInfo) throw new Error('Could not retrieve worker information');
       if (type === 'manager') {
@@ -892,9 +884,11 @@ const Training: React.FC = () => {
     try {
       setIsLoadingRegisteredTrainers(true);
       const orchestratorServiceId = orchestrator.serviceIds[0].websocket_service_id;
-      const orchestratorService = await server.getService(orchestratorServiceId);
-      await orchestratorService.add_trainer(trainer.serviceIds[0].websocket_service_id, orchestratorServiceId);
-      const registeredServiceIds = await orchestratorService.list_trainers();
+      await callHyphaService(orchestratorServiceId, 'add_trainer', {
+        service_id: trainer.serviceIds[0].websocket_service_id,
+        orchestrator_service_id: orchestratorServiceId,
+      }, { timeoutMs: 30000 });
+      const registeredServiceIds = await callHyphaService<string[]>(orchestratorServiceId, 'list_trainers', {});
       setRegisteredTrainers(registeredServiceIds);
     } catch (error) {
       setErrorPopupMessage('Failed to Register Trainer');
@@ -911,9 +905,9 @@ const Training: React.FC = () => {
     if (!trainer || trainer.status !== 'RUNNING') return;
     try {
       setIsLoadingRegisteredTrainers(true);
-      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      await orchestratorService.remove_trainer(trainer.serviceIds[0].websocket_service_id);
-      const registeredServiceIds = await orchestratorService.list_trainers();
+      const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+      await callHyphaService(orchSvcId, 'remove_trainer', { service_id: trainer.serviceIds[0].websocket_service_id }, { timeoutMs: 30000 });
+      const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
       setRegisteredTrainers(registeredServiceIds);
     } catch { /* silent */ } finally { setIsLoadingRegisteredTrainers(false); }
   };
@@ -924,9 +918,9 @@ const Training: React.FC = () => {
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
     try {
       setIsLoadingRegisteredTrainers(true);
-      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      await orchestratorService.remove_trainer(trainerServiceId);
-      const registeredServiceIds = await orchestratorService.list_trainers();
+      const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+      await callHyphaService(orchSvcId, 'remove_trainer', { service_id: trainerServiceId }, { timeoutMs: 30000 });
+      const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
       setRegisteredTrainers(registeredServiceIds);
     } catch { /* silent */ } finally { setIsLoadingRegisteredTrainers(false); }
   };
@@ -938,13 +932,13 @@ const Training: React.FC = () => {
       if (!orchestrator || orchestrator.status !== 'RUNNING') { setRegisteredTrainers([]); return; }
       try {
         setIsLoadingRegisteredTrainers(true);
-        const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-        const registeredServiceIds = await orchestratorService.list_trainers();
+        const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+        const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
         setRegisteredTrainers(registeredServiceIds);
       } catch { setRegisteredTrainers([]); } finally { setIsLoadingRegisteredTrainers(false); }
     };
     fetchRegisteredTrainers();
-  }, [selectedOrchestrator, server]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedOrchestrator]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const fetchTrainerParams = async () => {
@@ -954,15 +948,15 @@ const Training: React.FC = () => {
       if (registeredTrainers.length === 0) { setTrainerParams(null); setTrainerParamsLoading(false); setTrainerParamsError(null); return; }
       try {
         setTrainerParamsLoading(true); setTrainerParamsError(null);
-        const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-        const params = await orchestratorService.get_trainer_params();
+        const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+        const params = await callHyphaService(orchSvcId, 'get_trainer_params', {});
         setTrainerParams(params);
       } catch (error) {
         setTrainerParamsError(error instanceof Error ? error.message : 'Failed to fetch parameters');
       } finally { setTrainerParamsLoading(false); }
     };
     fetchTrainerParams();
-  }, [selectedOrchestrator, registeredTrainers, server]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedOrchestrator, registeredTrainers]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const fetchTrainingHistory = async () => {
@@ -970,13 +964,13 @@ const Training: React.FC = () => {
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
       if (!orchestrator || orchestrator.status !== 'RUNNING') return;
       try {
-        const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-        const history = await orchestratorService.get_training_history();
+        const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+        const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
         if (history) setTrainingHistory(history);
       } catch { /* no history yet */ }
     };
     fetchTrainingHistory();
-  }, [selectedOrchestrator, server]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedOrchestrator]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     // Poll the orchestrator that is actively training (not the currently viewed one)
@@ -985,10 +979,10 @@ const Training: React.FC = () => {
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === trainingOrchestratorId);
       if (!orchestrator || orchestrator.status !== 'RUNNING') return;
       try {
-        const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-        const history = await orchestratorService.get_training_history();
+        const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+        const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
         if (history) setTrainingHistory(history);
-        const status = await orchestratorService.get_training_status();
+        const status = await callHyphaService<any>(orchSvcId, 'get_training_status', {});
         if (status) setTrainingStatus(status);
       } catch { /* silent */ }
     };
@@ -1008,12 +1002,12 @@ const Training: React.FC = () => {
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
     let cancelled = false;
+    const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
     const checkOngoingTraining = async () => {
       try {
-        const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
         const [status, history] = await Promise.all([
-          orchestratorService.get_training_status(),
-          orchestratorService.get_training_history().catch(() => null),
+          callHyphaService<any>(orchSvcId, 'get_training_status', {}),
+          callHyphaService<any>(orchSvcId, 'get_training_history', {}).catch(() => null),
         ]);
         if (cancelled) return;
         if (history) setTrainingHistory(history);
@@ -1029,7 +1023,7 @@ const Training: React.FC = () => {
         // Poll until done
         const statusInterval = setInterval(async () => {
           try {
-            const s = await orchestratorService.get_training_status();
+            const s = await callHyphaService<any>(orchSvcId, 'get_training_status', {});
             if (cancelled) { clearInterval(statusInterval); return; }
             setTrainingStatus(s);
             const newIds = Object.keys(s.trainers_progress ?? {});
@@ -1059,8 +1053,8 @@ const Training: React.FC = () => {
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
     setIsPreparingTraining(true);
     try {
-      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      const currentTrainers = await orchestratorService.list_trainers();
+      const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+      const currentTrainers = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
       if (currentTrainers.length === 0) throw new Error('No trainers available. Please select at least one trainer.');
       const launchedFrom = selectedOrchestrator!;
       setIsPreparingTraining(false); setIsTraining(true); setTrainingResumed(false); setTrainingOrchestratorId(launchedFrom); setTrainingConfigCollapsed(true);
@@ -1068,15 +1062,17 @@ const Training: React.FC = () => {
       window.scrollTo({ top: 0, behavior: 'smooth' });
       setSavedItems({});
       setSaveStatuses({});
-      const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, _rkwargs: true };
+      const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout };
       if (config.initial_weights) trainingParams.initial_weights = config.initial_weights;
-      orchestratorService.start_training(trainingParams).catch((error: Error) => {
+      // start_training runs the whole session server-side and only returns when
+      // done — fire-and-forget with a generous timeout (just shy of an hour).
+      callHyphaService(orchSvcId, 'start_training', trainingParams, { timeoutMs: 3_600_000 }).catch((error: Error) => {
         setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true);
         setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
       });
       const statusInterval = setInterval(async () => {
         try {
-          const status = await orchestratorService.get_training_status();
+          const status = await callHyphaService<any>(orchSvcId, 'get_training_status', {});
           setTrainingStatus(status);
           // Accumulate trainer IDs that have appeared in trainers_progress
           const newIds = Object.keys(status.trainers_progress);
@@ -1089,7 +1085,7 @@ const Training: React.FC = () => {
           }
           if (!status.is_running) {
             setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null); clearInterval(statusInterval);
-            const history = await orchestratorService.get_training_history();
+            const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
             setTrainingHistory(history);
           }
         } catch { /* silent */ }
@@ -1107,8 +1103,8 @@ const Training: React.FC = () => {
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
     setIsStoppingTraining(true);
     try {
-      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      await orchestratorService.stop_training();
+      const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+      await callHyphaService(orchSvcId, 'stop_training', {}, { timeoutMs: 30000 });
       setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null); setTrainingStatus(null);
     } catch (error) {
       setErrorPopupMessage('Failed to Stop Training');
@@ -1122,8 +1118,8 @@ const Training: React.FC = () => {
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
     try {
-      const orchestratorService = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      await orchestratorService.reset_training_state();
+      const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+      await callHyphaService(orchSvcId, 'reset_training_state', {}, { timeoutMs: 30000 });
       setTrainingHistory(null); setTrainingStatus(null);
       setResetStateSuccess(true);
       setTimeout(() => setResetStateSuccess(false), 2000);
@@ -1134,35 +1130,62 @@ const Training: React.FC = () => {
     }
   };
 
-  const setSaveStatus = (key: string, status: 'idle'|'saving'|'success'|'duplicate', timeoutMs?: number) => {
+  const SAVE_SUCCESS_TIMEOUT_MS = 5000;
+
+  const setSaveStatus = (key: string, status: 'idle'|'saving'|'success', timeoutMs?: number) => {
     setSaveStatuses(p => ({ ...p, [key]: status }));
     if (timeoutMs) setTimeout(() => setSaveStatuses(p => ({ ...p, [key]: 'idle' })), timeoutMs);
   };
+
+  // Identifies a saved checkpoint independently of when it was saved: same
+  // description + same session_id + same round => same checkpoint. Used to
+  // detect would-be duplicates before issuing another save_*.
+  const findDuplicateSave = (key: string, description: string, round?: number, sessionId?: string) =>
+    (savedItems[key] || []).find(e =>
+      e.description === description
+      && (e.round ?? null) === (round ?? null)
+      && (e.sessionId ?? null) === (sessionId ?? null)
+    );
+
+  const appendSavedItem = (key: string, entry: SavedEntry) =>
+    setSavedItems(p => ({ ...p, [key]: [...(p[key] || []), entry] }));
 
   const saveGlobalWeights = async (autoDescription: string) => {
     if (!selectedOrchestrator) return;
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
     const desc = saveDescriptions['global'] || autoDescription;
-    const currentRound = trainingHistory?.training_losses?.length ?? 0;
-    const prev = savedItems['global'];
-    if (prev && prev.description === desc && prev.round === currentRound) {
-      setSaveStatus('global', 'duplicate', 4000); return;
+    const round = selectedGlobalRound ?? (trainingHistory?.training_losses?.length ?? 0);
+    const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+
+    const doSave = async () => {
+      setSaveStatus('global', 'saving');
+      try {
+        const params: any = { description: desc };
+        if (selectedGlobalRound !== null) params.checkpoint_round = selectedGlobalRound;
+        const artifactId = await callHyphaService<string>(orchSvcId, 'save_global_weights', params, { timeoutMs: 120000 });
+        appendSavedItem('global', { artifactId, description: desc, round, savedAt: Date.now() });
+        setSaveStatus('global', 'success', SAVE_SUCCESS_TIMEOUT_MS);
+      } catch (error) {
+        setErrorPopupMessage('Failed to Save Global Weights');
+        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
+        setShowErrorPopup(true);
+        setSaveStatus('global', 'idle');
+      }
+    };
+
+    const dup = findDuplicateSave('global', desc, round, undefined);
+    if (dup) {
+      showConfirmDialog(
+        'Already Saved',
+        `This global checkpoint (round ${round}) was already published as:\n\n${dup.artifactId}\n\nSave it again?`,
+        () => { void doSave(); },
+        false,
+        'Save again',
+      );
+      return;
     }
-    setSaveStatus('global', 'saving');
-    try {
-      const orchSvc = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      const params: any = { description: desc, _rkwargs: true };
-      if (selectedGlobalRound !== null) params.checkpoint_round = selectedGlobalRound;
-      const artifactId = await orchSvc.save_global_weights(params);
-      setSavedItems(p => ({ ...p, 'global': { artifactId, description: desc, round: currentRound } }));
-      setSaveStatus('global', 'success');
-    } catch (error) {
-      setErrorPopupMessage('Failed to Save Global Weights');
-      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-      setShowErrorPopup(true);
-      setSaveStatus('global', 'idle');
-    }
+    await doSave();
   };
 
   const saveTrainerPublish = async (svcId: string, autoDescription: string) => {
@@ -1171,46 +1194,79 @@ const Training: React.FC = () => {
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
     const key = `publish-${svcId}`;
     const desc = saveDescriptions[key] || autoDescription;
-    const prev = savedItems[key];
-    if (prev && prev.description === desc) { setSaveStatus(key, 'duplicate', 4000); return; }
-    setSaveStatus(key, 'saving');
-    try {
-      const orchSvc = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-      const params: any = { client_ids: [svcId], description: desc, _rkwargs: true };
-      const selCkpt = selectedTrainerCkpt[svcId];
-      if (selCkpt) { params.checkpoint_round = selCkpt.round; params.session_id = selCkpt.session_id; }
-      const artifactIds = await orchSvc.save_model_weights(params);
-      const artifactId = Object.values(artifactIds as Record<string, string>)[0] || '';
-      setSavedItems(p => ({ ...p, [key]: { artifactId, description: desc } }));
-      setSaveStatus(key, 'success');
-    } catch (error) {
-      setErrorPopupMessage('Failed to Publish Trainer Model');
-      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-      setShowErrorPopup(true);
-      setSaveStatus(key, 'idle');
+    const selCkpt = selectedTrainerCkpt[svcId];
+    const round = selCkpt?.round;
+    const sessionId = selCkpt?.session_id;
+    const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+
+    const doSave = async () => {
+      setSaveStatus(key, 'saving');
+      try {
+        const params: any = { client_ids: [svcId], description: desc };
+        if (selCkpt) { params.checkpoint_round = selCkpt.round; params.session_id = selCkpt.session_id; }
+        const artifactIds = await callHyphaService<Record<string, string>>(orchSvcId, 'save_model_weights', params, { timeoutMs: 120000 });
+        const artifactId = Object.values(artifactIds || {})[0] || '';
+        appendSavedItem(key, { artifactId, description: desc, round, sessionId, savedAt: Date.now() });
+        setSaveStatus(key, 'success', SAVE_SUCCESS_TIMEOUT_MS);
+      } catch (error) {
+        setErrorPopupMessage('Failed to Publish Trainer Model');
+        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
+        setShowErrorPopup(true);
+        setSaveStatus(key, 'idle');
+      }
+    };
+
+    const dup = findDuplicateSave(key, desc, round, sessionId);
+    if (dup) {
+      const roundLabel = round !== undefined ? `round ${round}` : 'this checkpoint';
+      showConfirmDialog(
+        'Already Published',
+        `This trainer model (${roundLabel}) was already published as:\n\n${dup.artifactId}\n\nPublish it again?`,
+        () => { void doSave(); },
+        false,
+        'Publish again',
+      );
+      return;
     }
+    await doSave();
   };
 
   const saveTrainerLocal = async (svcId: string, autoDescription: string) => {
     const key = `local-${svcId}`;
     const desc = saveDescriptions[key] || autoDescription;
-    const prev = savedItems[key];
-    if (prev && prev.description === desc) { setSaveStatus(key, 'duplicate', 4000); return; }
-    setSaveStatus(key, 'saving');
-    try {
-      const trainerSvc = await server.getService(svcId);
-      const localParams: any = { description: desc, _rkwargs: true };
-      const selCkpt = selectedTrainerCkpt[svcId];
-      if (selCkpt) { localParams.checkpoint_round = selCkpt.round; localParams.session_id = selCkpt.session_id; }
-      const savedPath = await trainerSvc.save_local_model(localParams);
-      setSavedItems(p => ({ ...p, [key]: { path: savedPath as string, description: desc } }));
-      setSaveStatus(key, 'success');
-    } catch (error) {
-      setErrorPopupMessage('Failed to Save Model Locally');
-      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-      setShowErrorPopup(true);
-      setSaveStatus(key, 'idle');
+    const selCkpt = selectedTrainerCkpt[svcId];
+    const round = selCkpt?.round;
+    const sessionId = selCkpt?.session_id;
+
+    const doSave = async () => {
+      setSaveStatus(key, 'saving');
+      try {
+        const localParams: any = { description: desc };
+        if (selCkpt) { localParams.checkpoint_round = selCkpt.round; localParams.session_id = selCkpt.session_id; }
+        const savedPath = await callHyphaService<string>(svcId, 'save_local_model', localParams, { timeoutMs: 120000 });
+        appendSavedItem(key, { path: savedPath as string, description: desc, round, sessionId, savedAt: Date.now() });
+        setSaveStatus(key, 'success', SAVE_SUCCESS_TIMEOUT_MS);
+      } catch (error) {
+        setErrorPopupMessage('Failed to Save Model Locally');
+        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
+        setShowErrorPopup(true);
+        setSaveStatus(key, 'idle');
+      }
+    };
+
+    const dup = findDuplicateSave(key, desc, round, sessionId);
+    if (dup) {
+      const roundLabel = round !== undefined ? `round ${round}` : 'this checkpoint';
+      showConfirmDialog(
+        'Already Saved to Worker',
+        `This trainer model (${roundLabel}) was already saved to this worker.\n\nSave it again?`,
+        () => { void doSave(); },
+        false,
+        'Save again',
+      );
+      return;
     }
+    await doSave();
   };
 
   const handleOrchestratorSelectionChange = (newOrchestratorId: string) => {
@@ -1241,9 +1297,7 @@ const Training: React.FC = () => {
     setAppLogsLoading(true);
     setShowAppLogsModal(true);
     try {
-      const manager = managers.find(m => m.serviceId === managerId);
-      if (!manager) throw new Error('Manager not connected');
-      const data = await manager.service.get_app_logs({ application_id: appId, logs_tail: 200, _rkwargs: true });
+      const data = await callHyphaService(managerId, 'get_app_logs', { application_id: appId, logs_tail: 200 }, { timeoutMs: 30000 });
       setAppLogsData(data);
     } catch (e) {
       setAppLogsData({ error: e instanceof Error ? e.message : String(e) });
@@ -1325,7 +1379,7 @@ const Training: React.FC = () => {
           const geo = manager.workerInfo?.worker_info?.geo_location;
           if (!geo?.latitude || !geo?.longitude) return [];
           const datasetCount = manager.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0;
-          const datasetNames3 = manager.workerInfo?.datasets ? Object.values(manager.workerInfo.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean) : [];
+          const datasetNames3 = manager.workerInfo?.datasets ? Object.values(manager.workerInfo.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean).sort((a, b) => a.localeCompare(b)) : [];
           const datasetLabel3 = datasetCount > 0 ? `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}: ${datasetNames3.join(', ')}` : '0 datasets';
           return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: sessionRole(manager.serviceId), label: datasetLabel3 }];
         });
@@ -1339,7 +1393,7 @@ const Training: React.FC = () => {
         const orchCount = orchestrators.filter(o => o.managerId === manager.serviceId).length;
         const trainerCount = trainers.filter(t => t.managerId === manager.serviceId).length;
         const datasetCount = manager.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0;
-        const datasetNames2 = manager.workerInfo?.datasets ? Object.values(manager.workerInfo.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean) : [];
+        const datasetNames2 = manager.workerInfo?.datasets ? Object.values(manager.workerInfo.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean).sort((a, b) => a.localeCompare(b)) : [];
         const datasetLabel2 = datasetCount > 0 ? `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}: ${datasetNames2.join(', ')}` : '0 datasets';
         return [{ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: appRole(manager.serviceId), label: `${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}<br/>${datasetLabel2}` }];
       });
@@ -1437,6 +1491,38 @@ const Training: React.FC = () => {
       .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
   }, [observedWorkspaces, discoveredWorkers]);
 
+  // Stable alphabetical sort for orchestrator / trainer lists: by worker name
+  // first (so apps from the same worker stay grouped), then by app display
+  // name. Without this, polling refreshWorkerInfo re-appends each manager's
+  // apps to the end of the array, shuffling visual order every ~3s.
+  const managerIdToWorkerName = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const w of allDiscoveredWorkers) m[w.serviceId] = w.name;
+    return m;
+  }, [allDiscoveredWorkers]);
+
+  const compareByWorkerThenApp = useCallback(
+    (a: { managerId: string; displayName?: string; appId: string },
+     b: { managerId: string; displayName?: string; appId: string }) => {
+      const aw = managerIdToWorkerName[a.managerId] || a.managerId;
+      const bw = managerIdToWorkerName[b.managerId] || b.managerId;
+      const byWorker = aw.localeCompare(bw);
+      if (byWorker !== 0) return byWorker;
+      return (a.displayName || a.appId).localeCompare(b.displayName || b.appId);
+    },
+    [managerIdToWorkerName]
+  );
+
+  // The currently-selected orchestrator's websocket service id (or undefined).
+  // Used to decide whether a trainer's `registered_orchestrator_id` points to
+  // *our* orchestrator — in which case the trainer is not "busy elsewhere" and
+  // should remain re-selectable in the lag window after `remove_trainer`.
+  const selectedOrchestratorServiceId = useMemo(() => {
+    if (!selectedOrchestrator) return undefined;
+    const o = orchestrators.find(x => `${x.managerId}::${x.appId}` === selectedOrchestrator);
+    return o?.serviceIds?.[0]?.websocket_service_id;
+  }, [selectedOrchestrator, orchestrators]);
+
   const trainerServiceToWorkerName = useMemo(() => {
     const map: Record<string, string> = {};
     for (const trainer of trainers) {
@@ -1478,8 +1564,8 @@ const Training: React.FC = () => {
     let cancelled = false;
     (async () => {
       try {
-        const orchSvc = await server.getService(orchObj.serviceIds[0].websocket_service_id);
-        const ckpts: CheckpointEntry[] = await orchSvc.list_global_checkpoints();
+        const orchSvcId = orchObj.serviceIds[0].websocket_service_id;
+        const ckpts = await callHyphaService<CheckpointEntry[]>(orchSvcId, 'list_global_checkpoints', {});
         if (cancelled) return;
         setGlobalCheckpoints(ckpts || []);
         if (ckpts && ckpts.length > 0) setSelectedGlobalRound(prev => prev ?? ckpts[0].round);
@@ -1499,8 +1585,16 @@ const Training: React.FC = () => {
       const liveTrainer = trainers.find(t => t.serviceIds?.[0]?.websocket_service_id === svcId);
       if (!liveTrainer || liveTrainer.status !== 'RUNNING') return;
       try {
-        const svc = await server.getService(svcId);
-        const sessions: TrainerSession[] = await svc.list_weight_checkpoints();
+        const sessions = await callHyphaService<TrainerSession[]>(svcId, 'list_weight_checkpoints', {});
+        // Session IDs are intentionally hidden from the UI label (they're opaque
+        // and not user-meaningful) but logged here so debugging can map a
+        // "Current/Previous" pill back to a server-side directory.
+        // eslint-disable-next-line no-console
+        console.debug(`[checkpoints] ${svcId}:`, (sessions || []).map((s: TrainerSession) => ({
+          session_id: s.session_id,
+          is_current: s.is_current,
+          rounds: s.checkpoints?.map(c => c.round) ?? [],
+        })));
         setTrainerCheckpoints(prev => ({ ...prev, [svcId]: sessions || [] }));
         setSelectedTrainerCkpt(prev => {
           if (prev[svcId] != null) return prev;
@@ -1680,14 +1774,15 @@ const Training: React.FC = () => {
                       </thead>
                       <tbody className="divide-y divide-gray-50">
                         {allDiscoveredWorkers.map(worker => {
-                          const isConnected = managers.some(m => m.serviceId === worker.serviceId);
                           const manager = managers.find(m => m.serviceId === worker.serviceId);
-                          const isConnecting = connectingServiceId === worker.serviceId;
+                          // `isConnected` now means: most recent HTTP get_worker_info succeeded.
+                          // Until the first poll completes, manager.isConnected is false; once it
+                          // succeeds (typically <1s after discovery) the row shows full data.
+                          const isConnected = !!manager?.isConnected;
                           const orchCount = orchestrators.filter(o => o.managerId === worker.serviceId).length;
                           const trainerCount = trainers.filter(t => t.managerId === worker.serviceId).length;
-                          const geo = isConnected ? manager?.workerInfo?.worker_info?.geo_location : worker.geo_location;
-                          const datasetCount = isConnected ? (manager?.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0) : worker.datasetCount;
-                          const datasetEntries = isConnected && manager?.workerInfo?.datasets ? Object.entries(manager.workerInfo.datasets) : [];
+                          const geo = manager?.workerInfo?.worker_info?.geo_location;
+                          const datasetEntries = manager?.workerInfo?.datasets ? Object.entries(manager.workerInfo.datasets) : [];
 
                           const isHighlighted = highlightedWorkerIds.includes(worker.serviceId);
                           return (
@@ -1710,23 +1805,20 @@ const Training: React.FC = () => {
                                 ) : <span className="text-gray-300 text-xs">-</span>}
                               </td>
                               <td className="px-4 py-3.5">
-                                {isConnected ? (
-                                  datasetEntries.length > 0 ? (
-                                    <div className="flex flex-col gap-0.5">
-                                      {datasetEntries.map(([dsId, ds]: [string, any]) => (
-                                        <span key={dsId} className="text-xs text-gray-600 leading-tight">{ds.name || dsId}</span>
-                                      ))}
-                                    </div>
-                                  ) : <span className="text-gray-300 text-xs">None</span>
-                                ) : datasetCount !== undefined ? (
-                                  <span className="text-xs text-gray-400">{datasetCount} dataset{datasetCount !== 1 ? 's' : ''}</span>
-                                ) : <span className="text-gray-300 text-xs">-</span>}
+                                {datasetEntries.length > 0 ? (
+                                  <div className="flex flex-col gap-0.5">
+                                    {datasetEntries.map(([dsId, ds]: [string, any]) => (
+                                      <span key={dsId} className="text-xs text-gray-600 leading-tight">{ds.name || dsId}</span>
+                                    ))}
+                                  </div>
+                                ) : isConnected ? <span className="text-gray-300 text-xs">None</span>
+                                  : <span className="text-gray-300 text-xs">-</span>}
                               </td>
                               <td className="px-4 py-3.5 text-center">
                                 {isConnected ? (
                                   orchCount > 0 ? (
                                     <div className="flex flex-col gap-1 items-center">
-                                      {orchestrators.filter(o => o.managerId === worker.serviceId).map(o => (
+                                      {orchestrators.filter(o => o.managerId === worker.serviceId).slice().sort(compareByWorkerThenApp).map(o => (
                                         <div key={o.appId} className="flex items-center gap-1 justify-center">
                                           {getStatusBadge(o.status, () => openAppLogsModal(worker.serviceId, o.appId, `Orchestrator · ${o.appId}`))}
                                           {o.isBusy && <BusyBadge />}
@@ -1741,7 +1833,7 @@ const Training: React.FC = () => {
                                 {isConnected ? (
                                   trainerCount > 0 ? (
                                     <div className="flex flex-col gap-1 items-center">
-                                      {trainers.filter(t => t.managerId === worker.serviceId).map(t => (
+                                      {trainers.filter(t => t.managerId === worker.serviceId).slice().sort(compareByWorkerThenApp).map(t => (
                                         <div key={t.appId} className="flex items-center gap-1 justify-center">
                                           {getStatusBadge(t.status, () => openAppLogsModal(worker.serviceId, t.appId, `Trainer · ${t.appId}`))}
                                           {t.isBusy && <BusyBadge />}
@@ -1754,28 +1846,15 @@ const Training: React.FC = () => {
                               </td>
                               <td className="px-6 py-3.5 text-right">
                                 <div className="flex items-center justify-end gap-2">
-                                  {isConnected ? (
-                                    <>
-                                      <button
-                                        onClick={() => { setLaunchDialogManagerId(worker.serviceId); setLaunchDialogTab('orchestrator'); setNewTrainerDatasets([]); setShowLaunchDialog(true); }}
-                                        disabled={!manager?.isConnected}
-                                        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                                        title="Launch app on this worker"
-                                      >
-                                        <FaPlus size={9} /> Launch
-                                      </button>
-                                      <button onClick={() => showInfo('manager', `${manager?.workspace}::${worker.serviceId}`)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors" title="Info"><FaInfo size={12} /></button>
-                                      <button onClick={() => removeManager(worker.serviceId)} className="p-1.5 text-gray-400 hover:text-orange-600 hover:bg-orange-50 rounded-lg transition-colors" title="Disconnect"><FaUnlink size={12} /></button>
-                                    </>
-                                  ) : (
-                                    <button
-                                      onClick={() => connectWorker(worker.serviceId, worker.workspace)}
-                                      disabled={isConnecting}
-                                      className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 text-white text-xs font-medium rounded-lg hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                                    >
-                                      {isConnecting ? <><BiLoaderAlt className="animate-spin" size={12} /> Connecting...</> : <><FaPlus size={9} /> Connect</>}
-                                    </button>
-                                  )}
+                                  <button
+                                    onClick={() => { setLaunchDialogManagerId(worker.serviceId); setLaunchDialogTab('orchestrator'); setNewTrainerDatasets([]); setShowLaunchDialog(true); }}
+                                    disabled={!manager?.isConnected}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                    title={manager?.isConnected ? 'Launch app on this worker' : 'Waiting for worker info'}
+                                  >
+                                    <FaPlus size={9} /> Launch
+                                  </button>
+                                  <button onClick={() => showInfo('manager', `${manager?.workspace}::${worker.serviceId}`)} disabled={!manager?.isConnected} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed" title="Info"><FaInfo size={12} /></button>
                                 </div>
                               </td>
                             </tr>
@@ -1816,7 +1895,11 @@ const Training: React.FC = () => {
                         <p className="text-xs mt-1">Launch one from the Setup step</p>
                       </div>
                     ) : (
-                      orchestrators.filter(o => o.status === 'RUNNING').map(orch => {
+                      orchestrators
+                        .filter(o => o.status === 'RUNNING')
+                        .slice()
+                        .sort(compareByWorkerThenApp)
+                        .map(orch => {
                         const orchestratorId = `${orch.managerId}::${orch.appId}`;
                         const isSelected = selectedOrchestrator === orchestratorId;
                         const isBusyElsewhere = orch.isBusy && !isSelected;
@@ -1880,7 +1963,10 @@ const Training: React.FC = () => {
                       </div>
                     )}
                     {(() => {
-                      const connectedRunningTrainers = trainers.filter(t => t.status === 'RUNNING');
+                      const connectedRunningTrainers = trainers
+                        .filter(t => t.status === 'RUNNING')
+                        .slice()
+                        .sort(compareByWorkerThenApp);
                       const connectedSvcIds = new Set(connectedRunningTrainers.map(t => t.serviceIds[0]?.websocket_service_id).filter(Boolean));
                       const remoteRegisteredSvcIds = selectedOrchestrator
                         ? registeredTrainers.filter(svcId => !connectedSvcIds.has(svcId))
@@ -1898,7 +1984,14 @@ const Training: React.FC = () => {
                             const trainerId = `${trainer.managerId}::${trainer.appId}`;
                             const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
                             const isRegistered = registeredTrainers.includes(trainerServiceId);
-                            const isBusyElsewhere = trainer.isBusy && !isRegistered;
+                            // "Busy elsewhere" only if the trainer is busy with a DIFFERENT
+                            // orchestrator than the one we have selected. Without this guard,
+                            // the brief lag between `remove_trainer` and the worker-side
+                            // is_busy refresh would mark a just-unregistered trainer as
+                            // busy-elsewhere and disable its checkbox, blocking re-add.
+                            const isBusyElsewhere = !!trainer.isBusy
+                              && !isRegistered
+                              && trainer.registeredOrchestratorId !== selectedOrchestratorServiceId;
                             const isDisabled = !selectedOrchestrator || isLoadingRegisteredTrainers || isBusyElsewhere;
                             const isPendingAdd = isTraining && isRegistered && !!trainerServiceId
                               && participatedTrainerIds.size > 0
@@ -1907,7 +2000,7 @@ const Training: React.FC = () => {
                               && (trainingStatus?.pending_removal ?? []).includes(trainerServiceId);
                             const manager = managers.find(m => m.serviceId === trainer.managerId);
                             const geo = manager?.workerInfo?.worker_info?.geo_location;
-                            const datasetNames = Object.values(trainer.datasets).map((d: any) => d.name || Object.keys(trainer.datasets).find(k => trainer.datasets[k] === d)).filter(Boolean);
+                            const datasetNames = (Object.values(trainer.datasets).map((d: any) => d.name || Object.keys(trainer.datasets).find(k => trainer.datasets[k] === d)).filter(Boolean) as string[]).sort((a, b) => a.localeCompare(b));
                             const isTrainerHighlighted = highlightedWorkerIds.includes(trainer.managerId);
                             const trainerBorder = isPendingRemove ? 'border-orange-400' : isPendingAdd ? 'border-amber-300' : isRegistered ? 'border-emerald-400' : isBusyElsewhere ? 'border-amber-200' : isTrainerHighlighted ? 'border-violet-400' : 'border-transparent hover:border-gray-200';
                             const trainerBg = isPendingRemove ? 'bg-orange-50/60' : isPendingAdd ? 'bg-amber-50/40' : isRegistered ? (isTrainerHighlighted ? 'bg-violet-50' : 'bg-emerald-50/60') : isBusyElsewhere ? 'bg-amber-50/40' : isTrainerHighlighted ? 'bg-violet-50' : 'bg-gray-50';
@@ -2133,7 +2226,9 @@ const Training: React.FC = () => {
                     </div>
                   </div>
                   <div className="space-y-3">
-                    {Object.entries(trainingStatus.trainers_progress).map(([trainerId, progress]) => {
+                    {Object.entries(trainingStatus.trainers_progress)
+                      .sort(([a], [b]) => getTrainerDisplayName(a).localeCompare(getTrainerDisplayName(b)))
+                      .map(([trainerId, progress]) => {
                       const hasError = !!progress.error;
                       return (
                         <div key={trainerId}>
@@ -2164,8 +2259,8 @@ const Training: React.FC = () => {
                         const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === (trainingOrchestratorId || selectedOrchestrator));
                         if (!orchestrator || orchestrator.status !== 'RUNNING') return;
                         try {
-                          const svc = await server.getService(orchestrator.serviceIds[0].websocket_service_id);
-                          const history = await svc.get_training_history();
+                          const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+                          const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
                           if (history) setTrainingHistory(history);
                         } catch { /* silent */ }
                       }}
@@ -2209,24 +2304,32 @@ const Training: React.FC = () => {
                 const registeredTrainerApps = trainers.filter(t =>
                   t.serviceIds?.[0]?.websocket_service_id && registeredTrainers.includes(t.serviceIds[0].websocket_service_id)
                 );
+                // Alpha-sort so the auto-generated description is stable across polls
+                // (per-manager refreshWorkerInfo re-appends trainers to the end of state,
+                // which would otherwise shuffle the dataset list order over time).
                 const allDatasets = [...new Set(registeredTrainerApps.flatMap(t =>
                   Object.values(t.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean)
-                ))];
+                ))].sort((a, b) => a.localeCompare(b));
                 const globalAutoDesc = `Tabula transformer · ${rounds} federated round${rounds !== 1 ? 's' : ''} · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''}: ${allDatasets.join(', ')}`;
 
-                const SaveCard = ({ itemKey, title, subtitle, autoDesc, actions }: {
+                const SaveCard = ({ itemKey, title, subtitle, autoDesc, actions, checkpointPicker }: {
                   itemKey: string; title: string; subtitle: string; autoDesc: string;
                   actions: React.ReactNode;
+                  // Optional per-card checkpoint picker; rendered inside the card so it is
+                  // visually scoped to this card alone (not shared across the panel).
+                  checkpointPicker?: React.ReactNode;
                 }) => {
                   const status = saveStatuses[itemKey] || 'idle';
-                  const saved = savedItems[itemKey];
-                  const borderCls = status === 'success' ? 'border-emerald-300 bg-emerald-50/30' : status === 'duplicate' ? 'border-amber-300 bg-amber-50/30' : 'border-gray-200';
+                  // Most recent save entry from the per-key history list.
+                  const lastSaved = (savedItems[itemKey] || []).slice(-1)[0];
+                  const borderCls = status === 'success' ? 'border-emerald-300 bg-emerald-50/30' : 'border-gray-200';
                   return (
                     <div className={`rounded-xl border p-3 space-y-2 transition-colors ${borderCls}`}>
                       <div>
                         <p className="text-sm font-semibold text-gray-800">{title}</p>
                         <p className="text-xs text-gray-400">{subtitle}</p>
                       </div>
+                      {checkpointPicker}
                       <input type="text"
                         value={saveDescriptions[itemKey] ?? autoDesc}
                         onChange={e => setSaveDescriptions(p => ({ ...p, [itemKey]: e.target.value }))}
@@ -2235,14 +2338,11 @@ const Training: React.FC = () => {
                       />
                       <div className="flex flex-wrap items-center gap-2">
                         {actions}
-                        {status === 'success' && saved?.artifactId && (
-                          <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-200 truncate max-w-[200px]" title={saved.artifactId}>✓ {saved.artifactId.split('/').pop()}</span>
-                        )}
-                        {status === 'success' && saved?.path && (
-                          <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-200 truncate max-w-[200px]" title={saved.path}>✓ {saved.path.split('/').slice(-2).join('/')}</span>
-                        )}
-                        {status === 'duplicate' && (
-                          <span className="text-xs text-amber-700 bg-amber-100 px-2 py-1 rounded-lg border border-amber-200">Already saved</span>
+                        {/* For published artifacts: show the FULL alias with a copy button.
+                            Local saves get no chip — the success-state animation on the
+                            "Save to worker" button itself is the user-visible feedback. */}
+                        {status === 'success' && lastSaved?.artifactId && (
+                          <ArtifactChip artifactId={lastSaved.artifactId} />
                         )}
                       </div>
                     </div>
@@ -2253,6 +2353,38 @@ const Training: React.FC = () => {
                 const publishSvg = <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg>;
                 const localSvg = <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" /></svg>;
                 const spinner = <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />;
+                const checkSvg = <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>;
+
+                // Renders the full artifact alias (no truncation) plus a copy-to-clipboard
+                // button. Hover tooltip shows the fully-qualified `workspace/alias`. Used
+                // for published artifacts; local-worker saves intentionally show no chip.
+                const ArtifactChip = ({ artifactId }: { artifactId: string }) => {
+                  const alias = artifactId.includes('/') ? artifactId.split('/').slice(1).join('/') : artifactId;
+                  const [copied, setCopied] = React.useState(false);
+                  const onCopy = async () => {
+                    try {
+                      await navigator.clipboard.writeText(artifactId);
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 1500);
+                    } catch { /* clipboard unavailable */ }
+                  };
+                  return (
+                    <span className="inline-flex items-center gap-1 text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded-lg border border-emerald-200" title={artifactId}>
+                      <span aria-hidden="true">✓</span>
+                      <span>{alias}</span>
+                      <button
+                        onClick={onCopy}
+                        type="button"
+                        title={copied ? 'Copied!' : `Copy "${artifactId}" to clipboard`}
+                        className="ml-1 text-emerald-600 hover:text-emerald-900 transition-colors"
+                      >
+                        {copied
+                          ? <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                          : <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>}
+                      </button>
+                    </span>
+                  );
+                };
 
                 return (
                   <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
@@ -2266,30 +2398,33 @@ const Training: React.FC = () => {
                       </div>
                     </div>
                     <div className="space-y-3">
-                      {/* Global checkpoint picker */}
-                      {globalCheckpoints.length > 1 && (
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-gray-500 flex-shrink-0">Checkpoint:</span>
-                          <div className="flex gap-1 flex-wrap">
-                            {globalCheckpoints.map(ck => (
-                              <button key={ck.round}
-                                onClick={() => setSelectedGlobalRound(ck.round)}
-                                className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-colors ${selectedGlobalRound === ck.round ? 'bg-violet-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
-                                Round {ck.round}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
                       <SaveCard
                         itemKey="global"
                         title="Global averaged transformer"
+                        checkpointPicker={globalCheckpoints.length > 1 ? (
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs text-gray-500 flex-shrink-0">Use checkpoint:</span>
+                            <div className="flex gap-1 flex-wrap">
+                              {globalCheckpoints.map(ck => (
+                                <button key={ck.round}
+                                  onClick={() => setSelectedGlobalRound(ck.round)}
+                                  className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-colors ${selectedGlobalRound === ck.round ? 'bg-violet-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                                  Round {ck.round}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ) : undefined}
                         subtitle={`FedAvg result · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''} · round ${selectedGlobalRound ?? rounds}`}
                         autoDesc={globalAutoDesc}
                         actions={
                           <button onClick={() => saveGlobalWeights(globalAutoDesc)} disabled={globalStatus === 'saving'}
                             className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                            {globalStatus === 'saving' ? <>{spinner} Saving…</> : <>{publishSvg} Publish</>}
+                            {globalStatus === 'saving'
+                              ? <>{spinner} Saving…</>
+                              : globalStatus === 'success'
+                                ? <>{checkSvg} Published</>
+                                : <>{publishSvg} Publish</>}
                           </button>
                         }
                       />
@@ -2308,9 +2443,9 @@ const Training: React.FC = () => {
                           const meta = trainerMetaCache[svcId];
                           const workerName = meta?.workerName || svcId;
                           const geoDisplay = meta?.geoDisplay || '';
-                          const datasetNames = liveTrainer
+                          const datasetNames = ((liveTrainer
                             ? Object.values(liveTrainer.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean)
-                            : (meta?.datasets ?? []);
+                            : (meta?.datasets ?? [])) as string[]).slice().sort((a, b) => a.localeCompare(b));
                           // Resolve manager for this trainer (needed for connectivity check)
                           const managerId = liveTrainer?.managerId ?? meta?.managerId;
                           // isMgrConnected: the worker's manager service is reachable
@@ -2326,9 +2461,9 @@ const Training: React.FC = () => {
                           const locKey = `local-${svcId}`;
                           const pubStatus = saveStatuses[pubKey] || 'idle';
                           const locStatus = saveStatuses[locKey] || 'idle';
-                          const pubSaved = savedItems[pubKey];
-                          const locSaved = savedItems[locKey];
-                          const borderCls = (st: string) => st === 'success' ? 'border-emerald-300 bg-emerald-50/30' : st === 'duplicate' ? 'border-amber-300 bg-amber-50/30' : !isConnected ? 'border-gray-200 bg-gray-50/50' : 'border-gray-200';
+                          // Most recent entry from per-key save history (used for the publish chip).
+                          const pubLastSaved = (savedItems[pubKey] || []).slice(-1)[0];
+                          const borderCls = (st: string) => st === 'success' ? 'border-emerald-300 bg-emerald-50/30' : !isConnected ? 'border-gray-200 bg-gray-50/50' : 'border-gray-200';
                           const descKey = `trainer-${svcId}`;
                           const savingDisabled = !isConnected || pubStatus === 'saving' || locStatus === 'saving';
                           const sessions = trainerCheckpoints[svcId] || [];
@@ -2349,29 +2484,44 @@ const Training: React.FC = () => {
                                 )}
                               </div>
                               {/* Session + checkpoint picker */}
-                              {hasMultipleCkpts && isConnected && (
-                                <div className="space-y-1.5">
-                                  {sessions.map(sess => (
-                                    <div key={sess.session_id} className="flex items-center gap-2 flex-wrap">
-                                      <span className={`text-xs font-medium flex-shrink-0 ${sess.is_current ? 'text-violet-700' : 'text-gray-400'}`}>
-                                        {sess.is_current ? 'Current' : sess.session_id.slice(0, 8)}
-                                      </span>
-                                      <div className="flex gap-1 flex-wrap">
-                                        {sess.checkpoints.map(ck => {
-                                          const isSelected = selCkpt?.session_id === sess.session_id && selCkpt?.round === ck.round;
-                                          return (
-                                            <button key={ck.round}
-                                              onClick={() => setSelectedTrainerCkpt(p => ({ ...p, [svcId]: { session_id: sess.session_id, round: ck.round } }))}
-                                              className={`px-2 py-0.5 rounded-full text-xs font-medium transition-colors ${isSelected ? 'bg-violet-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
-                                              R{ck.round}
-                                            </button>
-                                          );
-                                        })}
+                              {hasMultipleCkpts && isConnected && (() => {
+                                // Only show the session label ("Current" / "Previous") when there are
+                                // multiple sessions — otherwise it's noise next to the round buttons.
+                                const showSessionLabels = sessions.length > 1;
+                                return (
+                                  <div className="space-y-1.5">
+                                    {sessions.map((sess, sessIdx) => (
+                                      <div key={sess.session_id} className="flex items-center gap-2 flex-wrap">
+                                        {sessIdx === 0 && (
+                                          <span className="text-xs text-gray-500 flex-shrink-0">Use checkpoint:</span>
+                                        )}
+                                        {showSessionLabels && (
+                                          <span
+                                            className={`text-xs font-medium flex-shrink-0 ${sess.is_current ? 'text-violet-700' : 'text-gray-400'}`}
+                                            // session_id kept as hover-tooltip for debugging mapping
+                                            // back to the server-side weights directory.
+                                            title={`session_id: ${sess.session_id}`}
+                                          >
+                                            {sess.is_current ? 'Current' : 'Previous'}
+                                          </span>
+                                        )}
+                                        <div className="flex gap-1 flex-wrap">
+                                          {sess.checkpoints.map(ck => {
+                                            const isSelected = selCkpt?.session_id === sess.session_id && selCkpt?.round === ck.round;
+                                            return (
+                                              <button key={ck.round}
+                                                onClick={() => setSelectedTrainerCkpt(p => ({ ...p, [svcId]: { session_id: sess.session_id, round: ck.round } }))}
+                                                className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-colors ${isSelected ? 'bg-violet-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                                                Round {ck.round}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
                                       </div>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
+                                    ))}
+                                  </div>
+                                );
+                              })()}
                               <input type="text"
                                 value={saveDescriptions[descKey] ?? autoDesc}
                                 onChange={e => setSaveDescriptions(p => ({ ...p, [descKey]: e.target.value }))}
@@ -2383,16 +2533,28 @@ const Training: React.FC = () => {
                                 <button onClick={() => saveTrainerPublish(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
                                   title={isConnected ? "Publish full model to chiron-models artifact hub" : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker; cannot save" : "Worker manager is not reachable; cannot save"}
                                   className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
-                                  {pubStatus === 'saving' ? <>{spinner} Saving…</> : <>{publishSvg} Publish</>}
+                                  {pubStatus === 'saving'
+                                    ? <>{spinner} Saving…</>
+                                    : pubStatus === 'success'
+                                      ? <>{checkSvg} Published</>
+                                      : <>{publishSvg} Publish</>}
                                 </button>
                                 <button onClick={() => saveTrainerLocal(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
                                   title={isConnected ? "Save to worker at ~/.bioengine/models/" : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker; cannot save" : "Worker manager is not reachable; cannot save"}
                                   className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-semibold rounded-lg hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all border border-gray-200">
-                                  {locStatus === 'saving' ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" /> Saving…</> : <>{localSvg} Save to worker</>}
+                                  {locStatus === 'saving'
+                                    ? <><div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-500" /> Saving…</>
+                                    : locStatus === 'success'
+                                      ? <><svg className="w-3 h-3 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg> Saved to worker</>
+                                      : <>{localSvg} Save to worker</>}
                                 </button>
-                                {pubStatus === 'success' && pubSaved?.artifactId && <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded border border-emerald-200 truncate max-w-[180px]" title={pubSaved.artifactId}>✓ {pubSaved.artifactId.split('/').pop()}</span>}
-                                {locStatus === 'success' && locSaved?.path && <span className="text-xs text-emerald-700 font-mono bg-emerald-100 px-2 py-1 rounded border border-emerald-200 truncate max-w-[180px]" title={locSaved.path}>✓ {locSaved.path.split('/').slice(-2).join('/')}</span>}
-                                {(pubStatus === 'duplicate' || locStatus === 'duplicate') && <span className="text-xs text-amber-700 bg-amber-100 px-2 py-1 rounded border border-amber-200">Already saved</span>}
+                                {/* Publish: show the full artifact alias with a copy button.
+                                    Local "save to worker": no chip — the button itself shows the
+                                    "Saved to worker" state for 5s; the on-disk path is intentionally
+                                    not exposed to the user (it contains an opaque session id). */}
+                                {pubStatus === 'success' && pubLastSaved?.artifactId && (
+                                  <ArtifactChip artifactId={pubLastSaved.artifactId} />
+                                )}
                               </div>
                             </div>
                           );
@@ -2795,29 +2957,6 @@ const Training: React.FC = () => {
         </div>
       )}
 
-      {/* ====== SERVICE SELECTION MODAL ====== */}
-      {showServiceSelectionModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[80vh] flex flex-col overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 flex-shrink-0">
-              <h3 className="font-semibold text-gray-900">Multiple Workers Found</h3>
-              <p className="text-sm text-gray-500 mt-1">Select which workers to connect in <strong>{pendingWorkspace}</strong>:</p>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-2">
-              {availableServices.map(serviceId => (
-                <label key={serviceId} className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl cursor-pointer hover:bg-gray-100 transition-colors">
-                  <input type="checkbox" checked={selectedServices.has(serviceId)} onChange={e => { const n = new Set(selectedServices); e.target.checked ? n.add(serviceId) : n.delete(serviceId); setSelectedServices(n); }} className="accent-blue-600 flex-shrink-0" />
-                  <p className="text-sm text-gray-800 font-mono break-all">{serviceId}</p>
-                </label>
-              ))}
-            </div>
-            <div className="px-6 pb-5 flex gap-3 flex-shrink-0">
-              <button onClick={() => { setShowServiceSelectionModal(false); setPendingWorkspace(''); setAvailableServices([]); setSelectedServices(new Set()); setConnectingWorkspace(null); }} className="flex-1 py-2.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors">Cancel</button>
-              <button onClick={handleServiceSelectionConfirm} disabled={selectedServices.size === 0} className="flex-1 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-xl hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">Connect ({selectedServices.size} selected)</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
