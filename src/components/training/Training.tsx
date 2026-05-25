@@ -884,8 +884,12 @@ const Training: React.FC = () => {
     try {
       setIsLoadingRegisteredTrainers(true);
       const orchestratorServiceId = orchestrator.serviceIds[0].websocket_service_id;
+      // NOTE: kwarg is `trainer_service_id`, NOT `service_id`. Hypha's HTTP
+      // gateway reserves `service_id` for the URL path placeholder, so naming
+      // the body field that way makes the orchestrator reject the call with
+      // "Missing required argument: 'service_id'". Same applies to remove_trainer.
       await callHyphaService(orchestratorServiceId, 'add_trainer', {
-        service_id: trainer.serviceIds[0].websocket_service_id,
+        trainer_service_id: trainer.serviceIds[0].websocket_service_id,
         orchestrator_service_id: orchestratorServiceId,
       }, { timeoutMs: 30000 });
       const registeredServiceIds = await callHyphaService<string[]>(orchestratorServiceId, 'list_trainers', {});
@@ -906,7 +910,7 @@ const Training: React.FC = () => {
     try {
       setIsLoadingRegisteredTrainers(true);
       const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-      await callHyphaService(orchSvcId, 'remove_trainer', { service_id: trainer.serviceIds[0].websocket_service_id }, { timeoutMs: 30000 });
+      await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainer.serviceIds[0].websocket_service_id }, { timeoutMs: 30000 });
       const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
       setRegisteredTrainers(registeredServiceIds);
     } catch { /* silent */ } finally { setIsLoadingRegisteredTrainers(false); }
@@ -919,7 +923,7 @@ const Training: React.FC = () => {
     try {
       setIsLoadingRegisteredTrainers(true);
       const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-      await callHyphaService(orchSvcId, 'remove_trainer', { service_id: trainerServiceId }, { timeoutMs: 30000 });
+      await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainerServiceId }, { timeoutMs: 30000 });
       const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
       setRegisteredTrainers(registeredServiceIds);
     } catch { /* silent */ } finally { setIsLoadingRegisteredTrainers(false); }
