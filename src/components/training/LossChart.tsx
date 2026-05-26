@@ -29,7 +29,13 @@ const LossChart: React.FC<LossChartProps> = ({ title, data, color, fill, clientD
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
 
   const mainData = data.map(([round, value]) => ({ round, value }));
-  const clientEntries = Object.entries(clientData);
+  // Sort trainers alphabetically by display label (fallback to client ID)
+  // so the order and assigned palette colors remain consistent across charts
+  const clientEntries = Object.entries(clientData).sort(([aId], [bId]) => {
+    const aLabel = clientLabels[aId] || aId;
+    const bLabel = clientLabels[bId] || bId;
+    return aLabel.localeCompare(bLabel);
+  });
 
   // Union of all rounds across all series
   const allRounds = [...new Set([
