@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useHyphaStore } from '../../store/hyphaStore';
 import BioEngineGuide from './BioEngineGuide';
@@ -18,6 +18,7 @@ type BioEngineService = {
   name: string;
   description: string;
   geo_location?: GeoLocation;
+  connectionStatus?: 'ok' | 'error';
 };
 
 type WorkspaceStatus = 'loading' | 'loaded' | 'error';
@@ -54,9 +55,11 @@ const ServiceCard: React.FC<{
 
   return (
     <div className={`backdrop-blur-sm rounded-2xl flex flex-col h-full transition-all duration-200 ${
-      featured
-        ? 'bg-gradient-to-br from-blue-50 to-purple-50 border-2 border-blue-300 shadow-md hover:shadow-lg hover:border-blue-400'
-        : 'bg-white/80 border border-white/20 shadow-sm hover:shadow-md hover:border-blue-200'
+      service.connectionStatus === 'error'
+        ? 'bg-gray-100 border border-gray-300 opacity-75'
+        : featured
+          ? 'bg-gradient-to-br from-blue-50 to-purple-50 border-2 border-blue-300 shadow-md hover:shadow-lg hover:border-blue-400'
+          : 'bg-white/80 border border-white/20 shadow-sm hover:shadow-md hover:border-blue-200'
     }`}>
       <div className="p-6 flex-grow">
         <div className="flex items-center mb-4">
@@ -116,7 +119,12 @@ const ServiceCard: React.FC<{
       <div className="p-6 pt-0">
         <button
           onClick={() => onNavigate(service.id)}
-          className="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-xl hover:from-blue-700 hover:to-blue-800 shadow-sm hover:shadow-md transition-all duration-200 font-medium"
+          disabled={service.connectionStatus === 'error'}
+          className={`w-full px-6 py-3 text-white rounded-xl shadow-sm transition-all duration-200 font-medium ${
+            service.connectionStatus === 'error'
+              ? 'bg-gray-400 cursor-not-allowed opacity-50'
+              : 'bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 hover:shadow-md'
+          }`}
         >
           View Dashboard
         </button>
@@ -223,19 +231,33 @@ const BioEngineHome: React.FC = () => {
       if (services.length > 0) {
         const geoResults = await Promise.allSettled(
           services.map(async (svc) => {
-            try {
-              const worker = await server.getService(svc.id, { mode: 'random' });
-              const st = await worker.get_status();
-              return st?.geo_location ?? null;
-            } catch {
-              return null;
+            let lastErr = null;
+            for (let attempt = 0; attempt < 5; attempt++) {
+              try {
+                const worker = await server.getService(svc.id, { mode: 'random' });
+                const st = await worker.get_status();
+                return st?.geo_location ?? null;
+              } catch (err) {
+                lastErr = err;
+                if (String(err).includes('Service not found')) {
+                  throw err; // Service is gone, don't retry
+                }
+                await new Promise(r => setTimeout(r, 1000));
+              }
             }
+            throw lastErr;
           })
         );
-        services = services.map((svc, i) => ({
-          ...svc,
-          geo_location: geoResults[i].status === 'fulfilled' ? geoResults[i].value ?? undefined : undefined,
-        }));
+        services = services.map((svc, i) => {
+          if (geoResults[i].status === 'rejected' && String(geoResults[i].reason).includes('Service not found')) {
+            return null; // Will be filtered out
+          }
+          return {
+            ...svc,
+            geo_location: geoResults[i].status === 'fulfilled' ? geoResults[i].value ?? undefined : undefined,
+            connectionStatus: geoResults[i].status === 'rejected' ? 'error' : 'ok',
+          };
+        }).filter(Boolean) as BioEngineService[];
       }
 
       setWorkspaceServices(prev => ({ ...prev, [workspace]: services }));

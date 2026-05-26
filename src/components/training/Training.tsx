@@ -1623,7 +1623,10 @@ const Training: React.FC = () => {
         const ckpts = await callHyphaService<CheckpointEntry[]>(orchSvcId, 'list_global_checkpoints', {});
         if (cancelled) return;
         setGlobalCheckpoints(ckpts || []);
-        if (ckpts && ckpts.length > 0) setSelectedGlobalRound(prev => prev ?? ckpts[0].round);
+        if (ckpts && ckpts.length > 0) {
+          const maxRound = Math.max(...ckpts.map(c => c.round));
+          setSelectedGlobalRound(prev => prev ?? maxRound);
+        }
       } catch { /* silent */ }
     })();
     return () => { cancelled = true; };
@@ -1654,9 +1657,9 @@ const Training: React.FC = () => {
         setSelectedTrainerCkpt(prev => {
           if (prev[svcId] != null) return prev;
           const currentOrFirst = sessions?.find(s => s.is_current) ?? sessions?.[0];
-          const latestCkpt = currentOrFirst?.checkpoints?.[0];
-          if (!latestCkpt) return prev;
-          return { ...prev, [svcId]: { session_id: currentOrFirst!.session_id, round: latestCkpt.round } };
+          if (!currentOrFirst?.checkpoints || currentOrFirst.checkpoints.length === 0) return prev;
+          const maxRound = Math.max(...currentOrFirst.checkpoints.map(c => c.round));
+          return { ...prev, [svcId]: { session_id: currentOrFirst.session_id, round: maxRound } };
         });
       } catch { /* silent */ }
     });
@@ -1958,8 +1961,8 @@ const Training: React.FC = () => {
                         const orchestratorId = `${orch.managerId}::${orch.appId}`;
                         const isSelected = selectedOrchestrator === orchestratorId;
                         const isBusyElsewhere = orch.isBusy && !isSelected;
-                        // Only block selection while async prepare is in flight; never block on isTraining
-                        const isDisabled = isPreparingTraining || isBusyElsewhere;
+                        // Only block selection while async prepare is in flight; never block on isTraining, and orchestrator is always selectable even if busy
+                        const isDisabled = isPreparingTraining;
                         const manager = managers.find(m => m.serviceId === orch.managerId);
                         const geo = manager?.workerInfo?.worker_info?.geo_location;
                         const isRunningHere = isTraining && trainingOrchestratorId === orchestratorId;
@@ -2473,7 +2476,7 @@ const Training: React.FC = () => {
                         subtitle={`FedAvg result · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''} · round ${selectedGlobalRound ?? rounds}`}
                         autoDesc={globalAutoDesc}
                         actions={
-                          <button onClick={() => saveGlobalWeights(globalAutoDesc)} disabled={globalStatus === 'saving'}
+                          <button onClick={() => saveGlobalWeights(globalAutoDesc)} disabled={globalStatus === 'saving' || selectedGlobalRound === null}
                             className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                             {globalStatus === 'saving'
                               ? <>{spinner} Saving…</>
@@ -2520,10 +2523,10 @@ const Training: React.FC = () => {
                           const pubLastSaved = (savedItems[pubKey] || []).slice(-1)[0];
                           const borderCls = (st: string) => st === 'success' ? 'border-emerald-300 bg-emerald-50/30' : !isConnected ? 'border-gray-200 bg-gray-50/50' : 'border-gray-200';
                           const descKey = `trainer-${svcId}`;
-                          const savingDisabled = !isConnected || pubStatus === 'saving' || locStatus === 'saving';
                           const sessions = trainerCheckpoints[svcId] || [];
                           const hasMultipleCkpts = sessions.reduce((n, s) => n + s.checkpoints.length, 0) > 1 || sessions.length > 1;
                           const selCkpt = selectedTrainerCkpt[svcId];
+                          const savingDisabled = !isConnected || pubStatus === 'saving' || locStatus === 'saving' || !selCkpt;
                           return (
                             <div key={svcId} className={`rounded-xl border p-3 space-y-2 transition-colors ${borderCls(pubStatus === 'idle' ? locStatus : pubStatus)}`}>
                               <div className="flex items-start justify-between gap-2">
