@@ -202,6 +202,10 @@ const Training: React.FC = () => {
   const [selectedWeightsPath, setSelectedWeightsPath] = useState<string | null>(null);
   const [isLoadingLocalWeights, setIsLoadingLocalWeights] = useState(false);
   const [isWeightsDropdownOpen, setIsWeightsDropdownOpen] = useState(false);
+  // chiron-models artifacts (tabula_model only) selectable as the trainer's
+  // pretrained starting weights. Mutually exclusive with selectedWeightsPath.
+  const [chironModelArtifacts, setChironModelArtifacts] = useState<Array<{id: string; alias?: string; manifest?: any; created_at?: number}>>([]);
+  const [selectedTrainerWeightsArtifactId, setSelectedTrainerWeightsArtifactId] = useState<string | null>(null);
 
   const [workerTimers, setWorkerTimers] = useState<Record<string, NodeJS.Timeout>>({});
   const [datasetTimers, setDatasetTimers] = useState<Record<string, NodeJS.Timeout>>({});
@@ -296,12 +300,56 @@ const Training: React.FC = () => {
 
   // Launch app dialog
   const [showLaunchDialog, setShowLaunchDialog] = useState(false);
+  // Whenever the Trainer tab is the active one inside the launch dialog,
+  // ensure both local-worker weights and chiron-models artifacts have been
+  // fetched. Triggers in useEffect below — onClick handlers don't fire when
+  // the user opens the dialog and the Trainer tab is already active.
   const [launchDialogManagerId, setLaunchDialogManagerId] = useState<string | null>(null);
   const [launchDialogTab, setLaunchDialogTab] = useState<'orchestrator' | 'trainer'>('orchestrator');
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_WS, JSON.stringify(customWorkspaces));
   }, [customWorkspaces]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Populate the trainer dialog's pretrained-weights dropdown when the user is
+  // looking at the Trainer tab — fetches local-worker weights from the manager
+  // and the chiron-models artifact list (full models only — checkpoints with
+  // global_transformer=true don't have embedder/heads and can't bootstrap a
+  // fresh trainer).
+  useEffect(() => {
+    if (!showLaunchDialog || launchDialogTab !== 'trainer' || !launchDialogManagerId) return;
+    if (localModelWeights === null) {
+      // managers store only the service id (HTTP migration removed the websocket
+      // .service proxy); use callHyphaService to talk to the chiron-manager.
+      setIsLoadingLocalWeights(true);
+      (async () => {
+        try {
+          const weights = await callHyphaService<any[]>(
+            launchDialogManagerId,
+            'list_local_model_weights',
+            {},
+            { timeoutMs: 15000 },
+          );
+          setLocalModelWeights(weights || []);
+        } catch (e) {
+          console.error('list_local_model_weights failed', e);
+          setLocalModelWeights([]);
+        } finally {
+          setIsLoadingLocalWeights(false);
+        }
+      })();
+    }
+    if (chironModelArtifacts.length === 0 && artifactManager) {
+      (async () => {
+        try {
+          const all = await artifactManager.list({ parent_id: 'chiron-platform/chiron-models', limit: 100, _rkwargs: true });
+          // Only full models (global_transformer != true) are valid pretrained
+          // starting points; transformer-only saves are filtered out here.
+          setChironModelArtifacts((all || []).filter((a: any) => a.manifest?.global_transformer !== true));
+        } catch (e) { console.error('Failed to load chiron-models', e); }
+      })();
+    }
+  }, [showLaunchDialog, launchDialogTab, launchDialogManagerId, artifactManager]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const userWorkspace = server?.config?.workspace as string | undefined;
 
@@ -674,6 +722,7 @@ const Training: React.FC = () => {
     const datasetsArg = newTrainerDatasets;
     const trainerArtifactArg = newTrainerArtifactId;
     const pretrainedPathArg = selectedWeightsPath;
+    const pretrainedArtifactArg = selectedTrainerWeightsArtifactId;
     // Close UI immediately and reset the form
     setShowCreateTrainer(false);
     setShowLaunchDialog(false);
@@ -681,6 +730,7 @@ const Training: React.FC = () => {
     setNewTrainerDatasets([]);
     setLocalModelWeights(null);
     setSelectedWeightsPath(null);
+    setSelectedTrainerWeightsArtifactId(null);
     setIsWeightsDropdownOpen(false);
     setIsCreatingTrainer(false);
     // Acquire lock first, then optimistic placeholder
@@ -706,6 +756,7 @@ const Training: React.FC = () => {
         const ownerId = user?.id as string | undefined;
         const trainerParams: Record<string, any> = { token: applicationToken, datasets: datasetsArg, trainer_artifact_id: trainerArtifactArg, owner_id: ownerId };
         if (pretrainedPathArg) trainerParams.pretrained_weights_path = pretrainedPathArg;
+        if (pretrainedArtifactArg) trainerParams.pretrained_weights_artifact = { artifact_id: pretrainedArtifactArg, file_path: 'model.pth' };
         await callHyphaService(managerId, 'create_trainer', trainerParams, { timeoutMs: 180000 });
       } catch (error) {
         setTrainers(prev => prev.filter(t => t.appId !== pendingAppId));
@@ -1301,7 +1352,7 @@ const Training: React.FC = () => {
     setAppLogsLoading(true);
     setShowAppLogsModal(true);
     try {
-      const data = await callHyphaService(managerId, 'get_app_logs', { application_id: appId, logs_tail: 200 }, { timeoutMs: 30000 });
+      const data = await callHyphaService(managerId, 'get_app_logs', { application_id: appId, logs_tail: 100 }, { timeoutMs: 30000 });
       setAppLogsData(data);
     } catch (e) {
       setAppLogsData({ error: e instanceof Error ? e.message : String(e) });
@@ -2589,7 +2640,7 @@ const Training: React.FC = () => {
                 <h3 className="font-semibold text-gray-900">Launch Application</h3>
                 <p className="text-xs text-gray-500 mt-0.5 font-mono">{launchDialogManagerId.split('/')[1]?.split(':')[0] || launchDialogManagerId}</p>
               </div>
-              <button onClick={() => { setShowLaunchDialog(false); setLaunchDialogManagerId(null); setNewTrainerDatasets([]); setLocalModelWeights(null); setSelectedWeightsPath(null); setIsWeightsDropdownOpen(false); }} className="text-gray-400 hover:text-gray-600 p-1">
+              <button onClick={() => { setShowLaunchDialog(false); setLaunchDialogManagerId(null); setNewTrainerDatasets([]); setLocalModelWeights(null); setSelectedWeightsPath(null); setSelectedTrainerWeightsArtifactId(null); setIsWeightsDropdownOpen(false); }} className="text-gray-400 hover:text-gray-600 p-1">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
@@ -2598,14 +2649,6 @@ const Training: React.FC = () => {
               {(['orchestrator', 'trainer'] as const).map(tab => (
                 <button key={tab} onClick={async () => {
                   setLaunchDialogTab(tab);
-                  if (tab === 'trainer' && localModelWeights === null && launchDialogManagerId) {
-                    const mgr = managers.find(m => m.serviceId === launchDialogManagerId);
-                    if (mgr?.service) {
-                      setIsLoadingLocalWeights(true);
-                      try { setLocalModelWeights(await mgr.service.list_local_model_weights()); } catch { setLocalModelWeights([]); }
-                      setIsLoadingLocalWeights(false);
-                    }
-                  }
                 }} className={`flex-1 py-3 text-sm font-medium transition-colors capitalize ${launchDialogTab === tab ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'}`}>
                   {tab === 'orchestrator' ? '🎭 Orchestrator' : '🏋 Trainer'}
                 </button>
@@ -2651,17 +2694,21 @@ const Training: React.FC = () => {
                     <label className="block text-xs font-semibold text-gray-700 mb-1.5">Artifact ID</label>
                     <input type="text" value={newTrainerArtifactId} onChange={e => setNewTrainerArtifactId(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="chiron-platform/tabula-trainer" />
                   </div>
-                  {/* Pretrained weights selection */}
+                  {/* Pretrained weights selection — local-worker saves + chiron-models full tabula models */}
                   <div>
                     <label className="block text-xs font-semibold text-gray-700 mb-1.5">Pretrained weights <span className="text-gray-400 font-normal">(optional)</span></label>
+                    <p className="text-xs text-gray-400 -mt-1 mb-1.5">
+                      Loads a full Tabula checkpoint into the new trainer: sets the tissue-specific embedder, the shared transformer, and the projection heads. Transformer-only checkpoints can't be used here.
+                    </p>
                     {isLoadingLocalWeights ? (
                       <div className="flex items-center gap-2 text-xs text-gray-400 py-2"><BiLoaderAlt className="animate-spin" size={12} /> Loading saved weights…</div>
                     ) : localModelWeights === null ? (
                       <p className="text-xs text-gray-400">Switch to Trainer tab to load available weights.</p>
                     ) : (() => {
-                      const selected = localModelWeights.find(w => w.path === selectedWeightsPath);
-                      const selectedDatasets = selected ? Object.values(selected.datasets).map((d: any) => d.name || '').filter(Boolean) : [];
-                      const selectedDate = selected?.saved_at ? new Date(selected.saved_at).toLocaleDateString() : null;
+                      const selectedLocal = localModelWeights.find(w => w.path === selectedWeightsPath);
+                      const selectedArtifact = chironModelArtifacts.find(a => a.id === selectedTrainerWeightsArtifactId);
+                      const selectedLocalDatasets = selectedLocal ? Object.values(selectedLocal.datasets).map((d: any) => d.name || '').filter(Boolean) : [];
+                      const selectedLocalDate = selectedLocal?.saved_at ? new Date(selectedLocal.saved_at).toLocaleDateString() : null;
                       return (
                         <div>
                           <button
@@ -2669,10 +2716,15 @@ const Training: React.FC = () => {
                             onClick={() => setIsWeightsDropdownOpen(o => !o)}
                             className="w-full text-left px-3 py-2 border border-gray-200 rounded-lg bg-white hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors relative"
                           >
-                            {selected ? (
+                            {selectedLocal ? (
                               <div className="pr-5">
-                                <p className="text-sm text-gray-800">{selectedDate && <span className="mr-1.5">{selectedDate}</span>}{selectedDatasets.join(', ')}{(selected.num_rounds > 0 || selected.total_samples_seen > 0) && <span className="text-gray-500"> · {selected.num_rounds} round{selected.num_rounds !== 1 ? 's' : ''}, {selected.total_samples_seen.toLocaleString()} samples seen</span>}</p>
-                                <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{selected.client_name}</p>
+                                <p className="text-sm text-gray-800">{selectedLocalDate && <span className="mr-1.5">{selectedLocalDate}</span>}{selectedLocalDatasets.join(', ')}{(selectedLocal.num_rounds > 0 || selectedLocal.total_samples_seen > 0) && <span className="text-gray-500"> · {selectedLocal.num_rounds} round{selectedLocal.num_rounds !== 1 ? 's' : ''}, {selectedLocal.total_samples_seen.toLocaleString()} samples seen</span>}</p>
+                                <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{selectedLocal.client_name}</p>
+                              </div>
+                            ) : selectedArtifact ? (
+                              <div className="pr-5">
+                                <p className="text-sm text-gray-800">{selectedArtifact.manifest?.name || selectedArtifact.alias || selectedArtifact.id}</p>
+                                <p className="text-xs text-gray-500 mt-0.5">Tabula model · from Model Collection</p>
                               </div>
                             ) : (
                               <span className="text-sm text-gray-500 pr-5">Start fresh (no pretrained weights)</span>
@@ -2681,11 +2733,37 @@ const Training: React.FC = () => {
                           </button>
                           {isWeightsDropdownOpen && (
                             <div className="mt-1 border border-gray-200 rounded-lg overflow-hidden">
-                              <div className="max-h-48 overflow-y-auto divide-y divide-gray-50" onWheel={e => e.stopPropagation()}>
-                                <button type="button" onClick={() => { setSelectedWeightsPath(null); setIsWeightsDropdownOpen(false); }}
-                                  className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === null ? 'bg-emerald-50' : ''}`}>
+                              <div className="max-h-64 overflow-y-auto divide-y divide-gray-50" onWheel={e => e.stopPropagation()}>
+                                <button type="button" onClick={() => { setSelectedWeightsPath(null); setSelectedTrainerWeightsArtifactId(null); setIsWeightsDropdownOpen(false); }}
+                                  className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === null && selectedTrainerWeightsArtifactId === null ? 'bg-emerald-50' : ''}`}>
                                   <span className="text-sm text-gray-700">Start fresh</span>
                                 </button>
+
+                                {/* From Model Collection (chiron-models tabula_model artifacts) */}
+                                <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">From Model Collection</div>
+                                {chironModelArtifacts.length === 0 && (
+                                  <p className="text-xs text-gray-400 text-center py-3 px-3">No tabula models published yet.</p>
+                                )}
+                                {chironModelArtifacts.map(a => {
+                                  const name = a.manifest?.name || a.alias || a.id;
+                                  const tissue = a.manifest?.tissue as string | undefined;
+                                  const date = a.manifest?.created_at || a.created_at;
+                                  const dateStr = date ? new Date(date * 1000).toLocaleDateString() : null;
+                                  return (
+                                    <button key={a.id} type="button"
+                                      onClick={() => { setSelectedTrainerWeightsArtifactId(a.id); setSelectedWeightsPath(null); setIsWeightsDropdownOpen(false); }}
+                                      className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedTrainerWeightsArtifactId === a.id ? 'bg-emerald-50' : ''}`}>
+                                      <p className="text-sm text-gray-800">{name}</p>
+                                      <p className="text-xs text-gray-500 mt-0.5">
+                                        {dateStr && <span className="mr-1.5">{dateStr}</span>}
+                                        {tissue && <span className="capitalize">{tissue}</span>}
+                                      </p>
+                                    </button>
+                                  );
+                                })}
+
+                                {/* From this worker (locally-saved snapshots) */}
+                                <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">From This Worker</div>
                                 {localModelWeights.length === 0 && (
                                   <p className="text-xs text-gray-400 text-center py-3 px-3">No saved weights on this worker yet.</p>
                                 )}
@@ -2694,7 +2772,7 @@ const Training: React.FC = () => {
                                   const date = w.saved_at ? new Date(w.saved_at).toLocaleDateString() : null;
                                   return (
                                     <button key={w.path} type="button"
-                                      onClick={() => { setSelectedWeightsPath(w.path); setIsWeightsDropdownOpen(false); }}
+                                      onClick={() => { setSelectedWeightsPath(w.path); setSelectedTrainerWeightsArtifactId(null); setIsWeightsDropdownOpen(false); }}
                                       className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === w.path ? 'bg-emerald-50' : ''}`}>
                                       <p className="text-sm text-gray-800">{date && <span className="mr-1.5">{date}</span>}{names.join(', ')}</p>
                                       <p className="text-xs text-gray-500 mt-0.5">{w.num_rounds > 0 || w.total_samples_seen > 0 ? `${w.num_rounds} round${w.num_rounds !== 1 ? 's' : ''} · ${w.total_samples_seen.toLocaleString()} samples seen` : 'No training history'}</p>
@@ -2898,10 +2976,47 @@ const Training: React.FC = () => {
                       </div>
                       {appMessage ? <p className="text-xs font-mono text-gray-700 whitespace-pre-wrap">{appMessage}</p> : <p className="text-xs text-gray-400 italic">No application message</p>}
                     </div>
-                    {/* Per-deployment sections */}
+                    {/* Per-deployment sections — `dep.logs` is keyed by
+                        replica id; each value is an object with `stdout` and
+                        `stderr` arrays (plus a `creation_timestamp`). Show
+                        stdout (top) and stderr (bottom) as separate boxes per
+                        deployment, each capped at the last 100 lines. */}
                     {Object.entries(deployments).map(([deployName, dep]: [string, any]) => {
-                      const logs: Record<string, string[]> = dep.logs || {};
-                      const allLines = Object.values(logs).flat();
+                      const logs: Record<string, any> = dep.logs || {};
+                      const replicaIds = Object.keys(logs).sort((a, b) =>
+                        (logs[a]?.creation_timestamp || 0) - (logs[b]?.creation_timestamp || 0)
+                      );
+                      const collectStream = (stream: 'stdout' | 'stderr'): string[] => {
+                        const out: string[] = [];
+                        for (const rid of replicaIds) {
+                          const lines = (logs[rid] || {})[stream];
+                          if (!Array.isArray(lines) || lines.length === 0) continue;
+                          if (replicaIds.length > 1) out.push(`── replica ${rid} ──`);
+                          out.push(...lines);
+                        }
+                        return out;
+                      };
+                      const MAX_LINES = 100;
+                      const renderStream = (label: 'stdout' | 'stderr', tone: 'green' | 'red') => {
+                        const all = collectStream(label);
+                        const shown = all.length > MAX_LINES ? all.slice(-MAX_LINES) : all;
+                        const headerTone = tone === 'red' ? 'text-rose-300' : 'text-emerald-300';
+                        const bodyTone = tone === 'red' ? 'text-rose-200' : 'text-emerald-200';
+                        // Always say "last 100 lines" (regardless of how many actually came back) so the
+                        // user remembers this is a tail of a potentially longer history, not the full log.
+                        const sublabel = all.length === 0 ? '(empty)' : `last ${MAX_LINES} lines`;
+                        return (
+                          <div>
+                            <div className="flex items-center justify-between px-4 py-1 bg-gray-900 text-[10px] font-mono uppercase tracking-wider">
+                              <span className={headerTone}>{label}</span>
+                              <span className="text-gray-500">{sublabel}</span>
+                            </div>
+                            <pre className={`text-xs font-mono ${bodyTone} bg-gray-950 p-4 overflow-x-auto max-h-64 overflow-y-auto leading-relaxed`}>
+                              {shown.length > 0 ? shown.join('\n') : `(no ${label})`}
+                            </pre>
+                          </div>
+                        );
+                      };
                       return (
                         <div key={deployName} className="border border-gray-100 rounded-xl overflow-hidden">
                           <div className="flex items-center gap-2 px-4 py-2.5 bg-gray-50 border-b border-gray-100">
@@ -2909,7 +3024,8 @@ const Training: React.FC = () => {
                             {dep.status && <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${dep.status === 'HEALTHY' ? 'bg-emerald-100 text-emerald-700' : dep.status === 'UNHEALTHY' || dep.status === 'DEPLOY_FAILED' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>{dep.status}</span>}
                           </div>
                           {dep.message && <div className="px-4 py-2 bg-amber-50 border-b border-amber-100 text-xs font-mono text-amber-800 whitespace-pre-wrap">{dep.message}</div>}
-                          <pre className="text-xs font-mono text-gray-700 bg-gray-950 text-green-300 p-4 overflow-x-auto max-h-64 overflow-y-auto leading-relaxed">{allLines.length > 0 ? allLines.join('\n') : '(no log output)'}</pre>
+                          {renderStream('stdout', 'green')}
+                          {renderStream('stderr', 'red')}
                         </div>
                       );
                     })}

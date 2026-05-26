@@ -311,7 +311,7 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
                   ? 'bg-blue-50 border-blue-300 text-blue-700'
                   : 'bg-white border-gray-300 text-gray-700'
               }`}
-              title={isPinned ? `${ws === workerWorkspace ? "Worker's" : "Your"} workspace — cannot be removed` : ws}
+              title={isPinned ? `${ws === workerWorkspace ? "Worker's" : "Your"} workspace: cannot be removed` : ws}
             >
               {ws}
               {!isPinned && (

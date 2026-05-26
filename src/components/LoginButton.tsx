@@ -3,7 +3,7 @@ import { useHyphaStore } from '../store/hyphaStore';
 import { UserCircleIcon } from '@heroicons/react/24/outline';
 import { RiLoginBoxLine } from 'react-icons/ri';
 import { useHyphaContext } from '../HyphaContext';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Spinner } from './Spinner';
 
 interface LoginButtonProps {
@@ -182,6 +182,13 @@ export default function LoginButton({ className = '' }: LoginButtonProps) {
               <div className="px-4 py-2 text-sm text-gray-700 border-b border-gray-200">
                 {user.email}
               </div>
+              <Link
+                to="/my-models"
+                onClick={() => setIsDropdownOpen(false)}
+                className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+              >
+                My Models
+              </Link>
               <button
                 onClick={handleLogout}
                 className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"

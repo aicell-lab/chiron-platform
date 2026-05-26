@@ -1,19 +1,16 @@
 import React from 'react';
-import { BiCube } from 'react-icons/bi';
+import ModelGrid from '../components/models/ModelGrid';
 
 const Models: React.FC = () => {
   return (
-    <div className="flex flex-col items-center justify-center min-h-[60vh] text-center pt-16">
-      <div className="bg-gradient-to-r from-blue-100 to-purple-100 p-8 rounded-full mb-8 shadow-inner">
-        <BiCube className="text-blue-500 w-24 h-24" />
+    <div className="container mx-auto px-4 py-8">
+      <div className="mb-6">
+        <h1 className="text-3xl font-semibold text-gray-900">Models</h1>
+        <p className="mt-2 text-gray-600">
+          Trained checkpoints published to the Chiron Platform collection.
+        </p>
       </div>
-      <h1 className="text-4xl font-bold text-gray-800 mb-6 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600">
-        Models Coming Soon
-      </h1>
-      <p className="text-xl text-gray-600 max-w-2xl leading-relaxed">
-        We are actively working on integrating foundation models into the Chiron Platform. 
-        Soon, you will be able to browse, test, and deploy single-cell models directly from here.
-      </p>
+      <ModelGrid parentId="chiron-platform/chiron-models" />
     </div>
   );
 };

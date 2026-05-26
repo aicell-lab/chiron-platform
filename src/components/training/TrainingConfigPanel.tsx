@@ -20,7 +20,7 @@ interface TrainerParams {
 interface ArtifactEntry {
   id: string;
   alias: string;
-  manifest: { name?: string; model_type?: string; num_rounds?: number; datasets?: {name: string}[] };
+  manifest: { name?: string; global_transformer?: boolean; tissue?: string; num_rounds?: number; datasets?: {name: string}[] };
 }
 
 interface TrainingConfigPanelProps {
@@ -57,12 +57,15 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   const [numRounds, setNumRounds] = useState(5);
   const [perRoundTimeoutMinutes, setPerRoundTimeoutMinutes] = useState(20);
 
-  // Pretrained weights
-  const [usePretrainedWeights, setUsePretrainedWeights] = useState(false);
+  // Pretrained weights — defaults on; users almost always want to start from a
+  // published checkpoint (full Tabula model or transformer-only global_transformer)
+  // rather than from random weights.
+  const [usePretrainedWeights, setUsePretrainedWeights] = useState(true);
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [artifactsLoading, setArtifactsLoading] = useState(false);
   const [artifactsError, setArtifactsError] = useState<string | null>(null);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string>('');
+  const [isCheckpointDropdownOpen, setIsCheckpointDropdownOpen] = useState(false);
   const [weightFiles, setWeightFiles] = useState<string[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
   const [selectedFilePath, setSelectedFilePath] = useState<string>('');
@@ -80,7 +83,10 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     onConfigChange?.(numRounds, perRoundTimeoutMinutes);
   }, [numRounds, perRoundTimeoutMinutes]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch global transformer weight artifacts from chiron-models collection
+  // Fetch every chiron-models checkpoint — at training start, the orchestrator
+  // broadcasts the selected weights as the initial transformer state to every
+  // trainer. Both full Tabula models (global_transformer=false) and
+  // transformer-only FedAvg saves (global_transformer=true) are valid here.
   const fetchArtifacts = useCallback(async () => {
     if (!artifactManager) return;
     setArtifactsLoading(true);
@@ -91,12 +97,10 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
         limit: 100,
         _rkwargs: true,
       });
-      const globalWeights = (result || []).filter(
-        (a: ArtifactEntry) => a.manifest?.model_type === 'global_transformer'
-      );
-      setArtifacts(globalWeights);
-      if (globalWeights.length > 0) {
-        setSelectedArtifactId(globalWeights[0].id);
+      const checkpoints = (result || []) as ArtifactEntry[];
+      setArtifacts(checkpoints);
+      if (checkpoints.length > 0) {
+        setSelectedArtifactId(checkpoints[0].id);
       }
     } catch (e: any) {
       console.error('Failed to load global transformer weights:', e);
@@ -378,7 +382,12 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
         <div className="flex items-center justify-between mb-3">
           <div>
             <label className="block text-xs font-semibold text-gray-700">Start from Pretrained Weights</label>
-            <p className="text-xs text-gray-400 mt-0.5">Load published transformer weights as the starting point before round 1.</p>
+            <p className="text-xs text-gray-400 mt-0.5">
+              Broadcasts only the shared transformer weights from the selected
+              checkpoint to every trainer before round 1. Each trainer's
+              tissue-specific embedder and projection heads stay local: they
+              are not overwritten.
+            </p>
           </div>
           <button
             type="button"
@@ -401,30 +410,77 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
                 <button onClick={fetchArtifacts} className="text-xs text-blue-600 hover:underline">Retry</button>
               </div>
             ) : artifacts.length === 0 ? (
-              <p className="text-xs text-gray-400 italic">No global transformer weights in chiron-models yet</p>
-            ) : (
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">Checkpoint</label>
-                <select
-                  value={selectedArtifactId}
-                  onChange={e => setSelectedArtifactId(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-                >
-                  {artifacts.map(a => {
-                    const datasets = a.manifest?.datasets?.map(d => d.name).join(', ') || '';
-                    const rounds = a.manifest?.num_rounds;
-                    const label = a.manifest?.name || a.alias || a.id;
-                    const sub = [rounds ? `${rounds} rounds` : '', datasets].filter(Boolean).join(' · ');
-                    return (
-                      <option key={a.id} value={a.id}>
-                        {label}{sub ? ` - ${sub}` : ''}
-                      </option>
-                    );
-                  })}
-                </select>
-                <p className="text-xs text-gray-400 mt-1">Loads model.pth from the selected artifact</p>
-              </div>
-            )}
+              <p className="text-xs text-gray-400 italic">No published checkpoints in chiron-models yet</p>
+            ) : (() => {
+              const selected = artifacts.find(a => a.id === selectedArtifactId);
+              const fullModels = artifacts.filter(a => a.manifest?.global_transformer !== true);
+              const globalTransformers = artifacts.filter(a => a.manifest?.global_transformer === true);
+              const fmt = (a: ArtifactEntry) => {
+                const datasets = a.manifest?.datasets?.map(d => d.name).join(', ') || '';
+                const rounds = a.manifest?.num_rounds;
+                return [rounds ? `${rounds} rounds` : '', datasets].filter(Boolean).join(' · ');
+              };
+              return (
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Checkpoint</label>
+                  <button
+                    type="button"
+                    onClick={() => setIsCheckpointDropdownOpen(o => !o)}
+                    className="w-full text-left px-3 py-2 border border-gray-200 rounded-lg bg-white hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors relative"
+                  >
+                    {selected ? (
+                      <div className="pr-5">
+                        <p className="text-sm text-gray-800">{selected.manifest?.name || selected.alias || selected.id}</p>
+                        {fmt(selected) && <p className="text-xs text-gray-500 mt-0.5">{fmt(selected)}</p>}
+                      </div>
+                    ) : (
+                      <span className="text-sm text-gray-500 pr-5">Select a checkpoint…</span>
+                    )}
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs">{isCheckpointDropdownOpen ? '▴' : '▾'}</span>
+                  </button>
+                  {isCheckpointDropdownOpen && (
+                    <div className="mt-1 border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="max-h-64 overflow-y-auto divide-y divide-gray-50" onWheel={e => e.stopPropagation()}>
+                        {fullModels.length > 0 && (
+                          <>
+                            <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">Full Tabula Models</div>
+                            {fullModels.map(a => {
+                              const label = a.manifest?.name || a.alias || a.id;
+                              const sub = fmt(a);
+                              return (
+                                <button key={a.id} type="button"
+                                  onClick={() => { setSelectedArtifactId(a.id); setIsCheckpointDropdownOpen(false); }}
+                                  className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedArtifactId === a.id ? 'bg-emerald-50' : ''}`}>
+                                  <p className="text-sm text-gray-800">{label}</p>
+                                  {sub && <p className="text-xs text-gray-500 mt-0.5">{sub}</p>}
+                                </button>
+                              );
+                            })}
+                          </>
+                        )}
+                        {globalTransformers.length > 0 && (
+                          <>
+                            <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">Global Transformer Checkpoints</div>
+                            {globalTransformers.map(a => {
+                              const label = a.manifest?.name || a.alias || a.id;
+                              const sub = fmt(a);
+                              return (
+                                <button key={a.id} type="button"
+                                  onClick={() => { setSelectedArtifactId(a.id); setIsCheckpointDropdownOpen(false); }}
+                                  className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedArtifactId === a.id ? 'bg-emerald-50' : ''}`}>
+                                  <p className="text-sm text-gray-800">{label}</p>
+                                  {sub && <p className="text-xs text-gray-500 mt-0.5">{sub}</p>}
+                                </button>
+                              );
+                            })}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         )}
       </div>
