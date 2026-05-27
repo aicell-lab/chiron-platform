@@ -601,6 +601,14 @@ const Training: React.FC = () => {
   const lastSeenAtRef = React.useRef<Map<string, number>>(new Map());
   const WORKER_DISAPPEARANCE_GRACE_MS = 45000;
 
+  // workerClientId → last good DiscoveredWorker record. allDiscoveredWorkers
+  // reads from this so the Setup Workers table can render a row even when
+  // the latest discovery snapshot temporarily missed the worker (we keep
+  // the cached entry until the grace window expires). Without this cache
+  // the table would still blink — managers state is graced but the table
+  // computes from discoveredWorkers directly.
+  const discoveredWorkerCacheRef = React.useRef<Map<string, { workspace: string; worker: DiscoveredWorker }>>(new Map());
+
   const withManagerLock = async <T,>(managerId: string, fn: () => Promise<T>): Promise<T> => {
     mutatingManagersRef.current.add(managerId);
     try {
@@ -692,7 +700,7 @@ const Training: React.FC = () => {
     const gone = managers.filter(m => {
       if (discoveredByClient.has(m.workerClientId)) return false;
       const seen = lastSeenAtRef.current.get(m.workerClientId);
-      if (seen === undefined) return true; // never seen → drop now
+      if (seen === undefined) return true;
       return nowMs - seen > WORKER_DISAPPEARANCE_GRACE_MS;
     });
     if (gone.length > 0) {
@@ -1876,11 +1884,43 @@ const Training: React.FC = () => {
       .map(t => ({ from: orchManagerId, to: t.managerId, animated }));
   }, [selectedOrchestrator, orchestrators, trainers, registeredTrainers, isTraining, trainingStatus?.stage, participatedTrainerIds]);
 
-  // All discovered workers (flat list with workspace context)
+  // All discovered workers (flat list with workspace context). We refresh
+  // the per-clientId cache from the latest discovery snapshot, then emit
+  // every cached entry whose workerClientId is still within the grace
+  // window (matches the rule used by the managers state above). The result
+  // is that a worker briefly missing from one discovery snapshot keeps
+  // rendering its row instead of blinking out.
   const allDiscoveredWorkers = useMemo(() => {
-    return observedWorkspaces
-      .flatMap(ws => (discoveredWorkers[ws] || []).map(w => ({ ...w, workspace: ws })))
-      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+    const now = Date.now();
+    // 1. Update cache with currently-discovered workers (and refresh lastSeenAt
+    //    so the cache stays in sync with the managers-state grace window).
+    for (const ws of observedWorkspaces) {
+      for (const w of (discoveredWorkers[ws] || [])) {
+        const cid = workerClientIdOf(w.serviceId);
+        if (!cid) continue;
+        discoveredWorkerCacheRef.current.set(cid, { workspace: ws, worker: w });
+        lastSeenAtRef.current.set(cid, now);
+      }
+    }
+    // 2. Emit cached entries whose lastSeenAt is within grace. Evict expired
+    //    entries (older than grace) so the cache doesn't grow unbounded.
+    const out: Array<DiscoveredWorker & { workspace: string }> = [];
+    for (const [cid, { workspace, worker }] of discoveredWorkerCacheRef.current) {
+      // Only include workspaces the user is still observing.
+      if (!observedWorkspaces.includes(workspace)) {
+        discoveredWorkerCacheRef.current.delete(cid);
+        continue;
+      }
+      const seen = lastSeenAtRef.current.get(cid) ?? 0;
+      if (now - seen > WORKER_DISAPPEARANCE_GRACE_MS) {
+        discoveredWorkerCacheRef.current.delete(cid);
+        continue;
+      }
+      out.push({ ...worker, workspace });
+    }
+    return out.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+  // We deliberately depend on discoveredWorkers (and not on the ref) so the
+  // memo recomputes on every discovery tick.
   }, [observedWorkspaces, discoveredWorkers]);
 
   // Stable alphabetical sort for orchestrator / trainer lists: by worker name
