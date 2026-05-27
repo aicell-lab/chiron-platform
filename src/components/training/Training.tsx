@@ -303,29 +303,35 @@ const Training: React.FC = () => {
     const q = location.search.startsWith('?') ? location.search.slice(1) : location.search;
     return new URLSearchParams(q).get('orchestrator_id');
   }, [location.search]);
+  // Snapshot the URL's orchestrator_id at mount time. The user can clear the
+  // URL or deselect mid-session; we only want to auto-apply the *initial*
+  // value, never re-apply it later (that would block deselection).
   const initialUrlOrchestratorIdRef = useRef(urlOrchestratorId);
-  const initialStepAppliedRef = useRef(false);
 
-  // When `orchestrators` finally contains an entry matching the URL's
-  // ?orchestrator_id, auto-select it and (on first match only) jump straight
-  // to step 2 (Select Apps). After the initial selection the URL only follows
-  // whatever the user clicks.
+  // One-shot auto-select from URL on initial mount: when `orchestrators`
+  // finally contains an entry matching the URL's ?orchestrator_id, select it
+  // and jump straight to step 2 (Select Apps). Guarded by a ref so we don't
+  // re-apply the URL value after the user deselects (which would otherwise
+  // make the deselect appear to do nothing).
+  const urlSelectionAppliedRef = useRef(false);
   useEffect(() => {
-    const wsid = urlOrchestratorId;
-    if (!wsid) return;
+    if (urlSelectionAppliedRef.current) return;
+    const wsid = initialUrlOrchestratorIdRef.current;
+    if (!wsid) {
+      urlSelectionAppliedRef.current = true;
+      return;
+    }
     if (selectedOrchestrator) {
-      // already selected — verify URL matches the currently selected orch's svc id below
+      urlSelectionAppliedRef.current = true;
       return;
     }
     const match = orchestrators.find(o => o.serviceIds?.[0]?.websocket_service_id === wsid);
     if (match) {
       setSelectedOrchestrator(`${match.managerId}::${match.appId}`);
-      if (!initialStepAppliedRef.current) {
-        setCurrentStep(2);
-        initialStepAppliedRef.current = true;
-      }
+      setCurrentStep(2);
+      urlSelectionAppliedRef.current = true;
     }
-  }, [orchestrators, urlOrchestratorId, selectedOrchestrator]);
+  }, [orchestrators, selectedOrchestrator]);
 
   // Keep the URL synced with the currently selected orchestrator's
   // websocket_service_id. Removing the selection clears the param.
