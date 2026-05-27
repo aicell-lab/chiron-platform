@@ -800,10 +800,12 @@ const Training: React.FC = () => {
     setOrchestrators(prev => [...prev, {
       managerId,
       appId: pendingAppId,
-      // Show DEPLOYING (blue pulse) immediately so the row reflects the
-      // ongoing deploy until the next worker-info refresh replaces this
-      // placeholder with the real entry from the manager.
-      status: 'DEPLOYING',
+      // Match the BioEngine state machine: the worker reports NOT_STARTED
+      // first, then DEPLOYING, then RUNNING. Starting the placeholder at
+      // NOT_STARTED means the next worker-info refresh transitions
+      // smoothly (NOT_STARTED → DEPLOYING → RUNNING) with no apparent
+      // back-step.
+      status: 'NOT_STARTED',
       serviceIds: [],
       artifactId: 'chiron-platform/chiron-orchestrator',
       displayName: undefined,
@@ -855,10 +857,12 @@ const Training: React.FC = () => {
     setTrainers(prev => [...prev, {
       managerId,
       appId: pendingAppId,
-      // Show DEPLOYING (blue pulse) immediately so the row reflects the
-      // ongoing deploy until the next worker-info refresh replaces this
-      // placeholder with the real entry from the manager.
-      status: 'DEPLOYING',
+      // Match the BioEngine state machine: the worker reports NOT_STARTED
+      // first, then DEPLOYING, then RUNNING. Starting the placeholder at
+      // NOT_STARTED means the next worker-info refresh transitions
+      // smoothly (NOT_STARTED → DEPLOYING → RUNNING) with no apparent
+      // back-step.
+      status: 'NOT_STARTED',
       serviceIds: [],
       datasets: optimisticDatasets,
       artifactId: trainerArtifactArg || 'chiron-platform/tabula-trainer',
