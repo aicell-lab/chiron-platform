@@ -110,7 +110,19 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
         limit: 100,
         _rkwargs: true,
       });
-      const checkpoints = (result || []) as ArtifactEntry[];
+      // Surface tabula-foundation (the generalist multi-tissue checkpoint)
+      // first so it's the default Start-from-Pretrained-Weights selection.
+      // Tissue-specific full models and global_transformer-only saves come
+      // after, each group sorted alphabetically by manifest name for
+      // predictability.
+      const isFoundation = (a: ArtifactEntry) =>
+        (a.alias || a.id.split('/').pop() || '').toLowerCase() === 'tabula-foundation';
+      const byName = (a: ArtifactEntry, b: ArtifactEntry) =>
+        (a.manifest?.name || a.alias || a.id).localeCompare(b.manifest?.name || b.alias || b.id);
+      const all = ((result || []) as ArtifactEntry[]);
+      const foundation = all.filter(isFoundation);
+      const others = all.filter(a => !isFoundation(a)).sort(byName);
+      const checkpoints = [...foundation, ...others];
       setArtifacts(checkpoints);
       if (checkpoints.length > 0) {
         setSelectedArtifactId(checkpoints[0].id);
