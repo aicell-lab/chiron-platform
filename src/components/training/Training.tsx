@@ -786,9 +786,14 @@ const Training: React.FC = () => {
         ...newTrainers,
       ]);
       // Now schedule per-manager polling loops (10s for status, 60s for datasets).
+      // We also fire one immediate get_datasets_info per worker so the dataset
+      // Info modal can show per-file cell / gene counts right away — the
+      // 60s polling timer alone meant the first minute of a worker's life
+      // showed only the bare manifest (no zarr_files → no counts).
       for (const { serviceId } of newOnes) {
         scheduleWorkerRefresh(serviceId);
         scheduleDatasetRefresh(serviceId);
+        void refreshDatasetInfo(serviceId);
       }
     });
   }, [discoveredWorkers, observedWorkspaces]); // eslint-disable-line react-hooks/exhaustive-deps
