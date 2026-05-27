@@ -400,6 +400,11 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
               checkpoint to every trainer before round 1. Each trainer's
               tissue-specific embedder and projection heads stay local: they
               are not overwritten.
+              {hasHistory && (
+                <> Enabling this on an orchestrator with existing history
+                  also resets the orchestrator's training history so the
+                  next run starts from scratch.</>
+              )}
             </p>
           </div>
           <button
@@ -553,19 +558,29 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
               <svg className="w-6 h-6 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              <h3 className="font-semibold text-gray-900">Overwrite trained transformer?</h3>
+              <h3 className="font-semibold text-gray-900">Overwrite trained transformer and reset history?</h3>
             </div>
             <div className="px-6 py-4 text-sm text-gray-600 space-y-2">
               <p>
                 This orchestrator already has training history. Enabling
-                "Start from Pretrained Weights" will overwrite the
-                previously trained shared transformer weights at the start
-                of the next training run.
+                "Start from Pretrained Weights" will:
               </p>
+              <ul className="list-disc list-inside space-y-1 pl-2">
+                <li>
+                  Overwrite the previously trained shared transformer
+                  weights with the selected checkpoint before round 1.
+                </li>
+                <li>
+                  Reset the orchestrator's training history (per-round
+                  losses, round counter, run metadata) so the next run
+                  starts from scratch.
+                </li>
+              </ul>
               <p>
                 Each trainer's tissue-specific embedder and projection
                 heads stay local; only the federated transformer is
-                replaced.
+                replaced. Trainers' on-disk weight checkpoints are not
+                touched either.
               </p>
             </div>
             <div className="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
