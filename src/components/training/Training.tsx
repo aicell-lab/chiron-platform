@@ -2360,7 +2360,6 @@ const Training: React.FC = () => {
                                 {orch.isBusy && <BusyBadge />}
                               </div>
                               {geo && <p className="text-xs text-gray-500 mt-0.5">{geo.region}, {geo.country_name}</p>}
-                              <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{orch.managerId.split('/')[1]?.split(':')[0] || orch.managerId}</p>
                               {isBusyElsewhere && <p className="text-xs text-amber-600 mt-0.5">Currently running a training session</p>}
                               {isRunningHere && <p className="text-xs text-blue-600 mt-0.5">Training in progress</p>}
                             </div>
