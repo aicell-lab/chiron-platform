@@ -8,7 +8,7 @@ Scenario
      - Chiron Worker - Berlin   (thymus)
      - Chiron Worker - Stanford (liver)
 3. Register both with the orchestrator and start training for 5 rounds with
-   `initial_weights = chiron-platform/tabula-global-average`. The orchestrator
+   `initial_weights = chiron-platform/tabula-foundation`. The orchestrator
    broadcasts the transformer-only slice of that checkpoint to every trainer at
    round 1; each trainer's tissue-specific embedder + projection heads stay
    local. Each fit phase runs the full 90 demo batches (batch_size=8,
@@ -38,7 +38,7 @@ Prereqs
   online, with their datasets available.
 - `chiron-platform/tabula-trainer` and `chiron-platform/chiron-orchestrator`
   apps must be uploaded.
-- `chiron-platform/tabula-global-average` and `chiron-platform/tabula-blood`
+- `chiron-platform/tabula-foundation` and `chiron-platform/tabula-blood`
   artifacts must exist in `chiron-platform/chiron-models`.
 - Hypha token with chiron-platform write access, expected at
   `../tabula/.env` (HYPHA_TOKEN=...).
@@ -69,7 +69,7 @@ HYPHA_BASE = "https://hypha.aicell.io"
 WORKSPACE = "chiron-platform"
 TRAINER_ARTIFACT = "chiron-platform/tabula-trainer"
 ORCHESTRATOR_ARTIFACT = "chiron-platform/chiron-orchestrator"
-GLOBAL_TRANSFORMER_INIT = "chiron-platform/tabula-global-average"
+GLOBAL_TRANSFORMER_INIT = "chiron-platform/tabula-foundation"
 BLOOD_FULL_MODEL = "chiron-platform/tabula-blood"
 
 NUM_ROUNDS = 5
