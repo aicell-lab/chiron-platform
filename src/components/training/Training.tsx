@@ -79,11 +79,28 @@ interface WorkerInfo {
  */
 interface ManagerConnection {
   workspace: string;
-  serviceId: string;
+  /** Current chiron-manager websocket service id of the form
+   *  `workspace/<workerClientId>-<managerReplicaId>:chiron-manager`. The
+   *  `managerReplicaId` portion rotates whenever Ray Serve restarts the
+   *  manager replica (routinely after every create_orchestrator /
+   *  create_trainer call), but `workerClientId` stays put for the lifetime
+   *  of the BioEngine worker. Mutable — we migrate it in place during
+   *  discovery to avoid the worker row blinking out and back on rotation. */
+   serviceId: string;
+  /** Stable per-worker identifier — the part of `serviceId` before the
+   *  first dash. Used as the React identity key for worker rows and as
+   *  the cross-reference for orchestrators/trainers. */
+   workerClientId: string;
   isConnected: boolean;
   workerInfo?: WorkerInfo;
   datasetsInfo?: Record<string, any>;
 }
+
+const workerClientIdOf = (serviceId: string): string => {
+  // serviceId is "workspace/<workerClientId>-<replicaId>:chiron-manager"
+  const stripped = serviceId.includes('/') ? serviceId.slice(serviceId.indexOf('/') + 1) : serviceId;
+  return stripped.split(':')[0].split('-')[0];
+};
 
 interface OrchestratorApp {
   managerId: string;
@@ -595,46 +612,108 @@ const Training: React.FC = () => {
   // per-manager HTTP completion triggers its own re-render and the Federation
   // Map appeared to load workers one-by-one over a couple of seconds.
   useEffect(() => {
-    const discoveredIds = new Set<string>();
-    const discoveredByWs: Array<{ ws: string; serviceId: string }> = [];
+    // Index everything currently discovered by *stable* workerClientId.
+    // Many manager replicas can come and go for the same physical worker —
+    // we keep one row per worker and just swap its serviceId on rotation.
+    const discoveredByClient = new Map<string, { ws: string; serviceId: string }>();
     for (const ws of observedWorkspaces) {
       for (const w of (discoveredWorkers[ws] || [])) {
-        if (!discoveredIds.has(w.serviceId)) {
-          discoveredIds.add(w.serviceId);
-          discoveredByWs.push({ ws, serviceId: w.serviceId });
+        const cid = workerClientIdOf(w.serviceId);
+        if (cid && !discoveredByClient.has(cid)) {
+          discoveredByClient.set(cid, { ws, serviceId: w.serviceId });
         }
       }
     }
 
-    // Drop managers whose discovery entry has disappeared (workspace removed,
-    // manager undeployed, etc). Keep their orchestrators/trainers consistent.
-    const gone = managers.filter(m => !discoveredIds.has(m.serviceId)).map(m => m.serviceId);
+    // Drop managers whose workerClientId is no longer discovered (worker
+    // truly removed). A pure replica rotation is NOT a removal — the new
+    // entry will land under the same workerClientId below.
+    const gone = managers.filter(m => !discoveredByClient.has(m.workerClientId));
     if (gone.length > 0) {
-      setManagers(prev => prev.filter(m => !gone.includes(m.serviceId)));
-      setOrchestrators(prev => prev.filter(o => !gone.includes(o.managerId)));
-      setTrainers(prev => prev.filter(t => !gone.includes(t.managerId)));
+      const goneIds = gone.map(m => m.serviceId);
+      setManagers(prev => prev.filter(m => discoveredByClient.has(m.workerClientId)));
+      setOrchestrators(prev => prev.filter(o => !goneIds.includes(o.managerId)));
+      setTrainers(prev => prev.filter(t => !goneIds.includes(t.managerId)));
       setWorkerTimers(prev => {
         const n = { ...prev };
-        for (const id of gone) { if (n[id]) clearTimeout(n[id]); delete n[id]; }
+        for (const id of goneIds) { if (n[id]) clearTimeout(n[id]); delete n[id]; }
         return n;
       });
       setDatasetTimers(prev => {
         const n = { ...prev };
-        for (const id of gone) { if (n[id]) clearTimeout(n[id]); delete n[id]; }
+        for (const id of goneIds) { if (n[id]) clearTimeout(n[id]); delete n[id]; }
         return n;
       });
     }
 
-    // Batched first-load for newly-appeared managers.
-    const newOnes = discoveredByWs.filter(({ serviceId }) => !managers.some(m => m.serviceId === serviceId));
+    // Migrate workers whose chiron-manager replica id changed (the most
+    // common case: Ray Serve rotated the manager actor after create_*).
+    // We keep the row in place and only point it at the new serviceId,
+    // updating dependent state (orchestrators, trainers, polling timers).
+    const rotated: Array<{ oldId: string; newId: string; ws: string }> = [];
+    for (const m of managers) {
+      const d = discoveredByClient.get(m.workerClientId);
+      if (d && d.serviceId !== m.serviceId) {
+        rotated.push({ oldId: m.serviceId, newId: d.serviceId, ws: d.ws });
+      }
+    }
+    if (rotated.length > 0) {
+      const idMap = new Map(rotated.map(r => [r.oldId, r.newId]));
+      setManagers(prev => prev.map(m => {
+        const newId = idMap.get(m.serviceId);
+        return newId ? { ...m, serviceId: newId } : m;
+      }));
+      setOrchestrators(prev => prev.map(o => ({
+        ...o,
+        managerId: idMap.get(o.managerId) || o.managerId,
+      })));
+      setTrainers(prev => prev.map(t => ({
+        ...t,
+        managerId: idMap.get(t.managerId) || t.managerId,
+      })));
+      // Restart polling timers under the new id; clear out old ones.
+      setWorkerTimers(prev => {
+        const n = { ...prev };
+        for (const { oldId } of rotated) {
+          if (n[oldId]) clearTimeout(n[oldId]);
+          delete n[oldId];
+        }
+        return n;
+      });
+      setDatasetTimers(prev => {
+        const n = { ...prev };
+        for (const { oldId } of rotated) {
+          if (n[oldId]) clearTimeout(n[oldId]);
+          delete n[oldId];
+        }
+        return n;
+      });
+      for (const { newId } of rotated) {
+        scheduleWorkerRefresh(newId);
+        scheduleDatasetRefresh(newId);
+      }
+    }
+
+    // Batched first-load for genuinely new workers (workerClientIds we
+    // haven't seen before).
+    const knownClientIds = new Set(managers.map(m => m.workerClientId));
+    const newOnes: Array<{ ws: string; serviceId: string; clientId: string }> = [];
+    for (const [cid, d] of discoveredByClient) {
+      if (!knownClientIds.has(cid)) newOnes.push({ ...d, clientId: cid });
+    }
     if (newOnes.length === 0) return;
 
     // Phase 1: insert placeholders so the Setup Workers table shows rows immediately.
     setManagers(prev => {
-      const existing = new Set(prev.map(m => m.serviceId));
+      const existing = new Set(prev.map(m => m.workerClientId));
       const toAdd = newOnes
-        .filter(({ serviceId }) => !existing.has(serviceId))
-        .map(({ ws, serviceId }) => ({ workspace: ws, serviceId, isConnected: false } as ManagerConnection));
+        .filter(({ clientId }) => !existing.has(clientId))
+        .map(({ ws, serviceId, clientId }) => ({
+          workspace: ws,
+          serviceId,
+          workerClientId: clientId,
+          isConnected: false,
+        } as ManagerConnection));
       return [...prev, ...toAdd];
     });
 
