@@ -591,6 +591,16 @@ const Training: React.FC = () => {
     recentlyDeletedAppIdsRef.current.set(appId, Date.now() + RECENTLY_DELETED_TTL_MS);
   };
 
+  // workerClientId → last-seen timestamp. A single discovery snapshot can
+  // briefly miss a worker when its chiron-manager replica is mid-rotation
+  // (e.g., several create_orchestrator/create_trainer calls landing at once
+  // make several manager actors restart simultaneously). Without a grace
+  // window, the discovery effect would drop those workers and the next
+  // 15-second tick would re-add them. We tolerate up to one full discovery
+  // cycle of absence before considering a worker truly gone.
+  const lastSeenAtRef = React.useRef<Map<string, number>>(new Map());
+  const WORKER_DISAPPEARANCE_GRACE_MS = 45000;
+
   const withManagerLock = async <T,>(managerId: string, fn: () => Promise<T>): Promise<T> => {
     mutatingManagersRef.current.add(managerId);
     try {
@@ -667,13 +677,28 @@ const Training: React.FC = () => {
       }
     }
 
-    // Drop managers whose workerClientId is no longer discovered (worker
-    // truly removed). A pure replica rotation is invisible to us because
-    // the wildcard id matches both old and new replicas.
-    const gone = managers.filter(m => !discoveredByClient.has(m.workerClientId));
+    // Refresh last-seen timestamps for every currently-discovered client.
+    const nowMs = Date.now();
+    for (const cid of discoveredByClient.keys()) {
+      lastSeenAtRef.current.set(cid, nowMs);
+    }
+
+    // Drop managers whose workerClientId hasn't been seen in any discovery
+    // snapshot for at least WORKER_DISAPPEARANCE_GRACE_MS. A pure replica
+    // rotation is invisible because the wildcard id matches old + new, but
+    // concurrent create_* calls can briefly drop the chiron-manager service
+    // from the listing while Hypha re-registers it. The grace window absorbs
+    // that and prevents the worker row from blinking out then back.
+    const gone = managers.filter(m => {
+      if (discoveredByClient.has(m.workerClientId)) return false;
+      const seen = lastSeenAtRef.current.get(m.workerClientId);
+      if (seen === undefined) return true; // never seen → drop now
+      return nowMs - seen > WORKER_DISAPPEARANCE_GRACE_MS;
+    });
     if (gone.length > 0) {
+      const goneClientIds = new Set(gone.map(m => m.workerClientId));
       const goneIds = gone.map(m => m.serviceId);
-      setManagers(prev => prev.filter(m => discoveredByClient.has(m.workerClientId)));
+      setManagers(prev => prev.filter(m => !goneClientIds.has(m.workerClientId)));
       setOrchestrators(prev => prev.filter(o => !goneIds.includes(o.managerId)));
       setTrainers(prev => prev.filter(t => !goneIds.includes(t.managerId)));
       setWorkerTimers(prev => {
@@ -686,6 +711,7 @@ const Training: React.FC = () => {
         for (const id of goneIds) { if (n[id]) clearTimeout(n[id]); delete n[id]; }
         return n;
       });
+      for (const cid of goneClientIds) lastSeenAtRef.current.delete(cid);
     }
 
     // Batched first-load for genuinely new workers (workerClientIds we
