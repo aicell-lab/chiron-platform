@@ -37,6 +37,11 @@ interface TrainingConfigPanelProps {
   }) => void;
   isPreparingTraining: boolean;
   isTraining: boolean;
+  /** True when the selected orchestrator already has training history.
+   *  Pretrained-weights default flips OFF in that case (loading a new
+   *  checkpoint would overwrite the in-memory FedAvg state). Enabling it
+   *  anyway pops a confirmation dialog. */
+  hasHistory?: boolean;
   onConfigChange?: (numRounds: number, perRoundTimeoutMinutes: number) => void;
 }
 
@@ -50,6 +55,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   onStart,
   isPreparingTraining,
   isTraining,
+  hasHistory,
   onConfigChange,
 }) => {
 
@@ -57,10 +63,17 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   const [numRounds, setNumRounds] = useState(5);
   const [perRoundTimeoutMinutes, setPerRoundTimeoutMinutes] = useState(20);
 
-  // Pretrained weights — defaults on; users almost always want to start from a
-  // published checkpoint (full Tabula model or transformer-only global_transformer)
-  // rather than from random weights.
-  const [usePretrainedWeights, setUsePretrainedWeights] = useState(true);
+  // Pretrained weights — defaults ON for a fresh orchestrator, OFF when
+  // history already exists (loading new pretrained weights would clobber
+  // the previously trained shared transformer). The user can still flip it
+  // back on; that path pops a confirmation dialog.
+  const [usePretrainedWeights, setUsePretrainedWeights] = useState(!hasHistory);
+  // Initial flip when the parent first reports has-history (e.g. user just
+  // selected an orchestrator that already has rounds).
+  useEffect(() => {
+    setUsePretrainedWeights(prev => (hasHistory ? false : prev));
+  }, [hasHistory]);
+  const [showOverwriteWarning, setShowOverwriteWarning] = useState(false);
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [artifactsLoading, setArtifactsLoading] = useState(false);
   const [artifactsError, setArtifactsError] = useState<string | null>(null);
@@ -391,7 +404,16 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
           </div>
           <button
             type="button"
-            onClick={() => setUsePretrainedWeights(v => !v)}
+            onClick={() => {
+              // Turning ON when history exists would overwrite the
+              // already-trained transformer at the start of the next run;
+              // surface a confirmation first.
+              if (!usePretrainedWeights && hasHistory) {
+                setShowOverwriteWarning(true);
+                return;
+              }
+              setUsePretrainedWeights(v => !v);
+            }}
             className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${usePretrainedWeights ? 'bg-emerald-500' : 'bg-gray-200'}`}
           >
             <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ${usePretrainedWeights ? 'translate-x-4' : 'translate-x-0'}`} />
@@ -523,6 +545,46 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
           </>
         )}
       </button>
+
+      {showOverwriteWarning && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="px-6 py-4 border-b border-amber-50 flex items-center gap-3">
+              <svg className="w-6 h-6 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <h3 className="font-semibold text-gray-900">Overwrite trained transformer?</h3>
+            </div>
+            <div className="px-6 py-4 text-sm text-gray-600 space-y-2">
+              <p>
+                This orchestrator already has training history. Enabling
+                "Start from Pretrained Weights" will overwrite the
+                previously trained shared transformer weights at the start
+                of the next training run.
+              </p>
+              <p>
+                Each trainer's tissue-specific embedder and projection
+                heads stay local; only the federated transformer is
+                replaced.
+              </p>
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+              <button
+                onClick={() => setShowOverwriteWarning(false)}
+                className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setUsePretrainedWeights(true); setShowOverwriteWarning(false); }}
+                className="px-4 py-2 text-sm font-semibold bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors"
+              >
+                Overwrite
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

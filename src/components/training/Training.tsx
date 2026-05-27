@@ -1,4 +1,5 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useHyphaStore } from '../../store/hyphaStore';
 import { callHyphaService, listHyphaServices } from '../../utils/hyphaHttp';
 import { FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
@@ -289,6 +290,63 @@ const Training: React.FC = () => {
   // Step navigation
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
   useEffect(() => { window.scrollTo({ top: 0, behavior: 'smooth' }); }, [currentStep]);
+
+  // ── URL state: ?orchestrator_id=<websocket-service-id> ────────────────────
+  // Lets the user share / bookmark a training session and survive page
+  // reloads. We pin the *service id* (stable across React re-renders) instead
+  // of the local `managerId::appId` handle. On mount we look up the matching
+  // orchestrator in `orchestrators` and select it; when no orchestrator with
+  // that id is found yet, we keep the URL value and retry once the list loads.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const urlOrchestratorId = useMemo(() => {
+    const q = location.search.startsWith('?') ? location.search.slice(1) : location.search;
+    return new URLSearchParams(q).get('orchestrator_id');
+  }, [location.search]);
+  const initialUrlOrchestratorIdRef = useRef(urlOrchestratorId);
+  const initialStepAppliedRef = useRef(false);
+
+  // When `orchestrators` finally contains an entry matching the URL's
+  // ?orchestrator_id, auto-select it and (on first match only) jump straight
+  // to step 2 (Select Apps). After the initial selection the URL only follows
+  // whatever the user clicks.
+  useEffect(() => {
+    const wsid = urlOrchestratorId;
+    if (!wsid) return;
+    if (selectedOrchestrator) {
+      // already selected — verify URL matches the currently selected orch's svc id below
+      return;
+    }
+    const match = orchestrators.find(o => o.serviceIds?.[0]?.websocket_service_id === wsid);
+    if (match) {
+      setSelectedOrchestrator(`${match.managerId}::${match.appId}`);
+      if (!initialStepAppliedRef.current) {
+        setCurrentStep(2);
+        initialStepAppliedRef.current = true;
+      }
+    }
+  }, [orchestrators, urlOrchestratorId, selectedOrchestrator]);
+
+  // Keep the URL synced with the currently selected orchestrator's
+  // websocket_service_id. Removing the selection clears the param.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search.startsWith('?') ? location.search.slice(1) : location.search);
+    let nextValue: string | null = null;
+    if (selectedOrchestrator) {
+      const o = orchestrators.find(x => `${x.managerId}::${x.appId}` === selectedOrchestrator);
+      const svc = o?.serviceIds?.[0]?.websocket_service_id;
+      if (svc) nextValue = svc;
+    }
+    const current = params.get('orchestrator_id');
+    if (current === nextValue) return;
+    if (nextValue) params.set('orchestrator_id', nextValue);
+    else params.delete('orchestrator_id');
+    const newSearch = params.toString();
+    navigate(
+      { pathname: location.pathname, search: newSearch ? `?${newSearch}` : '' },
+      { replace: true },
+    );
+  }, [selectedOrchestrator, orchestrators, location.pathname, location.search, navigate]);
 
   const [highlightedWorkerIds, setHighlightedWorkerIds] = useState<string[]>([]);
   useEffect(() => {
@@ -689,7 +747,10 @@ const Training: React.FC = () => {
     setOrchestrators(prev => [...prev, {
       managerId,
       appId: pendingAppId,
-      status: 'NOT_STARTED',
+      // Show DEPLOYING (blue pulse) immediately so the row reflects the
+      // ongoing deploy until the next worker-info refresh replaces this
+      // placeholder with the real entry from the manager.
+      status: 'DEPLOYING',
       serviceIds: [],
       artifactId: 'chiron-platform/chiron-orchestrator',
       displayName: undefined,
@@ -741,7 +802,10 @@ const Training: React.FC = () => {
     setTrainers(prev => [...prev, {
       managerId,
       appId: pendingAppId,
-      status: 'NOT_STARTED',
+      // Show DEPLOYING (blue pulse) immediately so the row reflects the
+      // ongoing deploy until the next worker-info refresh replaces this
+      // placeholder with the real entry from the manager.
+      status: 'DEPLOYING',
       serviceIds: [],
       datasets: optimisticDatasets,
       artifactId: trainerArtifactArg || 'chiron-platform/tabula-trainer',
@@ -932,24 +996,36 @@ const Training: React.FC = () => {
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
     const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
     if (!trainer || trainer.status !== 'RUNNING') return;
-    try {
-      setIsLoadingRegisteredTrainers(true);
-      const orchestratorServiceId = orchestrator.serviceIds[0].websocket_service_id;
-      // NOTE: kwarg is `trainer_service_id`, NOT `service_id`. Hypha's HTTP
-      // gateway reserves `service_id` for the URL path placeholder, so naming
-      // the body field that way makes the orchestrator reject the call with
-      // "Missing required argument: 'service_id'". Same applies to remove_trainer.
-      await callHyphaService(orchestratorServiceId, 'add_trainer', {
-        trainer_service_id: trainer.serviceIds[0].websocket_service_id,
-        orchestrator_service_id: orchestratorServiceId,
-      }, { timeoutMs: 30000 });
-      const registeredServiceIds = await callHyphaService<string[]>(orchestratorServiceId, 'list_trainers', {});
-      setRegisteredTrainers(registeredServiceIds);
-    } catch (error) {
-      setErrorPopupMessage('Failed to Register Trainer');
-      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-      setShowErrorPopup(true);
-    } finally { setIsLoadingRegisteredTrainers(false); }
+    const orchestratorServiceId = orchestrator.serviceIds[0].websocket_service_id;
+    const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
+    if (!orchestratorServiceId || !trainerServiceId) return;
+    // Optimistic: flip the checkbox immediately so the UI feels snappy. The
+    // HTTP add_trainer + list_trainers calls run in the background; on
+    // failure we revert and pop an error.
+    const prev = registeredTrainers;
+    if (!prev.includes(trainerServiceId)) {
+      setRegisteredTrainers([...prev, trainerServiceId]);
+    }
+    (async () => {
+      try {
+        // NOTE: kwarg is `trainer_service_id`, NOT `service_id`. Hypha's HTTP
+        // gateway reserves `service_id` for the URL path placeholder, so naming
+        // the body field that way makes the orchestrator reject the call with
+        // "Missing required argument: 'service_id'". Same applies to remove_trainer.
+        await callHyphaService(orchestratorServiceId, 'add_trainer', {
+          trainer_service_id: trainerServiceId,
+          orchestrator_service_id: orchestratorServiceId,
+        }, { timeoutMs: 30000 });
+        // Reconcile against the orchestrator's authoritative list.
+        const registeredServiceIds = await callHyphaService<string[]>(orchestratorServiceId, 'list_trainers', {});
+        setRegisteredTrainers(registeredServiceIds);
+      } catch (error) {
+        setRegisteredTrainers(prev);
+        setErrorPopupMessage('Failed to Register Trainer');
+        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
+        setShowErrorPopup(true);
+      }
+    })();
   };
 
   const unregisterTrainer = async (trainerId: string) => {
@@ -958,26 +1034,47 @@ const Training: React.FC = () => {
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
     const trainer = trainers.find(t => `${t.managerId}::${t.appId}` === trainerId);
     if (!trainer || trainer.status !== 'RUNNING') return;
-    try {
-      setIsLoadingRegisteredTrainers(true);
-      const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-      await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainer.serviceIds[0].websocket_service_id }, { timeoutMs: 30000 });
-      const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
-      setRegisteredTrainers(registeredServiceIds);
-    } catch { /* silent */ } finally { setIsLoadingRegisteredTrainers(false); }
+    const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+    const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
+    if (!orchSvcId || !trainerServiceId) return;
+    // Optimistic: drop the trainer from the registered list immediately.
+    const prev = registeredTrainers;
+    setRegisteredTrainers(prev.filter(s => s !== trainerServiceId));
+    (async () => {
+      try {
+        await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainerServiceId }, { timeoutMs: 30000 });
+        const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
+        setRegisteredTrainers(registeredServiceIds);
+      } catch (error) {
+        setRegisteredTrainers(prev);
+        setErrorPopupMessage('Failed to Unregister Trainer');
+        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
+        setShowErrorPopup(true);
+      }
+    })();
   };
 
   const unregisterRemoteTrainer = async (trainerServiceId: string) => {
     if (!selectedOrchestrator) return;
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-    try {
-      setIsLoadingRegisteredTrainers(true);
-      const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-      await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainerServiceId }, { timeoutMs: 30000 });
-      const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
-      setRegisteredTrainers(registeredServiceIds);
-    } catch { /* silent */ } finally { setIsLoadingRegisteredTrainers(false); }
+    const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+    if (!orchSvcId) return;
+    // Optimistic: drop immediately, revert on error.
+    const prev = registeredTrainers;
+    setRegisteredTrainers(prev.filter(s => s !== trainerServiceId));
+    (async () => {
+      try {
+        await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainerServiceId }, { timeoutMs: 30000 });
+        const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
+        setRegisteredTrainers(registeredServiceIds);
+      } catch (error) {
+        setRegisteredTrainers(prev);
+        setErrorPopupMessage('Failed to Unregister Trainer');
+        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
+        setShowErrorPopup(true);
+      }
+    })();
   };
 
   useEffect(() => {
@@ -2077,6 +2174,23 @@ const Training: React.FC = () => {
                                     {isPendingRemove && (
                                       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700">
                                         <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />Leaving after this round
+                                        <button
+                                          type="button"
+                                          onClick={async (e) => {
+                                            // Re-call add_trainer; the orchestrator discards the
+                                            // pending_removal entry for this service_id so the
+                                            // trainer stays in the federation past this round.
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            await registerTrainer(trainerId);
+                                          }}
+                                          title="Cancel: keep this trainer in the federation"
+                                          className="ml-1 -mr-0.5 w-3.5 h-3.5 inline-flex items-center justify-center rounded-full text-orange-700 hover:bg-orange-200 transition-colors"
+                                        >
+                                          <svg viewBox="0 0 12 12" className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth={2}>
+                                            <path strokeLinecap="round" d="M3 3l6 6M9 3l-6 6" />
+                                          </svg>
+                                        </button>
                                       </span>
                                     )}
                                     {isPendingAdd && (
@@ -2216,6 +2330,7 @@ const Training: React.FC = () => {
                         onStart={startTraining}
                         isPreparingTraining={isPreparingTraining}
                         isTraining={isActivelyTraining}
+                        hasHistory={!!trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0)}
                         onConfigChange={(numRounds, perRoundTimeoutMinutes) => setTrainingConfigSummary({ numRounds, perRoundTimeoutMinutes })}
                       />
                     </div>
@@ -2252,9 +2367,6 @@ const Training: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <div className="w-2.5 h-2.5 bg-blue-500 rounded-full animate-pulse" />
                       <h3 className="font-semibold text-gray-900 text-sm">Training in Progress</h3>
-                      {trainingResumed && (
-                        <span className="text-xs font-medium text-violet-700 bg-violet-100 px-2 py-0.5 rounded-full" title="Training was started outside this browser session and is being monitored">Resumed</span>
-                      )}
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{trainingStatus.stage ? STAGE_LABELS[trainingStatus.stage] : 'Idle'}</span>
