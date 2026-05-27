@@ -211,6 +211,31 @@ const Training: React.FC = () => {
   const [workerTimers, setWorkerTimers] = useState<Record<string, NodeJS.Timeout>>({});
   const [datasetTimers, setDatasetTimers] = useState<Record<string, NodeJS.Timeout>>({});
 
+  // Local-only set of trainer service IDs the user has clicked-to-leave while
+  // a training is active. The trainer stays in registeredTrainers (so its
+  // checkbox stays checked) and the UI renders a "Leaving after this round"
+  // badge until the orchestrator confirms (server-side pending_removal) or
+  // the user cancels via the badge's X.
+  const [pendingLocalRemovals, setPendingLocalRemovals] = useState<Set<string>>(new Set());
+  // Prune local pending-removal entries the moment the orchestrator confirms
+  // (server pending_removal includes the svc id) so we don't double-track.
+  // Also drop everything once training ends — the trainer either left the
+  // federation or didn't, and the local marker is now meaningless.
+  useEffect(() => {
+    if (pendingLocalRemovals.size === 0) return;
+    if (!isTraining) {
+      setPendingLocalRemovals(new Set());
+      return;
+    }
+    const serverPending = new Set(trainingStatus?.pending_removal ?? []);
+    let changed = false;
+    const next = new Set(pendingLocalRemovals);
+    for (const svc of pendingLocalRemovals) {
+      if (serverPending.has(svc)) { next.delete(svc); changed = true; }
+    }
+    if (changed) setPendingLocalRemovals(next);
+  }, [isTraining, trainingStatus?.pending_removal, pendingLocalRemovals]);
+
   const [isTraining, setIsTraining] = useState(false);
   // True when the current training run was detected (externally started), not launched by this UI session.
   const [trainingResumed, setTrainingResumed] = useState(false);
@@ -1091,16 +1116,35 @@ const Training: React.FC = () => {
     const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
     const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
     if (!orchSvcId || !trainerServiceId) return;
-    // Optimistic: drop the trainer immediately. We skip an eager
-    // list_trainers reconcile to avoid racey re-flips; the periodic fetch
-    // keeps registeredTrainers authoritative.
+    // If training is active and this trainer is currently busy (in the
+    // middle of a round), the orchestrator can't drop it immediately — it
+    // marks the trainer for removal at the end of the round. Reflect that
+    // in the UI by keeping the checkbox checked and showing "Leaving after
+    // this round" right away (optimistic pending_removal), rather than
+    // pretending the trainer was un-registered.
+    const isBusyMidTraining = isTraining && trainer.isBusy === true;
     const prev = registeredTrainers;
-    setRegisteredTrainers(prev.filter(s => s !== trainerServiceId));
+    if (isBusyMidTraining) {
+      setPendingLocalRemovals(s => {
+        const next = new Set(s); next.add(trainerServiceId); return next;
+      });
+    } else {
+      // Idle path: drop immediately. No eager list_trainers reconcile
+      // (race-prone); the periodic fetch keeps things in sync.
+      setRegisteredTrainers(prev.filter(s => s !== trainerServiceId));
+    }
     (async () => {
       try {
         await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainerServiceId }, { timeoutMs: 30000 });
       } catch (error) {
-        setRegisteredTrainers(prev);
+        // Roll back the local optimistic change so the UI shows the correct state.
+        if (isBusyMidTraining) {
+          setPendingLocalRemovals(s => {
+            const next = new Set(s); next.delete(trainerServiceId); return next;
+          });
+        } else {
+          setRegisteredTrainers(prev);
+        }
         setErrorPopupMessage('Failed to Unregister Trainer');
         setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
         setShowErrorPopup(true);
@@ -2205,7 +2249,10 @@ const Training: React.FC = () => {
                               && participatedTrainerIds.size > 0
                               && !participatedTrainerIds.has(trainerServiceId);
                             const isPendingRemove = isTraining && isRegistered && !!trainerServiceId
-                              && (trainingStatus?.pending_removal ?? []).includes(trainerServiceId);
+                              && (
+                                (trainingStatus?.pending_removal ?? []).includes(trainerServiceId)
+                                || pendingLocalRemovals.has(trainerServiceId)
+                              );
                             const manager = managers.find(m => m.serviceId === trainer.managerId);
                             const geo = manager?.workerInfo?.worker_info?.geo_location;
                             const datasetNames = (Object.values(trainer.datasets).map((d: any) => d.name || Object.keys(trainer.datasets).find(k => trainer.datasets[k] === d)).filter(Boolean) as string[]).sort((a, b) => a.localeCompare(b));
@@ -2233,8 +2280,16 @@ const Training: React.FC = () => {
                                             // Re-call add_trainer; the orchestrator discards the
                                             // pending_removal entry for this service_id so the
                                             // trainer stays in the federation past this round.
+                                            // Also clear any optimistic local pending-removal
+                                            // marker so the UI snaps back immediately.
                                             e.preventDefault();
                                             e.stopPropagation();
+                                            if (trainerServiceId) {
+                                              setPendingLocalRemovals(s => {
+                                                if (!s.has(trainerServiceId)) return s;
+                                                const next = new Set(s); next.delete(trainerServiceId); return next;
+                                              });
+                                            }
                                             await registerTrainer(trainerId);
                                           }}
                                           title="Cancel: keep this trainer in the federation"
