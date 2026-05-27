@@ -746,17 +746,17 @@ const Training: React.FC = () => {
     try {
       const workerInfo: WorkerInfo = await callHyphaService(serviceId, 'get_worker_info', {}, { timeoutMs: 10000 });
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: true, workerInfo } : m));
-      // Merge — preserve optimistic in-flight states so the row doesn't
-      // flicker between e.g. RUNNING → DELETING → RUNNING → DELETING as the
-      // polling races the user click. Rules:
+      // Merge — preserve only the pending-* placeholder optimism. The
+      // DELETING optimism set by the user click is a *one-tick* flip:
+      // whatever status the worker returns on the next refresh wins. If
+      // the worker says the app is still RUNNING we revert, if it says
+      // DELETING we agree, if it stops listing the app we drop the row.
+      // Rules:
       //   • pending-* placeholders survive until at least one real entry
       //     arrives for this manager (then the placeholder is dropped, real
       //     entries take over).
-      //   • While the worker still lists an app whose existing row is
-      //     DELETING, keep the row at DELETING — the brief window between
-      //     "user clicked Delete" and "worker actually forgot the app".
-      //   • Once the worker stops listing the app, drop the row — the
-      //     delete is complete and there is nothing to keep showing.
+      //   • Real entries take whatever status the worker reports.
+      //   • Rows the worker no longer lists are dropped.
       setOrchestrators(prev => {
         const otherMgrs = prev.filter(o => o.managerId !== managerId);
         const sameMgr = prev.filter(o => o.managerId === managerId);
@@ -774,8 +774,7 @@ const Training: React.FC = () => {
           }
           const real = realByAppId.get(ex.appId);
           if (!real) continue; // worker forgot the app — drop the row
-          // Real entry exists. Hold DELETING optimistic state.
-          next.push(ex.status === 'DELETING' ? { ...real, status: 'DELETING' } : real);
+          next.push(real);
           merged.add(ex.appId);
         }
         for (const [appId, real] of realByAppId) {
@@ -799,7 +798,7 @@ const Training: React.FC = () => {
           }
           const real = realByAppId.get(ex.appId);
           if (!real) continue; // worker forgot the app — drop the row
-          next.push(ex.status === 'DELETING' ? { ...real, status: 'DELETING' } : real);
+          next.push(real);
           merged.add(ex.appId);
         }
         for (const [appId, real] of realByAppId) {
