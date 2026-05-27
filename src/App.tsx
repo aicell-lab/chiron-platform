@@ -80,7 +80,7 @@ const AppContent: React.FC = () => {
       />
       <main>
         <Routes>
-          <Route path="/" element={<Navigate to="/training" replace />} />
+          <Route path="/" element={<Navigate to="/models" replace />} />
           <Route path="/resources/:id" element={<div className="container mx-auto px-4"><ResourceDetails /></div>} />
           <Route path="/about" element={<div className="container mx-auto px-4"><About /></div>} />
           <Route path="/workers" element={<div className="container mx-auto px-4"><ResourceGrid type="worker" /></div>} />
