@@ -98,9 +98,18 @@ interface ManagerConnection {
 
 const workerClientIdOf = (serviceId: string): string => {
   // serviceId is "workspace/<workerClientId>-<replicaId>:chiron-manager"
+  // OR the wildcard form "workspace/<workerClientId>-*:chiron-manager".
   const stripped = serviceId.includes('/') ? serviceId.slice(serviceId.indexOf('/') + 1) : serviceId;
   return stripped.split(':')[0].split('-')[0];
 };
+
+/** Hypha routes a wildcard `<clientId>-*:service` URI to ANY live replica of
+ *  that service on the worker. Storing this form as the canonical manager
+ *  service id means our HTTP calls keep landing on whichever chiron-manager
+ *  replica Ray Serve happens to have alive — no need to track replica
+ *  rotations. Verified empirically against the HTTP gateway. */
+const managerWildcardId = (workspace: string, workerClientId: string): string =>
+  `${workspace}/${workerClientId}-*:chiron-manager`;
 
 interface OrchestratorApp {
   managerId: string;
@@ -612,22 +621,24 @@ const Training: React.FC = () => {
   // per-manager HTTP completion triggers its own re-render and the Federation
   // Map appeared to load workers one-by-one over a couple of seconds.
   useEffect(() => {
-    // Index everything currently discovered by *stable* workerClientId.
-    // Many manager replicas can come and go for the same physical worker —
-    // we keep one row per worker and just swap its serviceId on rotation.
-    const discoveredByClient = new Map<string, { ws: string; serviceId: string }>();
+    // Index discovery by *stable* workerClientId. We never store the actual
+    // chiron-manager replica id; we use the wildcard form
+    // `<ws>/<workerClientId>-*:chiron-manager` as the canonical serviceId so
+    // Hypha routes every HTTP call to whichever replica is currently live.
+    // That removes the entire "rotated" migration path the old code needed.
+    const discoveredByClient = new Map<string, { ws: string; wildcardId: string }>();
     for (const ws of observedWorkspaces) {
       for (const w of (discoveredWorkers[ws] || [])) {
         const cid = workerClientIdOf(w.serviceId);
         if (cid && !discoveredByClient.has(cid)) {
-          discoveredByClient.set(cid, { ws, serviceId: w.serviceId });
+          discoveredByClient.set(cid, { ws, wildcardId: managerWildcardId(ws, cid) });
         }
       }
     }
 
     // Drop managers whose workerClientId is no longer discovered (worker
-    // truly removed). A pure replica rotation is NOT a removal — the new
-    // entry will land under the same workerClientId below.
+    // truly removed). A pure replica rotation is invisible to us because
+    // the wildcard id matches both old and new replicas.
     const gone = managers.filter(m => !discoveredByClient.has(m.workerClientId));
     if (gone.length > 0) {
       const goneIds = gone.map(m => m.serviceId);
@@ -646,60 +657,14 @@ const Training: React.FC = () => {
       });
     }
 
-    // Migrate workers whose chiron-manager replica id changed (the most
-    // common case: Ray Serve rotated the manager actor after create_*).
-    // We keep the row in place and only point it at the new serviceId,
-    // updating dependent state (orchestrators, trainers, polling timers).
-    const rotated: Array<{ oldId: string; newId: string; ws: string }> = [];
-    for (const m of managers) {
-      const d = discoveredByClient.get(m.workerClientId);
-      if (d && d.serviceId !== m.serviceId) {
-        rotated.push({ oldId: m.serviceId, newId: d.serviceId, ws: d.ws });
-      }
-    }
-    if (rotated.length > 0) {
-      const idMap = new Map(rotated.map(r => [r.oldId, r.newId]));
-      setManagers(prev => prev.map(m => {
-        const newId = idMap.get(m.serviceId);
-        return newId ? { ...m, serviceId: newId } : m;
-      }));
-      setOrchestrators(prev => prev.map(o => ({
-        ...o,
-        managerId: idMap.get(o.managerId) || o.managerId,
-      })));
-      setTrainers(prev => prev.map(t => ({
-        ...t,
-        managerId: idMap.get(t.managerId) || t.managerId,
-      })));
-      // Restart polling timers under the new id; clear out old ones.
-      setWorkerTimers(prev => {
-        const n = { ...prev };
-        for (const { oldId } of rotated) {
-          if (n[oldId]) clearTimeout(n[oldId]);
-          delete n[oldId];
-        }
-        return n;
-      });
-      setDatasetTimers(prev => {
-        const n = { ...prev };
-        for (const { oldId } of rotated) {
-          if (n[oldId]) clearTimeout(n[oldId]);
-          delete n[oldId];
-        }
-        return n;
-      });
-      for (const { newId } of rotated) {
-        scheduleWorkerRefresh(newId);
-        scheduleDatasetRefresh(newId);
-      }
-    }
-
     // Batched first-load for genuinely new workers (workerClientIds we
     // haven't seen before).
     const knownClientIds = new Set(managers.map(m => m.workerClientId));
     const newOnes: Array<{ ws: string; serviceId: string; clientId: string }> = [];
     for (const [cid, d] of discoveredByClient) {
-      if (!knownClientIds.has(cid)) newOnes.push({ ...d, clientId: cid });
+      if (!knownClientIds.has(cid)) {
+        newOnes.push({ ws: d.ws, serviceId: d.wildcardId, clientId: cid });
+      }
     }
     if (newOnes.length === 0) return;
 
