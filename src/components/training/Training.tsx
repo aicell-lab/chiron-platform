@@ -666,25 +666,72 @@ const Training: React.FC = () => {
     try {
       const workerInfo: WorkerInfo = await callHyphaService(serviceId, 'get_worker_info', {}, { timeoutMs: 10000 });
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: true, workerInfo } : m));
+      // Merge — preserve optimistic in-flight states so the row doesn't
+      // flicker between e.g. RUNNING → DELETING → RUNNING → DELETING as the
+      // polling races the user click. Rules:
+      //   • pending-* placeholders survive until at least one real entry
+      //     arrives for this manager (then the placeholder is dropped, real
+      //     entries take over).
+      //   • Rows whose current status is DELETING stay DELETING even if the
+      //     worker still reports the underlying app as RUNNING. The row
+      //     fully disappears when the worker no longer lists it.
       setOrchestrators(prev => {
-        const filtered = prev.filter(o => o.managerId !== managerId);
-        const newO: OrchestratorApp[] = [];
-        if (workerInfo.orchestrators_status) {
-          for (const [appId, orchStatus] of Object.entries(workerInfo.orchestrators_status)) {
-            newO.push(toOrchestratorApp(managerId, appId, orchStatus));
-          }
+        const otherMgrs = prev.filter(o => o.managerId !== managerId);
+        const sameMgr = prev.filter(o => o.managerId === managerId);
+        const realByAppId = new Map<string, OrchestratorApp>();
+        for (const [appId, orchStatus] of Object.entries(workerInfo.orchestrators_status || {})) {
+          realByAppId.set(appId, toOrchestratorApp(managerId, appId, orchStatus));
         }
-        return [...filtered, ...newO];
+        const next: OrchestratorApp[] = [];
+        const merged = new Set<string>();
+        for (const ex of sameMgr) {
+          if (ex.appId.startsWith('pending-')) {
+            // Keep the placeholder only while no real entries exist yet.
+            if (realByAppId.size === 0) next.push(ex);
+            continue;
+          }
+          const real = realByAppId.get(ex.appId);
+          if (!real) {
+            // Worker no longer lists this app — keep DELETING row visible so
+            // the user sees their click sticking; otherwise drop the row.
+            if (ex.status === 'DELETING') next.push(ex);
+            continue;
+          }
+          // Real entry exists. Hold DELETING optimistic state.
+          next.push(ex.status === 'DELETING' ? { ...real, status: 'DELETING' } : real);
+          merged.add(ex.appId);
+        }
+        for (const [appId, real] of realByAppId) {
+          if (!merged.has(appId)) next.push(real);
+        }
+        return [...otherMgrs, ...next];
       });
       setTrainers(prev => {
-        const filtered = prev.filter(t => t.managerId !== managerId);
-        const newT: TrainerApp[] = [];
-        if (workerInfo.trainers_status) {
-          for (const [appId, trainerStatus] of Object.entries(workerInfo.trainers_status)) {
-            newT.push(toTrainerApp(managerId, appId, trainerStatus));
-          }
+        const otherMgrs = prev.filter(t => t.managerId !== managerId);
+        const sameMgr = prev.filter(t => t.managerId === managerId);
+        const realByAppId = new Map<string, TrainerApp>();
+        for (const [appId, trainerStatus] of Object.entries(workerInfo.trainers_status || {})) {
+          realByAppId.set(appId, toTrainerApp(managerId, appId, trainerStatus));
         }
-        return [...filtered, ...newT];
+        const next: TrainerApp[] = [];
+        const merged = new Set<string>();
+        for (const ex of sameMgr) {
+          if (ex.appId.startsWith('pending-')) {
+            if (realByAppId.size === 0) next.push(ex);
+            continue;
+          }
+          const real = realByAppId.get(ex.appId);
+          if (!real) {
+            if (ex.status === 'DELETING') next.push(ex);
+            continue;
+          }
+          next.push(ex.status === 'DELETING' ? { ...real, status: 'DELETING' } : real);
+          merged.add(ex.appId);
+        }
+        for (const [appId, real] of realByAppId) {
+          if (!merged.has(appId)) next.push(real);
+        }
+        return [...otherMgrs, ...next];
       });
     } catch (error) {
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: false } : m));
@@ -1005,9 +1052,11 @@ const Training: React.FC = () => {
     const orchestratorServiceId = orchestrator.serviceIds[0].websocket_service_id;
     const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
     if (!orchestratorServiceId || !trainerServiceId) return;
-    // Optimistic: flip the checkbox immediately so the UI feels snappy. The
-    // HTTP add_trainer + list_trainers calls run in the background; on
-    // failure we revert and pop an error.
+    // Optimistic: flip the checkbox immediately. add_trainer runs in the
+    // background; on failure we revert and pop an error. We deliberately
+    // skip an eager list_trainers reconcile here because it can race the
+    // orchestrator's internal state and briefly un-check the box. The
+    // periodic fetch below keeps registeredTrainers authoritative.
     const prev = registeredTrainers;
     if (!prev.includes(trainerServiceId)) {
       setRegisteredTrainers([...prev, trainerServiceId]);
@@ -1015,16 +1064,11 @@ const Training: React.FC = () => {
     (async () => {
       try {
         // NOTE: kwarg is `trainer_service_id`, NOT `service_id`. Hypha's HTTP
-        // gateway reserves `service_id` for the URL path placeholder, so naming
-        // the body field that way makes the orchestrator reject the call with
-        // "Missing required argument: 'service_id'". Same applies to remove_trainer.
+        // gateway reserves `service_id` for the URL path placeholder.
         await callHyphaService(orchestratorServiceId, 'add_trainer', {
           trainer_service_id: trainerServiceId,
           orchestrator_service_id: orchestratorServiceId,
         }, { timeoutMs: 30000 });
-        // Reconcile against the orchestrator's authoritative list.
-        const registeredServiceIds = await callHyphaService<string[]>(orchestratorServiceId, 'list_trainers', {});
-        setRegisteredTrainers(registeredServiceIds);
       } catch (error) {
         setRegisteredTrainers(prev);
         setErrorPopupMessage('Failed to Register Trainer');
@@ -1043,14 +1087,14 @@ const Training: React.FC = () => {
     const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
     const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
     if (!orchSvcId || !trainerServiceId) return;
-    // Optimistic: drop the trainer from the registered list immediately.
+    // Optimistic: drop the trainer immediately. We skip an eager
+    // list_trainers reconcile to avoid racey re-flips; the periodic fetch
+    // keeps registeredTrainers authoritative.
     const prev = registeredTrainers;
     setRegisteredTrainers(prev.filter(s => s !== trainerServiceId));
     (async () => {
       try {
         await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainerServiceId }, { timeoutMs: 30000 });
-        const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
-        setRegisteredTrainers(registeredServiceIds);
       } catch (error) {
         setRegisteredTrainers(prev);
         setErrorPopupMessage('Failed to Unregister Trainer');
@@ -1066,14 +1110,13 @@ const Training: React.FC = () => {
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
     const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
     if (!orchSvcId) return;
-    // Optimistic: drop immediately, revert on error.
+    // Optimistic: drop immediately, revert on error. No eager list_trainers
+    // reconcile (race-prone); the periodic fetch keeps things in sync.
     const prev = registeredTrainers;
     setRegisteredTrainers(prev.filter(s => s !== trainerServiceId));
     (async () => {
       try {
         await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainerServiceId }, { timeoutMs: 30000 });
-        const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
-        setRegisteredTrainers(registeredServiceIds);
       } catch (error) {
         setRegisteredTrainers(prev);
         setErrorPopupMessage('Failed to Unregister Trainer');
