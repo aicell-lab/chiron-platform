@@ -215,8 +215,19 @@ const Training: React.FC = () => {
   // a training is active. The trainer stays in registeredTrainers (so its
   // checkbox stays checked) and the UI renders a "Leaving after this round"
   // badge until the orchestrator confirms (server-side pending_removal) or
-  // the user cancels via the badge's X.
+  // the user cancels via the badge's X. The reconcile useEffect lives below,
+  // after the isTraining + trainingStatus declarations.
   const [pendingLocalRemovals, setPendingLocalRemovals] = useState<Set<string>>(new Set());
+
+  const [isTraining, setIsTraining] = useState(false);
+  // True when the current training run was detected (externally started), not launched by this UI session.
+  const [trainingResumed, setTrainingResumed] = useState(false);
+  const [trainingOrchestratorId, setTrainingOrchestratorId] = useState<string | null>(null);
+  const [trainingConfigCollapsed, setTrainingConfigCollapsed] = useState(false);
+  const [trainingConfigSummary, setTrainingConfigSummary] = useState({ numRounds: 5, perRoundTimeoutMinutes: 20 });
+  const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
+  const [trainingHistory, setTrainingHistory] = useState<TrainingHistory | null>(null);
+
   // Prune local pending-removal entries the moment the orchestrator confirms
   // (server pending_removal includes the svc id) so we don't double-track.
   // Also drop everything once training ends — the trainer either left the
@@ -235,15 +246,6 @@ const Training: React.FC = () => {
     }
     if (changed) setPendingLocalRemovals(next);
   }, [isTraining, trainingStatus?.pending_removal, pendingLocalRemovals]);
-
-  const [isTraining, setIsTraining] = useState(false);
-  // True when the current training run was detected (externally started), not launched by this UI session.
-  const [trainingResumed, setTrainingResumed] = useState(false);
-  const [trainingOrchestratorId, setTrainingOrchestratorId] = useState<string | null>(null);
-  const [trainingConfigCollapsed, setTrainingConfigCollapsed] = useState(false);
-  const [trainingConfigSummary, setTrainingConfigSummary] = useState({ numRounds: 5, perRoundTimeoutMinutes: 20 });
-  const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
-  const [trainingHistory, setTrainingHistory] = useState<TrainingHistory | null>(null);
   const [registeredTrainers, setRegisteredTrainers] = useState<string[]>([]);
   const [isLoadingRegisteredTrainers, setIsLoadingRegisteredTrainers] = useState(false);
   const [isPreparingTraining, setIsPreparingTraining] = useState(false);
