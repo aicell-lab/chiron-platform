@@ -509,16 +509,25 @@ const Training: React.FC = () => {
         if (clientId) workerByClientId[clientId] = { name: s.name, description: s.description };
       }
       // Each chiron-manager bare id looks like "<workerClientId>-<managerClientId>:chiron-manager".
+      // We expose the *wildcard* form `<workerClientId>-*:chiron-manager` as
+      // the canonical serviceId everywhere — Hypha routes any call to it to
+      // whichever live manager replica exists on that worker, which keeps
+      // worker rows stable across Ray Serve replica rotation. Dedup by
+      // workerClientId so we don't emit the same worker twice if more than
+      // one manager replica is briefly visible during a rotation.
       const workers: DiscoveredWorker[] = [];
+      const seenClientIds = new Set<string>();
       for (const s of services) {
         if (!s.id || typeof s.id !== 'string') continue;
         if (!s.id.endsWith(':chiron-manager') || s.id.includes('rtc')) continue;
         const fullClient = stripWs(s.id).split(':')[0];
         const workerClientId = fullClient.split('-')[0];
+        if (!workerClientId || seenClientIds.has(workerClientId)) continue;
+        seenClientIds.add(workerClientId);
         const w = workerByClientId[workerClientId];
         const fallbackName = `Chiron Worker (${workerClientId.slice(0, 6)})`;
         workers.push({
-          serviceId: qualify(s.id), // canonical "workspace/client:service" — HTTP target
+          serviceId: managerWildcardId(workspace, workerClientId), // wildcard HTTP target
           name: w?.name || fallbackName,
           description: w?.description || '',
           hasChironManager: true,
