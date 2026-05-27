@@ -699,9 +699,11 @@ const Training: React.FC = () => {
       //   • pending-* placeholders survive until at least one real entry
       //     arrives for this manager (then the placeholder is dropped, real
       //     entries take over).
-      //   • Rows whose current status is DELETING stay DELETING even if the
-      //     worker still reports the underlying app as RUNNING. The row
-      //     fully disappears when the worker no longer lists it.
+      //   • While the worker still lists an app whose existing row is
+      //     DELETING, keep the row at DELETING — the brief window between
+      //     "user clicked Delete" and "worker actually forgot the app".
+      //   • Once the worker stops listing the app, drop the row — the
+      //     delete is complete and there is nothing to keep showing.
       setOrchestrators(prev => {
         const otherMgrs = prev.filter(o => o.managerId !== managerId);
         const sameMgr = prev.filter(o => o.managerId === managerId);
@@ -718,12 +720,7 @@ const Training: React.FC = () => {
             continue;
           }
           const real = realByAppId.get(ex.appId);
-          if (!real) {
-            // Worker no longer lists this app — keep DELETING row visible so
-            // the user sees their click sticking; otherwise drop the row.
-            if (ex.status === 'DELETING') next.push(ex);
-            continue;
-          }
+          if (!real) continue; // worker forgot the app — drop the row
           // Real entry exists. Hold DELETING optimistic state.
           next.push(ex.status === 'DELETING' ? { ...real, status: 'DELETING' } : real);
           merged.add(ex.appId);
@@ -748,10 +745,7 @@ const Training: React.FC = () => {
             continue;
           }
           const real = realByAppId.get(ex.appId);
-          if (!real) {
-            if (ex.status === 'DELETING') next.push(ex);
-            continue;
-          }
+          if (!real) continue; // worker forgot the app — drop the row
           next.push(ex.status === 'DELETING' ? { ...real, status: 'DELETING' } : real);
           merged.add(ex.appId);
         }
