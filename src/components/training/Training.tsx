@@ -569,6 +569,28 @@ const Training: React.FC = () => {
   // deploy on the same single-threaded manager actor.
   const mutatingManagersRef = React.useRef<Set<string>>(new Set());
 
+  // appIds the user just deleted. BioEngine's stop_app is asynchronous —
+  // it spawns a background _undeploy_application task and returns
+  // immediately, so the app lingers in _deployed_applications (with status
+  // DELETING) for several seconds. Without this, the polling refresh would
+  // see the lingering entry and resurrect the row right after we dropped
+  // it. We suppress the appId for 30s; after that the BioEngine teardown
+  // is reliably complete and we trust the worker again.
+  const recentlyDeletedAppIdsRef = React.useRef<Map<string, number>>(new Map());
+  const RECENTLY_DELETED_TTL_MS = 30000;
+  const isRecentlyDeleted = (appId: string): boolean => {
+    const t = recentlyDeletedAppIdsRef.current.get(appId);
+    if (t === undefined) return false;
+    if (Date.now() > t) {
+      recentlyDeletedAppIdsRef.current.delete(appId);
+      return false;
+    }
+    return true;
+  };
+  const markRecentlyDeleted = (appId: string): void => {
+    recentlyDeletedAppIdsRef.current.set(appId, Date.now() + RECENTLY_DELETED_TTL_MS);
+  };
+
   const withManagerLock = async <T,>(managerId: string, fn: () => Promise<T>): Promise<T> => {
     mutatingManagersRef.current.add(managerId);
     try {
@@ -762,6 +784,11 @@ const Training: React.FC = () => {
         const sameMgr = prev.filter(o => o.managerId === managerId);
         const realByAppId = new Map<string, OrchestratorApp>();
         for (const [appId, orchStatus] of Object.entries(workerInfo.orchestrators_status || {})) {
+          // Suppress appIds the user just deleted — BioEngine's async
+          // _undeploy_application keeps the entry around with a DELETING
+          // status for several seconds, which would otherwise resurrect
+          // the row right after we dropped it.
+          if (isRecentlyDeleted(appId)) continue;
           realByAppId.set(appId, toOrchestratorApp(managerId, appId, orchStatus));
         }
         const next: OrchestratorApp[] = [];
@@ -787,6 +814,7 @@ const Training: React.FC = () => {
         const sameMgr = prev.filter(t => t.managerId === managerId);
         const realByAppId = new Map<string, TrainerApp>();
         for (const [appId, trainerStatus] of Object.entries(workerInfo.trainers_status || {})) {
+          if (isRecentlyDeleted(appId)) continue;
           realByAppId.set(appId, toTrainerApp(managerId, appId, trainerStatus));
         }
         const next: TrainerApp[] = [];
@@ -1015,6 +1043,7 @@ const Training: React.FC = () => {
   const performRemoveOrchestrator = async (managerId: string, force: boolean) => {
     const orchestrator = orchestrators.find(o => o.managerId === managerId);
     if (!orchestrator) return;
+    markRecentlyDeleted(orchestrator.appId);
     setOrchestrators(prev => prev.map(o => o.managerId === managerId ? { ...o, status: 'DELETING' } : o));
     try {
       const callerId = user?.id as string | undefined;
@@ -1041,6 +1070,7 @@ const Training: React.FC = () => {
       const trainerServiceId = trainer.serviceIds[0]?.websocket_service_id;
       if (registeredTrainers.includes(trainerServiceId)) { await unregisterTrainer(trainerId); }
     }
+    markRecentlyDeleted(appId);
     setTrainers(prev => prev.map(t => t.managerId === managerId && t.appId === appId ? { ...t, status: 'DELETING' } : t));
     try {
       const callerId = user?.id as string | undefined;
@@ -1171,8 +1201,22 @@ const Training: React.FC = () => {
     // round" right away (optimistic pending_removal). We deliberately do
     // NOT gate on trainer.isBusy: that field is polled every 10s and dips
     // false in the gap between rounds, so gating on it made the badge
-    // disappear half the time. isTraining + isRegistered is sufficient.
-    const isMidTrainingDeregister = isTraining && registeredTrainers.includes(trainerServiceId);
+    // disappear half the time. isTraining + isRegistered is the baseline.
+    //
+    // Exception: a trainer registered mid-training that hasn't done a
+    // round yet ("Joins next round" in the UI) isn't actually busy in the
+    // current round. The orchestrator can drop it cleanly — no
+    // pending_removal needed. Detect via participatedTrainerIds (mirrors
+    // the isPendingAdd badge logic in the JSX below).
+    const isPendingAdd =
+      isTraining
+      && registeredTrainers.includes(trainerServiceId)
+      && participatedTrainerIds.size > 0
+      && !participatedTrainerIds.has(trainerServiceId);
+    const isMidTrainingDeregister =
+      isTraining
+      && registeredTrainers.includes(trainerServiceId)
+      && !isPendingAdd;
     const prev = registeredTrainers;
     if (isMidTrainingDeregister) {
       setPendingLocalRemovals(s => {
@@ -1187,7 +1231,14 @@ const Training: React.FC = () => {
       try {
         await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainerServiceId }, { timeoutMs: 30000 });
       } catch (error) {
-        // Roll back the local optimistic change so the UI shows the correct state.
+        // 404 / "not found" means the trainer was already gone from the
+        // orchestrator (e.g., auto-unregistered after a worker crash or
+        // dropped via end-of-round pending_removal flush in a previous
+        // session). The optimistic local removal is already correct —
+        // treat as success.
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.includes('HTTP 404') || msg.toLowerCase().includes('not found')) return;
+        // Otherwise roll back the local optimistic change.
         if (isMidTrainingDeregister) {
           setPendingLocalRemovals(s => {
             const next = new Set(s); next.delete(trainerServiceId); return next;
@@ -1216,6 +1267,8 @@ const Training: React.FC = () => {
       try {
         await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainerServiceId }, { timeoutMs: 30000 });
       } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.includes('HTTP 404') || msg.toLowerCase().includes('not found')) return;
         setRegisteredTrainers(prev);
         setErrorPopupMessage('Failed to Unregister Trainer');
         setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
@@ -1225,18 +1278,32 @@ const Training: React.FC = () => {
   };
 
   useEffect(() => {
-    const fetchRegisteredTrainers = async () => {
-      if (!selectedOrchestrator) { setRegisteredTrainers([]); return; }
+    let cancelled = false;
+    const fetchRegisteredTrainers = async (showSpinner: boolean) => {
+      if (!selectedOrchestrator) { if (!cancelled) setRegisteredTrainers([]); return; }
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
-      if (!orchestrator || orchestrator.status !== 'RUNNING') { setRegisteredTrainers([]); return; }
+      if (!orchestrator || orchestrator.status !== 'RUNNING') { if (!cancelled) setRegisteredTrainers([]); return; }
       try {
-        setIsLoadingRegisteredTrainers(true);
+        if (showSpinner) setIsLoadingRegisteredTrainers(true);
         const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
         const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
-        setRegisteredTrainers(registeredServiceIds);
-      } catch { setRegisteredTrainers([]); } finally { setIsLoadingRegisteredTrainers(false); }
+        if (!cancelled) setRegisteredTrainers(registeredServiceIds);
+      } catch {
+        // Don't wipe the list on a transient fetch error during periodic
+        // refresh — keep what we have so optimistic state survives.
+        if (showSpinner && !cancelled) setRegisteredTrainers([]);
+      } finally {
+        if (showSpinner && !cancelled) setIsLoadingRegisteredTrainers(false);
+      }
     };
-    fetchRegisteredTrainers();
+    // Initial fetch on selection change (shows the loading spinner).
+    fetchRegisteredTrainers(true);
+    // Periodic re-fetch so stale entries (auto-unregistered by the
+    // orchestrator's ping loop, or flushed at end-of-round) get reconciled
+    // and don't sit in the UI as ghost "selected" checkboxes that 404 when
+    // the user clicks Deselect.
+    const interval = setInterval(() => fetchRegisteredTrainers(false), 10000);
+    return () => { cancelled = true; clearInterval(interval); };
   }, [selectedOrchestrator]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
