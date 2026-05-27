@@ -1118,15 +1118,17 @@ const Training: React.FC = () => {
     const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
     const trainerServiceId = trainer.serviceIds[0].websocket_service_id;
     if (!orchSvcId || !trainerServiceId) return;
-    // If training is active and this trainer is currently busy (in the
-    // middle of a round), the orchestrator can't drop it immediately — it
-    // marks the trainer for removal at the end of the round. Reflect that
-    // in the UI by keeping the checkbox checked and showing "Leaving after
-    // this round" right away (optimistic pending_removal), rather than
-    // pretending the trainer was un-registered.
-    const isBusyMidTraining = isTraining && trainer.isBusy === true;
+    // If training is active and this trainer is part of the running
+    // federation, the orchestrator can't drop it immediately — it marks the
+    // trainer for removal at the end of the round. Reflect that in the UI
+    // by keeping the checkbox checked and showing "Leaving after this
+    // round" right away (optimistic pending_removal). We deliberately do
+    // NOT gate on trainer.isBusy: that field is polled every 10s and dips
+    // false in the gap between rounds, so gating on it made the badge
+    // disappear half the time. isTraining + isRegistered is sufficient.
+    const isMidTrainingDeregister = isTraining && registeredTrainers.includes(trainerServiceId);
     const prev = registeredTrainers;
-    if (isBusyMidTraining) {
+    if (isMidTrainingDeregister) {
       setPendingLocalRemovals(s => {
         const next = new Set(s); next.add(trainerServiceId); return next;
       });
@@ -1140,7 +1142,7 @@ const Training: React.FC = () => {
         await callHyphaService(orchSvcId, 'remove_trainer', { trainer_service_id: trainerServiceId }, { timeoutMs: 30000 });
       } catch (error) {
         // Roll back the local optimistic change so the UI shows the correct state.
-        if (isBusyMidTraining) {
+        if (isMidTrainingDeregister) {
           setPendingLocalRemovals(s => {
             const next = new Set(s); next.delete(trainerServiceId); return next;
           });
