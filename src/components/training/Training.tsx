@@ -445,13 +445,15 @@ const VariabilityView: React.FC<{ scores: number[] | null; nVars?: number }> = (
             const y = padT + plotH - h;
             return <rect key={i} x={x + 0.4} y={y} width={Math.max(0, barW - 0.8)} height={h} rx={0.6} fill="#7ba6c8" />;
           })}
-          {/* Cutoff line + matching x-axis tick + label, in orange. Tick value is the
-              log₁₀ of the cutoff score to match the rest of the axis convention; the
-              actual score sits in the stats strip above. */}
+          {/* Cutoff line + x-axis annotation. The word "cutoff" reads as an
+              annotation in orange (not a numeric tick value); the actual score
+              sits in the stats strip above so no information is lost. Putting a
+              log value here was misread as an axis-tick number adjacent to the
+              suppressed min tick. */}
           {showsCutoff && (
             <>
               <line x1={cutoffX} y1={padT - 4} x2={cutoffX} y2={histH - padB + 3} stroke="#b45309" strokeWidth={1.4} strokeDasharray="3 3" />
-              <text x={cutoffX} y={histH - padB + 14} fontSize={10} fill="#b45309" fontWeight={600} textAnchor="middle">{logCutoff.toFixed(2)}</text>
+              <text x={cutoffX} y={histH - padB + 14} fontSize={10} fill="#b45309" fontWeight={600} textAnchor="middle">cutoff</text>
             </>
           )}
           {/* Axis titles */}
@@ -516,10 +518,20 @@ const UmapView: React.FC<{ coords: number[][] | null; nSamples?: number }> = ({ 
 
   return (
     <div>
-      <div className="grid grid-cols-2 gap-3 text-xs mb-3">
-        <Stat label="points" value={coords.length.toLocaleString()} />
-        <Stat label={nSamples && nSamples > coords.length ? 'subsampled from' : 'cells'} value={(nSamples ?? coords.length).toLocaleString()} />
+      <div className={`grid ${nSamples && nSamples > coords.length ? 'grid-cols-2' : 'grid-cols-1'} gap-3 text-xs mb-2`}>
+        <Stat label="cells" value={(nSamples ?? coords.length).toLocaleString()} />
+        {nSamples && nSamples > coords.length && (
+          <Stat label="UMAP subsample" value={`${coords.length.toLocaleString()} cells`} />
+        )}
       </div>
+      {nSamples && nSamples > coords.length && (
+        <p className="text-[11px] text-gray-500 leading-snug mb-3">
+          UMAP scales super-linearly with cell count, so the data-server fit it on a
+          deterministic random subsample of <strong>{coords.length.toLocaleString()}</strong> cells
+          (out of {nSamples.toLocaleString()}). The PCA step upstream was fit on the
+          full dataset, so the subsample is projected through axes that reflect all cells.
+        </p>
+      )}
       <div className="bg-gray-50 rounded-lg p-2 flex items-center justify-center">
         <div className="relative" style={{ width: canvasW, height: canvasH }}>
           <canvas ref={canvasRef} width={canvasW} height={canvasH} className="block bg-white rounded absolute inset-0" />
