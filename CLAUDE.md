@@ -2,9 +2,11 @@
 
 ## What This Repository Is
 
-**Chiron Platform** is the web frontend and federated orchestration layer described in the Nature Biotechnology manuscript (Ding et al.):
+**Chiron Platform** is the web frontend and federated orchestration layer described in the Ding et al. preprint:
 
-> *"Predictive single cell foundation model for gene regulation and aging with privacy-preserving tabular learning"*
+> *"Toward a privacy-preserving predictive foundation model of single-cell transcriptomics with federated learning and tabular modeling"* — bioRxiv: https://www.biorxiv.org/content/10.1101/2025.01.06.631427v1
+
+The manuscript is under active revision beyond the bioRxiv v1; the local draft in `resources/` may diverge in title, wording, and figures.
 
 The paper introduces **Tabula**, a single-cell foundation model that combines:
 1. **Tabular learning** — treats each cell as a permutation-invariant row of genes (not an ordered sequence), with gene-wise reconstruction loss and cell-wise contrastive loss.
@@ -19,7 +21,7 @@ Chiron is the platform that makes this deployable. It coordinates BioEngine Work
 Work in this repo spans three connected tracks. Treat any of them as in scope:
 
 1. **Platform code** — the React frontend (`src/`) and the BioEngine worker assets (`worker/`) that together form `chiron.aicell.io`.
-2. **Manuscript writing** — drafting and revising the Nature Biotechnology submission text. The current draft lives at `resources/tabula_submission_NBT (official).md` (see *Manuscript & Figures* below).
+2. **Manuscript writing** — drafting and revising the manuscript that builds on the bioRxiv preprint. The current local draft lives at `resources/tabula_submission_NBT (official).md` (see *Manuscript & Figures* below). The whole `resources/` directory is gitignored — do not commit manuscript text or unpublished figures to this repo.
 3. **Figure design** — building the manuscript's main and supplementary figures. The active piece of work is **Figure 2** (Chiron platform), under `resources/figure-2/`. Figures 1, 3 and 4 are checked in as flat PNGs at `resources/Figure-{1,3,4}.png` for reference.
 
 Code edits go in `src/` / `worker/`. Manuscript edits go in `resources/tabula_submission_NBT (official).md`. Figure edits go in `resources/figure-2/` (or a sibling figure dir once one exists). Don't conflate the three.
@@ -62,7 +64,7 @@ chiron-platform/
 │   └── start_worker.py         # Worker initialization
 ├── deployment.yaml             # Kubernetes deployment spec
 └── resources/                  # Manuscript draft, figures, design docs (see "Manuscript & Figures")
-    ├── tabula_submission_NBT (official).md  # Full NBT draft (results + online methods + captions + supplementary)
+    ├── tabula_submission_NBT (official).md  # Full local manuscript draft (results + online methods + captions + supplementary)
     ├── Figure-{1,3,4}.png      # Current main figures (PNG snapshots)
     ├── figure-2/               # Active build dir for Figure 2 (Chiron platform)
     ├── NBT_new_Figure 2_platform_v1.{pdf,svg}  # Latest user reference for the Figure 2 redesign
@@ -252,7 +254,7 @@ Resource baseline per site:
 
 ## Manuscript & Figures
 
-The Nature Biotechnology submission is drafted and revised in this repo alongside the code.
+The manuscript is drafted and revised alongside the code under `resources/`, which is gitignored — manuscript text never lands in git history. The public version of the work is the bioRxiv preprint linked at the top of this file.
 
 ### Manuscript draft
 
