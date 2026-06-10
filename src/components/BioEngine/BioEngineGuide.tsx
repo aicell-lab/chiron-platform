@@ -129,6 +129,17 @@ const BioEngineGuide: React.FC = () => {
   const [showTroubleshooting, setShowTroubleshooting] = useState(false);
   const [showDataExample, setShowDataExample] = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
+
+  // Manifest builder (Training Data Directory panel)
+  const [showManifestForm, setShowManifestForm] = useState(false);
+  const [manifestId, setManifestId] = useState('');
+  const [manifestName, setManifestName] = useState('');
+  const [manifestDescription, setManifestDescription] = useState('');
+  const [manifestAuthorizedUsers, setManifestAuthorizedUsers] = useState<string[]>(['*']);
+  const [manifestTags, setManifestTags] = useState<string[]>([]);
+  const [manifestLicense, setManifestLicense] = useState('CC-BY-4.0');
+  const [manifestDownloaded, setManifestDownloaded] = useState(false);
+  const [dataPrepPromptCopied, setDataPrepPromptCopied] = useState(false);
   const [timezone, setTimezone] = useState('');
 
   const [token, setToken] = useState('');
@@ -513,6 +524,76 @@ ${getRunCommand()}
     return 'Apptainer: HPC clusters and shared systems';
   };
 
+  // --- manifest.yaml builder ---------------------------------------------
+  // Tiny scalar-quoting helper. We only emit strings, lists of strings, and
+  // simple key: value pairs — the AnnData manifest schema doesn't need the
+  // full YAML grammar. Identifiers (snake_case, urls, version-like) pass
+  // through unquoted; anything with whitespace, colons, or non-ASCII gets
+  // double-quoted with backslash-escapes.
+  const yamlScalar = (s: string): string => {
+    if (s === '') return '""';
+    if (/^[\w\-./@:]+$/.test(s) && !/^(true|false|null|yes|no|~)$/i.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) {
+      return s;
+    }
+    return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
+  };
+
+  const buildManifestYaml = (): string => {
+    const lines: string[] = [];
+    const id = manifestId.trim() || 'my-dataset';
+    lines.push(`id: ${yamlScalar(id)}`);
+    if (manifestName.trim()) lines.push(`name: ${yamlScalar(manifestName.trim())}`);
+    if (manifestDescription.trim()) lines.push(`description: ${yamlScalar(manifestDescription.trim())}`);
+    lines.push('authorized_users:');
+    const users = manifestAuthorizedUsers.length > 0 ? manifestAuthorizedUsers : ['*'];
+    for (const u of users) lines.push(`  - ${yamlScalar(u)}`);
+    if (manifestTags.length > 0) {
+      lines.push('tags:');
+      for (const t of manifestTags) lines.push(`  - ${yamlScalar(t)}`);
+    }
+    if (manifestLicense.trim()) lines.push(`license: ${yamlScalar(manifestLicense.trim())}`);
+    return lines.join('\n') + '\n';
+  };
+
+  const downloadManifest = () => {
+    const blob = new Blob([buildManifestYaml()], { type: 'text/yaml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'manifest.yaml';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setManifestDownloaded(true);
+    setTimeout(() => setManifestDownloaded(false), 2000);
+  };
+
+  // AI-agent prompt that mirrors the bioimage.io "agent install" pattern:
+  // the prompt points the agent at the static SKILL.md. Per the no-local-
+  // paths rule, we DO NOT bake the user's DATA_DIR or dataset id into the
+  // prompt — the agent asks the user on their machine instead.
+  const getDataPrepPrompt = (): string => {
+    return `Read https://chiron.aicell.io/skills/chiron-data-prep/SKILL.md and help me prepare my single-cell data for Tabula federated training on this Chiron worker.
+
+I have one or more .h5ad or .zarr files I'd like to ingest. Please ask me for:
+  - the path to my worker's data directory
+  - the dataset id (snake_case)
+  - any biological context that should go in the manifest
+
+Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron data-server has picked it up on its next 30-second rescan.`;
+  };
+
+  const copyDataPrepPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(getDataPrepPrompt());
+      setDataPrepPromptCopied(true);
+      setTimeout(() => setDataPrepPromptCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy prompt:', err);
+    }
+  };
+
   const CopyButton: React.FC<{ getText: () => string; copied: boolean; onCopied: () => void }> = ({ getText, copied: isCopied, onCopied }) => (
     <button
       onClick={async () => {
@@ -599,50 +680,190 @@ ${getRunCommand()}
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <div className="text-sm text-blue-800 flex-1">
-                <span className="font-medium">Data Import Directory</span>
+                <span className="font-medium">Training Data Directory</span>
                 <span className="text-blue-700 text-xs block mt-1">
-                  A <strong>Tabula Trainer</strong> requires a local directory of single-cell datasets (<code className="bg-blue-100 px-1 rounded">.h5ad</code> or <code className="bg-blue-100 px-1 rounded">.zarr</code>).
-                  Set the path below to mount it into the data server. Each dataset subfolder must contain a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>.
-                  If only <code className="bg-blue-100 px-1 rounded">.h5ad</code> files are present, Zarr conversion runs automatically on first start and re-checks every 30 seconds for new files.
-                  <br />
-                  An <strong>Orchestrator</strong> coordinates training without local data. Leave this field empty to omit the data server entirely.
+                  A <strong>Tabula Trainer</strong> reads single-cell datasets from a directory on the host that the worker mounts &mdash; nothing is copied or imported. Each tissue lives in its own subfolder with one or more <code className="bg-blue-100 px-1 rounded">.h5ad</code> files and a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>. The data&#8209;server auto&#8209;converts <code className="bg-blue-100 px-1 rounded">.h5ad</code> &rarr; <code className="bg-blue-100 px-1 rounded">.zarr</code> on first read and rescans every 30&nbsp;seconds, and on first read it also ranks each gene by variability so the trainer can pick the most informative ones when your dataset has more genes than the model's token sequence length.
+                  <br /><br />
+                  An <strong>Orchestrator</strong> needs no data &mdash; leave the field empty and the data&#8209;server is omitted entirely.
                 </span>
+
+                {/* Disclosure 1 — example folder structure */}
                 <button
                   onClick={() => setShowDataExample(!showDataExample)}
-                  className="flex items-center text-xs text-blue-600 hover:text-blue-900 transition-colors mt-2"
+                  className="flex items-center text-xs text-blue-600 hover:text-blue-900 mt-3 transition-colors duration-150 ease-out active:scale-[0.97]"
                 >
-                  <svg className={`w-3 h-3 mr-1 transition-transform ${showDataExample ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className={`w-3 h-3 mr-1 transition-transform duration-200 ease-out ${showDataExample ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                   </svg>
-                  {showDataExample ? 'Hide' : 'Show'} example data structure
+                  {showDataExample ? 'Hide' : 'Show'} example folder layout
                 </button>
                 {showDataExample && (
-                  <div className="mt-3 space-y-3">
-                    <div className="bg-gray-900 rounded-lg p-3">
-                      <pre className="text-green-400 text-xs font-mono overflow-x-auto whitespace-pre">{`/path/to/data/
+                  <div className="mt-3 bg-gray-900 rounded-lg p-3">
+                    <pre className="text-green-400 text-xs font-mono overflow-x-auto whitespace-pre">{`/path/to/data/
 ├── liver/
 │   ├── liver_healthy.h5ad
 │   ├── liver_disease.h5ad
-│   └── manifest.yaml
+│   └── manifest.yaml         ← describes this tissue
 ├── blood/
-│   ├── pbmc_10k.zarr/
+│   ├── pbmc_10k.zarr/        ← already-converted zarr is fine too
 │   └── manifest.yaml
 └── thymus/
-    ├── thymus_adult.h5ad
-    ├── thymus_fetal.zarr/
+    ├── thymus_atlas.zarr/    ← .h5ad or .zarr, your choice
     └── manifest.yaml`}</pre>
-                    </div>
-                    <div className="bg-white rounded-lg p-3 border border-blue-100">
-                      <p className="text-xs font-semibold text-gray-800 mb-2">Minimal manifest.yaml</p>
-                      <pre className="text-gray-700 text-xs font-mono overflow-x-auto whitespace-pre bg-gray-50 p-2 rounded">{`id: my-dataset
-name: My Dataset
-description: Brief description of the dataset.
-authorized_users:
-  - user@example.com
-  - "*"  # Use "*" for public access`}</pre>
-                    </div>
                   </div>
                 )}
+
+                {/* Disclosure 2 — manifest.yaml builder form */}
+                <button
+                  onClick={() => setShowManifestForm(!showManifestForm)}
+                  className="flex items-center text-xs text-blue-600 hover:text-blue-900 mt-3 transition-colors duration-150 ease-out active:scale-[0.97]"
+                >
+                  <svg className={`w-3 h-3 mr-1 transition-transform duration-200 ease-out ${showManifestForm ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                  {showManifestForm ? 'Hide' : 'Build'}<code className="bg-blue-100 px-1 rounded mx-1">manifest.yaml</code>
+                </button>
+                {showManifestForm && (
+                  <div className="mt-3 bg-white rounded-lg p-3 border border-blue-100 space-y-3">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">
+                          Dataset ID <span className="text-red-500">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={manifestId}
+                          onChange={(e) => setManifestId(e.target.value)}
+                          placeholder="blood_perturb"
+                          className="w-full px-2 py-1.5 text-xs font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                        <p className="text-[10px] text-gray-500 mt-1">Unique. <code>snake_case</code> conventional.</p>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">
+                          Display name <span className="text-red-500">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={manifestName}
+                          onChange={(e) => setManifestName(e.target.value)}
+                          placeholder="Blood Perturb RNA"
+                          className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                        <p className="text-[10px] text-gray-500 mt-1">Shown in the Chiron UI.</p>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Description</label>
+                      <textarea autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other"
+                        rows={2}
+                        value={manifestDescription}
+                        onChange={(e) => setManifestDescription(e.target.value)}
+                        placeholder="One-line description of what the dataset contains."
+                        className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Authorized users</label>
+                        <TagInput
+                          tags={manifestAuthorizedUsers}
+                          onChange={setManifestAuthorizedUsers}
+                          placeholder="user@example.com or *"
+                        />
+                        <p className="text-[10px] text-gray-500 mt-1"><code>*</code> = public access on this worker.</p>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Tags</label>
+                        <TagInput
+                          tags={manifestTags}
+                          onChange={setManifestTags}
+                          placeholder="tissue, assay, disease…"
+                        />
+                        <p className="text-[10px] text-gray-500 mt-1">Free-text. Optional.</p>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">License</label>
+                      <select
+                        value={manifestLicense}
+                        onChange={(e) => setManifestLicense(e.target.value)}
+                        className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      >
+                        <option value="CC-BY-4.0">CC-BY-4.0 — attribution, commercial OK</option>
+                        <option value="CC-BY-NC-4.0">CC-BY-NC-4.0 — attribution, non-commercial</option>
+                        <option value="CC0-1.0">CC0-1.0 — public domain</option>
+                        <option value="MIT">MIT</option>
+                        <option value="">Other / unspecified</option>
+                      </select>
+                    </div>
+
+                    {/* Preview + download */}
+                    <div className="bg-gray-50 border border-gray-200 rounded p-2">
+                      <p className="text-[10px] uppercase tracking-wide font-semibold text-gray-500 mb-1">Preview</p>
+                      <pre className="text-gray-700 text-[11px] font-mono whitespace-pre overflow-x-auto">{buildManifestYaml()}</pre>
+                    </div>
+
+                    <button
+                      onClick={downloadManifest}
+                      className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-[transform,background-color] duration-150 ease-out active:scale-[0.97]"
+                    >
+                      {manifestDownloaded ? (
+                        <>
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                          Downloaded
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" /></svg>
+                          Download manifest.yaml
+                        </>
+                      )}
+                    </button>
+                    <p className="text-[11px] text-gray-600">
+                      Drop the file inside the dataset's subfolder (alongside your <code className="bg-gray-100 px-1 rounded">.h5ad</code> or <code className="bg-gray-100 px-1 rounded">.zarr</code>), with filename <code className="bg-gray-100 px-1 rounded font-mono">manifest.yaml</code>.
+                    </p>
+                  </div>
+                )}
+
+                {/* AI-agent affordance — bioimage.io copy-prompt pattern */}
+                <div className="mt-4 p-3 rounded-lg border border-indigo-200 bg-indigo-50/70">
+                  <div className="flex items-start gap-2">
+                    <svg className="w-4 h-4 text-indigo-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                    </svg>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold text-indigo-900">Or hand the data prep to an AI agent</p>
+                      <p className="text-[11px] text-indigo-800 mt-0.5">
+                        Works with Claude Code, Gemini CLI, or any agent that can read a URL. Includes <code className="bg-indigo-100 px-1 rounded">pip</code> requirements and a worked example.
+                      </p>
+                      <div className="mt-2 flex items-stretch gap-2">
+                        <code className="flex-1 min-w-0 px-2 py-1.5 text-[11px] font-mono text-gray-700 bg-white border border-indigo-200 rounded overflow-x-auto whitespace-nowrap">
+                          Read https://chiron.aicell.io/skills/chiron-data-prep/SKILL.md…
+                        </code>
+                        <button
+                          onClick={copyDataPrepPrompt}
+                          className="flex items-center justify-center gap-1 px-2.5 py-1.5 text-[11px] font-medium text-indigo-700 bg-white hover:bg-indigo-100 border border-indigo-200 rounded transition-[transform,background-color] duration-150 ease-out active:scale-[0.97]"
+                        >
+                          {dataPrepPromptCopied ? (
+                            <>
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                              Copied
+                            </>
+                          ) : (
+                            <>
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                              Copy
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -701,7 +922,7 @@ authorized_users:
                 <div className="md:col-span-2 lg:col-span-3 grid grid-cols-3 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Worker Name</label>
-                    <input type="text" value={workerName} onChange={(e) => setWorkerName(e.target.value)}
+                    <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={workerName} onChange={(e) => setWorkerName(e.target.value)}
                       placeholder="Chiron Worker"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-xs text-gray-500 mt-1">Display name for this worker in the Chiron UI</p>
@@ -839,7 +1060,7 @@ authorized_users:
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">BioEngine Workspace Directory</label>
-                    <input type="text" value={workspaceDir} onChange={(e) => setWorkspaceDir(e.target.value)}
+                    <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={workspaceDir} onChange={(e) => setWorkspaceDir(e.target.value)}
                       placeholder={os === 'windows' ? '%USERPROFILE%\\.bioengine' : '$HOME/.bioengine'}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-xs text-gray-500 mt-1">
@@ -885,7 +1106,7 @@ authorized_users:
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Server URL</label>
-                    <input type="text" value={serverUrl} onChange={(e) => setServerUrl(e.target.value)}
+                    <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={serverUrl} onChange={(e) => setServerUrl(e.target.value)}
                       placeholder="https://hypha.aicell.io"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-xs text-gray-500 mt-1">Hypha server URL (defaults to public server)</p>
@@ -903,7 +1124,7 @@ authorized_users:
                         </span>
                       )}
                     </div>
-                    <input type="text" value={workspace}
+                    <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={workspace}
                       onChange={(e) => { setWorkspace(e.target.value); setWorkspaceResolved(false); }}
                       placeholder="my-workspace" autoComplete="off"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
@@ -912,7 +1133,7 @@ authorized_users:
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
-                    <input type="text" value={clientId} onChange={(e) => setClientId(e.target.value)}
+                    <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={clientId} onChange={(e) => setClientId(e.target.value)}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-xs text-gray-500 mt-1">Custom client ID (auto-generated if empty)</p>
                   </div>
@@ -920,7 +1141,7 @@ authorized_users:
                   {gpus > 0 && (
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">GPU Indices</label>
-                      <input type="text" value={gpuIndices} onChange={(e) => setGpuIndices(e.target.value)}
+                      <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={gpuIndices} onChange={(e) => setGpuIndices(e.target.value)}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                       <p className="text-xs text-gray-500 mt-1">Comma-separated GPU device IDs. Leave empty to use the GPU count above</p>
                     </div>
@@ -928,7 +1149,7 @@ authorized_users:
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Container Image</label>
-                    <input type="text" value={customImage} onChange={(e) => setCustomImage(e.target.value)}
+                    <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={customImage} onChange={(e) => setCustomImage(e.target.value)}
                       placeholder={DEFAULT_IMAGE}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-xs text-gray-500 mt-1">Custom image tag. Leave empty for default ({DEFAULT_IMAGE})</p>

@@ -137,7 +137,7 @@ conda create -n tabula python=3.11 -y && conda activate tabula
 pip install torch==1.13.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
 MAX_JOBS=4 pip install flash-attn==2.3.5 --no-build-isolation
 pip install anndata==0.12.6
-pip install "git+https://github.com/aicell-lab/bioengine.git@141f4c7#egg=bioengine[datasets,worker]"
+pip install "git+https://github.com/aicell-lab/bioengine.git@05703d9#egg=bioengine[datasets,worker]"  # bioengine 0.10.12
 pip install -r ../tabula/requirements.txt && pip install -e ../tabula/
 
 # Start dataset server

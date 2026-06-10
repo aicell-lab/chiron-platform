@@ -2,9 +2,9 @@
 
 ## What This Repository Is
 
-**Chiron Platform** is the web frontend and federated orchestration layer described in the Nature Biotechnology manuscript:
+**Chiron Platform** is the web frontend and federated orchestration layer described in the Nature Biotechnology manuscript (Ding et al.):
 
-> *"Toward a privacy-preserving predictive foundation model of single-cell transcriptomics with federated learning and tabular modeling"* — Ding et al.
+> *"Predictive single cell foundation model for gene regulation and aging with privacy-preserving tabular learning"*
 
 The paper introduces **Tabula**, a single-cell foundation model that combines:
 1. **Tabular learning** — treats each cell as a permutation-invariant row of genes (not an ordered sequence), with gene-wise reconstruction loss and cell-wise contrastive loss.
@@ -13,6 +13,16 @@ The paper introduces **Tabula**, a single-cell foundation model that combines:
 Chiron is the platform that makes this deployable. It coordinates BioEngine Workers across institutions so they can participate in collaborative training sessions without sharing raw single-cell data.
 
 > **Current scope:** Tabula is the only model supported. A future version of Chiron will generalize to any single-cell foundation model, so keep the platform layer model-agnostic wherever possible.
+
+### Work performed in this repo
+
+Work in this repo spans three connected tracks. Treat any of them as in scope:
+
+1. **Platform code** — the React frontend (`src/`) and the BioEngine worker assets (`worker/`) that together form `chiron.aicell.io`.
+2. **Manuscript writing** — drafting and revising the Nature Biotechnology submission text. The current draft lives at `resources/tabula_submission_NBT (official).md` (see *Manuscript & Figures* below).
+3. **Figure design** — building the manuscript's main and supplementary figures. The active piece of work is **Figure 2** (Chiron platform), under `resources/figure-2/`. Figures 1, 3 and 4 are checked in as flat PNGs at `resources/Figure-{1,3,4}.png` for reference.
+
+Code edits go in `src/` / `worker/`. Manuscript edits go in `resources/tabula_submission_NBT (official).md`. Figure edits go in `resources/figure-2/` (or a sibling figure dir once one exists). Don't conflate the three.
 
 ### Companion Repositories
 
@@ -51,7 +61,14 @@ chiron-platform/
 │   ├── ray_deployment_manager.py # Ray job orchestration
 │   └── start_worker.py         # Worker initialization
 ├── deployment.yaml             # Kubernetes deployment spec
-└── tabula_submission_NBT (official).txt  # Manuscript (NBT submission)
+└── resources/                  # Manuscript draft, figures, design docs (see "Manuscript & Figures")
+    ├── tabula_submission_NBT (official).md  # Full NBT draft (results + online methods + captions + supplementary)
+    ├── Figure-{1,3,4}.png      # Current main figures (PNG snapshots)
+    ├── figure-2/               # Active build dir for Figure 2 (Chiron platform)
+    ├── NBT_new_Figure 2_platform_v1.{pdf,svg}  # Latest user reference for the Figure 2 redesign
+    ├── new-figure-2-design.md  # Design brief / palette / panel breakdown for Figure 2
+    ├── tabula_losses.tsv       # Per-tissue federated training/validation losses (drives Fig 2 loss panel)
+    └── {bad,good}-alignment-and.spacing*.png  # Visual standards for chip/container spacing
 
 ../tabula/                      # Sibling repo — Tabula model + FL apps (separate git repo)
 ├── tabula/
@@ -137,7 +154,7 @@ conda create -n tabula python=3.11 -y && conda activate tabula
 pip install torch==1.13.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
 MAX_JOBS=4 pip install flash-attn==2.3.5 --no-build-isolation
 pip install anndata==0.12.6
-pip install "git+https://github.com/aicell-lab/bioengine.git@141f4c7#egg=bioengine[datasets,worker]"
+pip install "git+https://github.com/aicell-lab/bioengine.git@05703d9#egg=bioengine[datasets,worker]"  # bioengine 0.10.12
 pip install -r ../tabula/requirements.txt && pip install -e ../tabula/
 
 # Start dataset server
@@ -233,6 +250,70 @@ Resource baseline per site:
 
 ---
 
+## Manuscript & Figures
+
+The Nature Biotechnology submission is drafted and revised in this repo alongside the code.
+
+### Manuscript draft
+
+- **Path:** `resources/tabula_submission_NBT (official).md` (~2.7 MB, 1500+ lines).
+- **Sections:** Abstract → Introduction → Results (4 subsections) → Discussion → Acknowledgements → Code/Data availability → References → Online Methods → Figure captions (Figs 1–4, Supplementary Figs 1–15) → Supplementary Notes (S1–S4).
+- **Results subsections:**
+  1. *Tabula redefines single cell foundation models through tabular and federated learning* — model + Chiron platform overview (Fig. 1).
+  2. *Tabular learning ... outperforms MLM and AR in both federated and centralized learning settings* — benchmarking story (currently Fig. 2 in the draft caption; see *Figure restructuring* below).
+  3. *Tabula accurately recovers pairwise and high-order combinatorial regulation across diverse biological systems with zero-shot prediction* (Fig. 3).
+  4. *Tabula predicts skin rejuvenation factors through age- and identity score-guided in silico prioritization* (Fig. 4).
+- **Online Methods** covers: pretraining data, model architecture, downstream fine-tuning, rejuvenation discovery, **Chiron federated training platform** (Manager/Orchestrator/Trainer apps), human fibroblast culturing, implementation, and downstream task datasets.
+
+When editing the manuscript, preserve Paperpile reference markers (e.g. `[28](https://paperpile.com/c/mjNULd/lU1N)`) — they are live citation links and renumber automatically; do not flatten them to plain numbers.
+
+### Figure inventory and restructuring
+
+| Figure | Subject | State |
+|---|---|---|
+| Fig. 1 | Tabula schematic (tabular learning, FL, Chiron platform overview incl. former panel d) | Checked in as `resources/Figure-1.png` |
+| Fig. 2 | **Being replaced.** Old: benchmarking. New: Chiron platform — open ecosystem, training modes, learning dynamics, privacy architecture. | Active build at `resources/figure-2/` |
+| Fig. 3 | Pairwise + combinatorial regulation prediction | `resources/Figure-3.png` |
+| Fig. 4 | Skin rejuvenation factor nomination | `resources/Figure-4.png` |
+
+**Figure 2 is mid-restructure.** The previous Figure 2 (benchmarking) is being moved to the supplement, and the new Figure 2 absorbs and expands the previous Figure 1 panel d (the decentralized training platform schematic). The current draft's `## Figure 2:` caption (line ~618) still describes the old benchmarking content — it will need to be rewritten once the new Figure 2 is settled. References to "panel d" inside the Figure 1 caption should also be re-pointed at the new Figure 2 panels at that time.
+
+### Figure 2 working directory
+
+```
+resources/figure-2/
+├── STYLE.md                 # Authoritative palette, type scale, components, icons (read before editing any panel)
+├── panel-{a,b,c,d,e,motivation}/  # Per-panel SVGs, versioned panel-X-vN.svg + matching PNG
+├── grid/                    # Composition pipeline
+│   ├── build_manifest.py    # Pick latest panel version, copy in, write manifest.json, chain to build_figure.py
+│   ├── build_figure.py      # Compose PNG panels into figure-2-composed.png
+│   ├── build_figure_svg.py  # Compose SVG panels into figure-2-composed.svg (vector, print-ready)
+│   ├── figure-2-composed.{png,svg}  # Latest composed output
+│   └── index.html           # Live preview, polls manifest.json every 5 s
+└── render.py                # Render any panel SVG to PNG via cairosvg
+```
+
+Typical loop: edit panel SVG → `python3 render.py panel-X/panel-X-vN.svg ...` → `python3 build_manifest.py` → `python3 build_figure_svg.py`.
+
+### Design references and standards
+
+- **`resources/new-figure-2-design.md`** — original written brief for Figure 2 (palette, typography, panel-by-panel intent). Useful background but partly superseded by `figure-2/STYLE.md`.
+- **`resources/figure-2/STYLE.md`** — the authoritative current style spec (palette, type scale, components). Read this before editing any Figure 2 panel.
+- **`resources/NBT_new_Figure 2_platform_v1.{pdf,svg}`** — most recent user-supplied reference design for Figure 2 (partial sketch).
+- **`resources/{bad,good}-alignment-and.spacing*.png`** — visual standards: chips must have ≥ ~18 px padding inside containers. Match `good-alignment-and.spacing.png`, avoid the failure modes in the `bad-*` shots.
+- **`resources/previous-fig1-panel-d.png`** — aesthetic reference for the soft, rounded, purple-dominant direction of the new Figure 2.
+- **`resources/tabula_losses.tsv`** — per-epoch federated training and validation losses across eight tissues; drives the learning-dynamics panel.
+
+### Hard constraints for figure work
+
+- **32 MB max for any image passed to `Read`.** SVGs with embedded raster look small on disk but balloon as base64. Never `Read` a panel SVG that has embedded raster; render it to a downscaled PNG (≤ 8 MB, long edge ≤ ~2000 px) and read that instead. See `~/.claude/projects/-data-nmechtel-chiron-platform/memory/image_size_limit.md`.
+- **Privacy claim is non-negotiable** in every panel: raw single-cell data never leaves the worker; only model weights cross the network. Any privacy/architecture panel must reflect this.
+- **Chips never touch container borders.** Maintain ≥ ~18 px padding on all sides — the bad-alignment screenshots show exactly the failure mode to avoid.
+- **Print size**: target ≤ 183 mm wide (double-column) and ≤ ~247 mm tall (single page), vector (SVG) output.
+- **Don't rename the panel directories.** `panel-a/`, `panel-b/`, etc. are legacy from before a restructure; `grid/manifest.json` handles the panel-letter → directory mapping.
+
+---
+
 ## Git Conventions
 
 - Always commit as `nilsmechtel` unless the user specifies otherwise.
@@ -293,5 +374,7 @@ Resource baseline per site:
 | Federated server (FedAvg) | `../tabula/apps/chiron_orchestrator/` |
 | Local trainer app | `../tabula/apps/tabula_trainer/` |
 | Control plane | `../tabula/apps/chiron_manager/` |
-| Platform + training context (manuscript) | `resources/tabula_submission_NBT (official).txt` |
-| Platform context (methods) | `resources/tabula_online_methods.md` |
+| Manuscript draft (results + methods + captions + supplementary) | `resources/tabula_submission_NBT (official).md` |
+| Figure 2 working dir (style guide + per-panel SVGs + composition pipeline) | `resources/figure-2/` |
+| Figure 2 style spec | `resources/figure-2/STYLE.md` |
+| Figure 2 design brief (background context) | `resources/new-figure-2-design.md` |

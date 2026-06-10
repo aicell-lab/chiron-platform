@@ -190,6 +190,372 @@ const extractRemoteError = (msg: string): string => {
   return last || msg;
 };
 
+// Dataset-card detail dialog. Lazily fetches get_dataset_card_details from
+// the chiron-manager the first time it is opened for a given (manager, dataset,
+// zarr) and caches the result via the cache map passed in. Two views are
+// supported, selected by `kind`:
+//   - 'variability' renders a hi-res histogram of HVG scores with the model's
+//     in_feature (=1200) cutoff marked, plus a rank-plot inset.
+//   - 'umap' renders the 2-D embedding as a canvas scatter (cheap up to 50k pts).
+// Both close via Esc, backdrop click, or the explicit Close button.
+
+const TABULA_IN_FEATURE = 1200;
+
+type DialogTarget = { serviceId: string; datasetId: string; zarrName: string; nVars?: number; nSamples?: number };
+type DialogCardDetails = {
+  hvg_scores: number[] | null;
+  umap_coords: number[][] | null;
+  umap_indices: number[] | null;
+};
+
+const DatasetCardDialog: React.FC<{
+  target: DialogTarget | null;
+  kind: 'variability' | 'umap';
+  cache: Record<string, DialogCardDetails | 'loading' | 'error'>;
+  cardKey: (t: DialogTarget) => string;
+  fetchCardDetails: (t: DialogTarget) => void;
+  onClose: () => void;
+}> = ({ target, kind, cache, cardKey, fetchCardDetails, onClose }) => {
+  useEffect(() => {
+    if (!target) return;
+    const k = cardKey(target);
+    const v = cache[k];
+    if (v === undefined || v === 'error') {
+      fetchCardDetails(target);
+    }
+  }, [target, cache, cardKey, fetchCardDetails]);
+
+  useEffect(() => {
+    if (!target) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [target, onClose]);
+
+  if (!target) return null;
+  const key = cardKey(target);
+  const entry = cache[key];
+  const isLoading = entry === undefined || entry === 'loading';
+  const isError = entry === 'error';
+  const details = (entry && entry !== 'loading' && entry !== 'error') ? entry : null;
+
+  const title = kind === 'variability' ? 'Gene variability' : 'UMAP embedding';
+  const subtitle = `${target.datasetId} / ${target.zarrName}`;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40"
+      onClick={onClose}
+      role="presentation"
+    >
+      <div
+        className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+      >
+        <div className="px-5 py-3 border-b border-gray-100 flex items-start justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+            <p className="text-xs text-gray-500 font-mono mt-0.5">{subtitle}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 rounded p-1 -m-1 transition-[transform,color] duration-150 ease-out active:scale-[0.97]"
+            aria-label="Close"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
+        <div className="flex-1 overflow-auto p-5">
+          {isLoading && (
+            <div className="flex items-center justify-center h-64 text-sm text-gray-500">
+              <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" /></svg>
+              Fetching from the data-server…
+            </div>
+          )}
+          {isError && (
+            <div className="flex items-center justify-center h-64 text-sm text-red-600">
+              Failed to fetch dataset details. Try again later.
+            </div>
+          )}
+          {details && kind === 'variability' && (
+            <VariabilityView scores={details.hvg_scores} nVars={target.nVars} />
+          )}
+          {details && kind === 'umap' && (
+            <UmapView coords={details.umap_coords} nSamples={target.nSamples} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const VariabilityView: React.FC<{ scores: number[] | null; nVars?: number }> = ({ scores, nVars }) => {
+  // Higher-resolution histogram (50 bins, log10-spaced) over positive scores
+  // only, with an annotated vertical line at the model's in_feature cutoff
+  // (the score value of the gene ranked TABULA_IN_FEATURE in score-descending
+  // order). Compact rank-plot inset shows the same cutoff on the sorted curve.
+  const stats = useMemo(() => {
+    if (!scores || scores.length === 0) return null;
+    const sorted = [...scores].sort((a, b) => b - a); // descending
+    const positive = sorted.filter(s => s > 0);
+    if (positive.length === 0) return null;
+    const N = sorted.length;
+    const cutoffRank = Math.min(TABULA_IN_FEATURE, N) - 1;
+    const cutoffScore = sorted[cutoffRank];
+    const logs = positive.map(s => Math.log10(s));
+    const lo = Math.min(...logs), hi = Math.max(...logs);
+    const span = Math.max(1e-9, hi - lo);
+    const nBins = 50;
+    const edges = Array.from({ length: nBins + 1 }, (_, i) => lo + (i / nBins) * span);
+    const counts = new Array<number>(nBins).fill(0);
+    for (const l of logs) {
+      let b = Math.floor(((l - lo) / span) * nBins);
+      if (b >= nBins) b = nBins - 1;
+      if (b < 0) b = 0;
+      counts[b]++;
+    }
+    return { sorted, positive, N, cutoffRank, cutoffScore, lo, hi, span, nBins, edges, counts };
+  }, [scores]);
+
+  if (!stats) return <div className="text-sm text-gray-500">No HVG scores available.</div>;
+  const { N, cutoffRank, cutoffScore, lo, hi, span, nBins, counts, sorted } = stats;
+  const showsCutoff = N > TABULA_IN_FEATURE;
+
+  // SVG geometry for histogram. Extra L/B padding so axis labels fit.
+  const histW = 540, histH = 250, padL = 54, padR = 14, padT = 16, padB = 48;
+  const plotW = histW - padL - padR;
+  const plotH = histH - padT - padB;
+  const maxCount = Math.max(...counts, 1);
+  const barW = plotW / nBins;
+  const logCutoff = Math.log10(Math.max(cutoffScore, Number.MIN_VALUE));
+  const cutoffX = padL + ((logCutoff - lo) / span) * plotW;
+
+  // Rank plot inset (sorted score curve, log-y)
+  const inW = 540, inH = 140, inPadL = 54, inPadR = 14, inPadT = 10, inPadB = 44;
+  const inPlotW = inW - inPadL - inPadR, inPlotH = inH - inPadT - inPadB;
+  const inMaxLog = Math.log10(Math.max(sorted[0], Number.MIN_VALUE));
+  const inMinLog = Math.log10(Math.max(sorted[N - 1] || Number.MIN_VALUE, Number.MIN_VALUE));
+  const inSpan = Math.max(1e-9, inMaxLog - inMinLog);
+  // Sample at most 600 points for the curve to keep the SVG small.
+  const stride = Math.max(1, Math.floor(N / 600));
+  const rankPoints: string[] = [];
+  for (let i = 0; i < N; i += stride) {
+    const x = inPadL + (i / Math.max(1, N - 1)) * inPlotW;
+    const lg = Math.log10(Math.max(sorted[i], Number.MIN_VALUE));
+    const y = inPadT + (1 - (lg - inMinLog) / inSpan) * inPlotH;
+    rankPoints.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+  }
+  const cutoffInX = inPadL + (cutoffRank / Math.max(1, N - 1)) * inPlotW;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-3 gap-3 text-xs">
+        <Stat label="total genes" value={(nVars ?? N).toLocaleString()} />
+        <Stat label={`top ${TABULA_IN_FEATURE} cutoff score`} value={showsCutoff ? cutoffScore.toFixed(3) : '—'} muted={!showsCutoff} />
+        <Stat label="genes above cutoff" value={showsCutoff ? TABULA_IN_FEATURE.toLocaleString() : N.toLocaleString()} />
+      </div>
+
+      <div>
+        <p className="text-[10px] uppercase tracking-wide font-semibold text-gray-500 mb-1">rank plot</p>
+        <svg width={inW} height={inH} className="block">
+          {/* Dropped region — to the RIGHT of the cutoff (higher rank = less variable). */}
+          {showsCutoff && (
+            <rect x={cutoffInX} y={inPadT} width={(inW - inPadR) - cutoffInX} height={inPlotH} fill="#ef4444" opacity={0.10} />
+          )}
+          <line x1={inPadL} y1={inH - inPadB} x2={inW - inPadR} y2={inH - inPadB} stroke="#9ca3af" strokeWidth={1} />
+          <line x1={inPadL} y1={inPadT} x2={inPadL} y2={inH - inPadB} stroke="#9ca3af" strokeWidth={1} />
+          {/* Rank-axis ticks at 0, ~mid, last. Skipped when too close to the cutoff tick to avoid label overlap. */}
+          {[0, 0.5, 1].map((t) => {
+            const x = inPadL + t * inPlotW;
+            const v = Math.round(t * (N - 1));
+            if (showsCutoff && Math.abs(x - cutoffInX) < 28) return null;
+            return (
+              <g key={`rxt${t}`}>
+                <line x1={x} y1={inH - inPadB} x2={x} y2={inH - inPadB + 3} stroke="#9ca3af" strokeWidth={1} />
+                <text x={x} y={inH - inPadB + 14} fontSize={10} fill="#4b5563" textAnchor="middle">{v.toLocaleString()}</text>
+              </g>
+            );
+          })}
+          {/* Y ticks (log scale) at top, mid, bottom */}
+          {[0, 0.5, 1].map((t) => {
+            const y = inPadT + t * inPlotH;
+            const logVal = inMaxLog - t * inSpan;
+            const v = Math.pow(10, logVal);
+            return (
+              <g key={`ryt${t}`}>
+                <line x1={inPadL - 3} y1={y} x2={inPadL} y2={y} stroke="#9ca3af" strokeWidth={1} />
+                <text x={inPadL - 6} y={y + 3} fontSize={10} fill="#4b5563" textAnchor="end">{v < 0.1 ? v.toExponential(0) : v.toFixed(2)}</text>
+              </g>
+            );
+          })}
+          <polyline points={rankPoints.join(' ')} fill="none" stroke="#5b4380" strokeWidth={1.4} />
+          {/* Cutoff line + matching x-axis tick + label, in orange so they read as one annotated boundary. */}
+          {showsCutoff && (
+            <>
+              <line x1={cutoffInX} y1={inPadT - 2} x2={cutoffInX} y2={inH - inPadB + 3} stroke="#b45309" strokeWidth={1.2} strokeDasharray="3 3" />
+              <text x={cutoffInX} y={inH - inPadB + 14} fontSize={10} fill="#b45309" fontWeight={600} textAnchor="middle">{TABULA_IN_FEATURE.toLocaleString()}</text>
+            </>
+          )}
+          {/* Axis titles */}
+          <text x={inPadL + inPlotW / 2} y={inH - 6} fontSize={11} fill="#374151" textAnchor="middle">gene rank (most variable → least)</text>
+          <text x={14} y={inPadT + inPlotH / 2} fontSize={11} fill="#374151" textAnchor="middle" transform={`rotate(-90 14 ${inPadT + inPlotH / 2})`}>score</text>
+        </svg>
+      </div>
+
+      <div>
+        <p className="text-[10px] uppercase tracking-wide font-semibold text-gray-500 mb-1">distribution</p>
+        <svg width={histW} height={histH} className="block">
+          {/* Dropped region — to the LEFT of the cutoff (lower score = less variable). */}
+          {showsCutoff && (
+            <rect x={padL} y={padT} width={cutoffX - padL} height={plotH} fill="#ef4444" opacity={0.10} />
+          )}
+          {/* Axes */}
+          <line x1={padL} y1={histH - padB} x2={histW - padR} y2={histH - padB} stroke="#9ca3af" strokeWidth={1} />
+          <line x1={padL} y1={padT} x2={padL} y2={histH - padB} stroke="#9ca3af" strokeWidth={1} />
+          {/* X ticks — skip ones too close to the cutoff tick to avoid label overlap. */}
+          {[0, 0.5, 1].map((t) => {
+            const x = padL + t * plotW;
+            const v = lo + t * span;
+            if (showsCutoff && Math.abs(x - cutoffX) < 32) return null;
+            return (
+              <g key={`xt${t}`}>
+                <line x1={x} y1={histH - padB} x2={x} y2={histH - padB + 3} stroke="#9ca3af" strokeWidth={1} />
+                <text x={x} y={histH - padB + 14} fontSize={10} fill="#4b5563" textAnchor="middle">{v.toFixed(2)}</text>
+              </g>
+            );
+          })}
+          {[0, 0.5, 1].map((t) => {
+            const y = histH - padB - t * plotH;
+            const v = Math.round(t * maxCount);
+            return (
+              <g key={`yt${t}`}>
+                <line x1={padL - 3} y1={y} x2={padL} y2={y} stroke="#9ca3af" strokeWidth={1} />
+                <text x={padL - 6} y={y + 3} fontSize={10} fill="#4b5563" textAnchor="end">{v.toLocaleString()}</text>
+              </g>
+            );
+          })}
+          {/* Bars */}
+          {counts.map((c, i) => {
+            const h = (c / maxCount) * plotH;
+            const x = padL + i * barW;
+            const y = padT + plotH - h;
+            return <rect key={i} x={x + 0.4} y={y} width={Math.max(0, barW - 0.8)} height={h} rx={0.6} fill="#7ba6c8" />;
+          })}
+          {/* Cutoff line + matching x-axis tick + label, in orange. Tick value is the
+              log₁₀ of the cutoff score to match the rest of the axis convention; the
+              actual score sits in the stats strip above. */}
+          {showsCutoff && (
+            <>
+              <line x1={cutoffX} y1={padT - 4} x2={cutoffX} y2={histH - padB + 3} stroke="#b45309" strokeWidth={1.4} strokeDasharray="3 3" />
+              <text x={cutoffX} y={histH - padB + 14} fontSize={10} fill="#b45309" fontWeight={600} textAnchor="middle">{logCutoff.toFixed(2)}</text>
+            </>
+          )}
+          {/* Axis titles */}
+          <text x={padL + plotW / 2} y={histH - 6} fontSize={11} fill="#374151" textAnchor="middle">log₁₀(over-dispersion score)</text>
+          <text x={14} y={padT + plotH / 2} fontSize={11} fill="#374151" textAnchor="middle" transform={`rotate(-90 14 ${padT + plotH / 2})`}>gene count</text>
+        </svg>
+      </div>
+    </div>
+  );
+};
+
+const Stat: React.FC<{ label: string; value: string; muted?: boolean }> = ({ label, value, muted }) => (
+  <div className="rounded-lg bg-gray-50 px-3 py-2">
+    <p className="text-[9px] uppercase tracking-wide text-gray-500">{label}</p>
+    <p className={`text-sm font-medium tabular-nums ${muted ? 'text-gray-400' : 'text-gray-800'}`}>{value}</p>
+  </div>
+);
+
+const UmapView: React.FC<{ coords: number[][] | null; nSamples?: number }> = ({ coords, nSamples }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Plot geometry — share between canvas drawing and the SVG overlay so axis
+  // labels and tick marks line up with the rendered points.
+  const padL = 48, padR = 14, padT = 12, padB = 44;
+  const canvasW = 540, canvasH = 540;
+  const plotW = canvasW - padL - padR;
+  const plotH = canvasH - padT - padB;
+
+  const bounds = useMemo(() => {
+    if (!coords || coords.length === 0) return null;
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+    for (const [x, y] of coords) {
+      if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+      if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+    }
+    const xPad = (xMax - xMin) * 0.04 || 1;
+    const yPad = (yMax - yMin) * 0.04 || 1;
+    return { xMin: xMin - xPad, xMax: xMax + xPad, yMin: yMin - yPad, yMax: yMax + yPad };
+  }, [coords]);
+
+  useEffect(() => {
+    const c = canvasRef.current;
+    if (!c || !coords || coords.length === 0 || !bounds) return;
+    const ctx = c.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, c.width, c.height);
+    const { xMin, xMax, yMin, yMax } = bounds;
+    const xToPx = (x: number) => padL + ((x - xMin) / (xMax - xMin)) * plotW;
+    const yToPx = (y: number) => padT + (1 - (y - yMin) / (yMax - yMin)) * plotH;
+    // alpha tuned to overplotting density — denser sets need lower alpha
+    const alpha = Math.max(0.08, Math.min(0.5, 200 / coords.length));
+    ctx.fillStyle = `rgba(91, 67, 128, ${alpha})`;
+    const r = coords.length > 10000 ? 1 : 1.7;
+    for (const [x, y] of coords) {
+      ctx.beginPath();
+      ctx.arc(xToPx(x), yToPx(y), r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }, [coords, bounds, padL, padT, plotW, plotH]);
+
+  if (!coords || coords.length === 0 || !bounds) return <div className="text-sm text-gray-500">No UMAP coordinates available.</div>;
+  const { xMin, xMax, yMin, yMax } = bounds;
+
+  return (
+    <div>
+      <div className="grid grid-cols-2 gap-3 text-xs mb-3">
+        <Stat label="points" value={coords.length.toLocaleString()} />
+        <Stat label={nSamples && nSamples > coords.length ? 'subsampled from' : 'cells'} value={(nSamples ?? coords.length).toLocaleString()} />
+      </div>
+      <div className="bg-gray-50 rounded-lg p-2 flex items-center justify-center">
+        <div className="relative" style={{ width: canvasW, height: canvasH }}>
+          <canvas ref={canvasRef} width={canvasW} height={canvasH} className="block bg-white rounded absolute inset-0" />
+          {/* Axis overlay — same coordinate space as the canvas so ticks align */}
+          <svg width={canvasW} height={canvasH} className="absolute inset-0 pointer-events-none">
+            <line x1={padL} y1={canvasH - padB} x2={canvasW - padR} y2={canvasH - padB} stroke="#9ca3af" strokeWidth={1} />
+            <line x1={padL} y1={padT} x2={padL} y2={canvasH - padB} stroke="#9ca3af" strokeWidth={1} />
+            {[0, 0.5, 1].map((t) => {
+              const v = xMin + t * (xMax - xMin);
+              const x = padL + t * plotW;
+              return (
+                <g key={`xtu${t}`}>
+                  <line x1={x} y1={canvasH - padB} x2={x} y2={canvasH - padB + 3} stroke="#9ca3af" strokeWidth={1} />
+                  <text x={x} y={canvasH - padB + 14} fontSize={10} fill="#4b5563" textAnchor="middle">{v.toFixed(1)}</text>
+                </g>
+              );
+            })}
+            {[0, 0.5, 1].map((t) => {
+              const v = yMax - t * (yMax - yMin);
+              const y = padT + t * plotH;
+              return (
+                <g key={`ytu${t}`}>
+                  <line x1={padL - 3} y1={y} x2={padL} y2={y} stroke="#9ca3af" strokeWidth={1} />
+                  <text x={padL - 6} y={y + 3} fontSize={10} fill="#4b5563" textAnchor="end">{v.toFixed(1)}</text>
+                </g>
+              );
+            })}
+            <text x={padL + plotW / 2} y={canvasH - 6} fontSize={11} fill="#374151" textAnchor="middle">UMAP 1</text>
+            <text x={14} y={padT + plotH / 2} fontSize={11} fill="#374151" textAnchor="middle" transform={`rotate(-90 14 ${padT + plotH / 2})`}>UMAP 2</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const Training: React.FC = () => {
   const { server, isLoggedIn, user, artifactManager } = useHyphaStore();
 
@@ -236,6 +602,38 @@ const Training: React.FC = () => {
 
   const [workerTimers, setWorkerTimers] = useState<Record<string, NodeJS.Timeout>>({});
   const [datasetTimers, setDatasetTimers] = useState<Record<string, NodeJS.Timeout>>({});
+
+  // Per-zarr dataset card dialogs. The summary attrs (sparkline, sampled
+  // count) live inline on the info modal table; clicking either column opens
+  // a higher-resolution view, lazily fetching the heavy payload (full HVG
+  // score vector + UMAP coords) via chiron-manager.get_dataset_card_details.
+  // Cached per (manager, dataset, zarr) so reopening the dialog is instant.
+  type CardTarget = { serviceId: string; datasetId: string; zarrName: string; nVars?: number; nSamples?: number };
+  type CardDetails = {
+    hvg_scores: number[] | null;
+    umap_coords: number[][] | null;
+    umap_indices: number[] | null;
+  };
+  const [variabilityDialog, setVariabilityDialog] = useState<CardTarget | null>(null);
+  const [umapDialog, setUmapDialog] = useState<CardTarget | null>(null);
+  const [cardDetailsCache, setCardDetailsCache] = useState<Record<string, CardDetails | 'loading' | 'error'>>({});
+  const cardKey = (t: CardTarget) => `${t.serviceId}::${t.datasetId}::${t.zarrName}`;
+
+  const fetchCardDetails = useCallback(async (target: CardTarget) => {
+    const key = cardKey(target);
+    setCardDetailsCache(prev => (prev[key] && prev[key] !== 'error' ? prev : { ...prev, [key]: 'loading' }));
+    try {
+      const details = await callHyphaService<CardDetails>(
+        target.serviceId,
+        'get_dataset_card_details',
+        { dataset_id: target.datasetId, zarr_name: target.zarrName },
+        { timeoutMs: 30000 },
+      );
+      setCardDetailsCache(prev => ({ ...prev, [key]: details }));
+    } catch (_err) {
+      setCardDetailsCache(prev => ({ ...prev, [key]: 'error' }));
+    }
+  }, []);
 
   // Local-only set of trainer service IDs the user has clicked-to-leave while
   // a training is active. The trainer stays in registeredTrainers (so its
@@ -338,6 +736,10 @@ const Training: React.FC = () => {
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [infoModalData, setInfoModalData] = useState<InfoModalData | null>(null);
   const [infoModalType, setInfoModalType] = useState<'manager' | 'orchestrator' | 'trainer'>('manager');
+  // serviceId of the manager backing the currently-open info modal; needed
+  // so the per-zarr dataset-card buttons (Variability / UMAP) know which RPC
+  // endpoint to hit for the heavy-payload fetch.
+  const [infoModalServiceId, setInfoModalServiceId] = useState<string | null>(null);
   const [isInfoModalLoading, setIsInfoModalLoading] = useState(false);
 
   // Step navigation
@@ -1161,6 +1563,7 @@ const Training: React.FC = () => {
     }
     if (!manager) return;
     setInfoModalType(type); setInfoModalData(null); setIsInfoModalLoading(true); setShowInfoModal(true);
+    setInfoModalServiceId(manager.serviceId);
     try {
       let workerInfo = manager.workerInfo;
       if (!workerInfo) {
@@ -3262,22 +3665,91 @@ const Training: React.FC = () => {
                                 </div>
                                 {manifest.description && <p className="text-xs text-gray-500 mb-1.5">{manifest.description}</p>}
                                 {manifest.zarr_files && manifest.zarr_files.length > 0 && (
-                                  <table className="w-full text-xs mt-1.5">
+                                  <table className="w-full text-xs mt-1.5 table-fixed">
+                                    {/* Distribute width so the file path doesn't crowd the buttons.
+                                        File 40% | Cells 13% | Genes 13% | Variability 17% | UMAP 17%. */}
+                                    <colgroup>
+                                      <col style={{ width: '40%' }} />
+                                      <col style={{ width: '13%' }} />
+                                      <col style={{ width: '13%' }} />
+                                      <col style={{ width: '17%' }} />
+                                      <col style={{ width: '17%' }} />
+                                    </colgroup>
                                     <thead>
                                       <tr className="text-gray-400">
                                         <th className="text-left font-medium pb-0.5">File</th>
                                         <th className="text-right font-medium pb-0.5">Cells</th>
                                         <th className="text-right font-medium pb-0.5">Genes</th>
+                                        <th className="text-center font-medium pb-0.5">Variability</th>
+                                        <th className="text-center font-medium pb-0.5">UMAP</th>
                                       </tr>
                                     </thead>
                                     <tbody>
-                                      {manifest.zarr_files.map((f: any) => (
-                                        <tr key={f.name} className="border-t border-gray-200">
-                                          <td className="py-0.5 font-mono text-gray-600 text-xs">{f.name}</td>
-                                          <td className="py-0.5 text-right text-gray-600">{f.n_samples?.toLocaleString() ?? '-'}</td>
-                                          <td className="py-0.5 text-right text-gray-600">{f.n_vars?.toLocaleString() ?? '-'}</td>
-                                        </tr>
-                                      ))}
+                                      {manifest.zarr_files.map((f: any) => {
+                                        // Tabula's model token-sequence length. If this number changes in
+                                        // framework.yaml the warning below must follow. Surfaced as a
+                                        // constant so future me knows where to look.
+                                        const TABULA_IN_FEATURE = 1200;
+                                        const overflow = typeof f.n_vars === 'number' && f.n_vars > TABULA_IN_FEATURE;
+                                        const hist: number[] | undefined = f.hvg_histogram_counts;
+                                        const maxCount = hist && hist.length ? Math.max(1, ...hist) : 1;
+                                        const hasUmap = !!f.umap_version;
+                                        const umapSampled: number | undefined = f.umap_n_sampled;
+                                        return (
+                                          <React.Fragment key={f.name}>
+                                            <tr className="border-t border-gray-200">
+                                              <td className="py-0.5 font-mono text-gray-600 text-xs truncate" title={f.name}>{f.name}</td>
+                                              <td className="py-0.5 text-right text-gray-600">{f.n_samples?.toLocaleString() ?? '-'}</td>
+                                              <td className={`py-0.5 text-right ${overflow ? 'text-amber-700 font-medium' : 'text-gray-600'}`}>
+                                                {f.n_vars?.toLocaleString() ?? '-'}
+                                              </td>
+                                              <td className="py-0.5 text-center">
+                                                {hist && hist.length > 0 ? (
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => infoModalServiceId && setVariabilityDialog({ serviceId: infoModalServiceId, datasetId, zarrName: f.name, nVars: f.n_vars, nSamples: f.n_samples })}
+                                                    disabled={!infoModalServiceId}
+                                                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded transition-[transform,background-color] duration-150 ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50"
+                                                  >
+                                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 17V5m0 12l4-4 4 4 6-8 4 4" />
+                                                    </svg>
+                                                    View
+                                                  </button>
+                                                ) : (
+                                                  <span className="text-[10px] text-gray-400 italic">computing…</span>
+                                                )}
+                                              </td>
+                                              <td className="py-0.5 text-center">
+                                                {hasUmap ? (
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => infoModalServiceId && setUmapDialog({ serviceId: infoModalServiceId, datasetId, zarrName: f.name, nVars: f.n_vars, nSamples: f.n_samples })}
+                                                    disabled={!infoModalServiceId}
+                                                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded transition-[transform,background-color] duration-150 ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50"
+                                                  >
+                                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                      <circle cx="6" cy="9" r="1.5" /><circle cx="11" cy="6" r="1.5" /><circle cx="15" cy="11" r="1.5" /><circle cx="9" cy="14" r="1.5" /><circle cx="17" cy="17" r="1.5" /><circle cx="7" cy="18" r="1.5" />
+                                                    </svg>
+                                                    View
+                                                  </button>
+                                                ) : (
+                                                  <span className="text-[10px] text-gray-400 italic">computing…</span>
+                                                )}
+                                              </td>
+                                            </tr>
+                                            {overflow && (
+                                              <tr>
+                                                <td colSpan={5} className="pb-0.5 pl-2 pt-0">
+                                                  <p className="text-[10px] text-amber-700 leading-tight">
+                                                    <strong>{f.n_vars?.toLocaleString()}</strong> stored genes &gt; model input length <strong>{TABULA_IN_FEATURE}</strong>. The trainer will keep the top {TABULA_IN_FEATURE.toLocaleString()} most variable genes per the HVG ranking shown to the left.
+                                                  </p>
+                                                </td>
+                                              </tr>
+                                            )}
+                                          </React.Fragment>
+                                        );
+                                      })}
                                     </tbody>
                                   </table>
                                 )}
@@ -3316,6 +3788,25 @@ const Training: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* ====== DATASET CARD: VARIABILITY DIALOG ====== */}
+      <DatasetCardDialog
+        target={variabilityDialog}
+        kind="variability"
+        cache={cardDetailsCache}
+        cardKey={cardKey}
+        fetchCardDetails={fetchCardDetails}
+        onClose={() => setVariabilityDialog(null)}
+      />
+      {/* ====== DATASET CARD: UMAP DIALOG ====== */}
+      <DatasetCardDialog
+        target={umapDialog}
+        kind="umap"
+        cache={cardDetailsCache}
+        cardKey={cardKey}
+        fetchCardDetails={fetchCardDetails}
+        onClose={() => setUmapDialog(null)}
+      />
 
       {/* ====== ERROR POPUP ====== */}
       {showErrorPopup && (
