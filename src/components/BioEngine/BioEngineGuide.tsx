@@ -128,6 +128,7 @@ const BioEngineGuide: React.FC = () => {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showTroubleshooting, setShowTroubleshooting] = useState(false);
   const [showDataExample, setShowDataExample] = useState(false);
+  const [showAnnDataKeys, setShowAnnDataKeys] = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
 
   // Manifest builder (Training Data Directory panel)
@@ -682,10 +683,20 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
               <div className="text-sm text-blue-800 flex-1">
                 <span className="font-medium">Training Data Directory</span>
                 <span className="text-blue-700 text-xs block mt-1">
-                  A <strong>Tabula Trainer</strong> reads single-cell datasets from a directory on the host that the worker mounts &mdash; nothing is copied or imported. Each tissue lives in its own subfolder with one or more <code className="bg-blue-100 px-1 rounded">.h5ad</code> files and a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>. The data&#8209;server auto&#8209;converts <code className="bg-blue-100 px-1 rounded">.h5ad</code> &rarr; <code className="bg-blue-100 px-1 rounded">.zarr</code> on first read and rescans every 30&nbsp;seconds, and on first read it also ranks each gene by variability so the trainer can pick the most informative ones when your dataset has more genes than the model's token sequence length.
+                  A <strong>Tabula Trainer</strong> reads single-cell datasets from a directory on the host that the worker mounts. Nothing is copied or imported. Each dataset lives in its own subfolder with one or more <code className="bg-blue-100 px-1 rounded">.h5ad</code> files and a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>. The data&#8209;server auto&#8209;converts <code className="bg-blue-100 px-1 rounded">.h5ad</code> &rarr; <code className="bg-blue-100 px-1 rounded">.zarr</code> on first read, applies the manuscript's QC pipeline (drops cells &lt;&nbsp;250 detected genes and genes detected in &lt;&nbsp;250 cells), discretises every cell into 50 quantile bins, ranks genes by variability, and pre-cuts a trainer-ready <code className="bg-blue-100 px-1 rounded">tabula_binned</code> layer of shape <code className="bg-blue-100 px-1 rounded">(n_qc_cells, 1200)</code>. It rescans every 30&nbsp;seconds.
                   <br /><br />
                   An <strong>Orchestrator</strong> needs no data &mdash; leave the field empty and the data&#8209;server is omitted entirely.
                 </span>
+
+                {/* Amber callout: zarr is mutated in place */}
+                <div className="mt-3 bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2">
+                  <svg className="w-4 h-4 mt-0.5 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z" />
+                  </svg>
+                  <div className="text-xs text-amber-800 leading-snug">
+                    <strong>Heads up:</strong> the data&#8209;server writes QC masks, HVG rank, the value&#8209;binned layer, and a UMAP into every <code className="bg-amber-100 px-1 rounded">.zarr/</code> it discovers. To keep your original file unchanged, ship the <code className="bg-amber-100 px-1 rounded">.h5ad</code>. The <code className="bg-amber-100 px-1 rounded">.h5ad</code> is opened read&#8209;only and the data&#8209;server only ever mutates the sibling <code className="bg-amber-100 px-1 rounded">.zarr/</code> it creates. If you point the worker at a <code className="bg-amber-100 px-1 rounded">.zarr/</code> you consider canonical, back it up first.
+                  </div>
+                </div>
 
                 {/* Disclosure 1 — example folder structure */}
                 <button
@@ -713,7 +724,51 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
                   </div>
                 )}
 
-                {/* Disclosure 2 — manifest.yaml builder form */}
+                {/* Disclosure 2 — expected AnnData structure */}
+                <button
+                  onClick={() => setShowAnnDataKeys(!showAnnDataKeys)}
+                  className="flex items-center text-xs text-blue-600 hover:text-blue-900 mt-3 transition-colors duration-150 ease-out active:scale-[0.97]"
+                >
+                  <svg className={`w-3 h-3 mr-1 transition-transform duration-200 ease-out ${showAnnDataKeys ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                  {showAnnDataKeys ? 'Hide' : 'Show'} expected AnnData structure
+                </button>
+                {showAnnDataKeys && (
+                  <div className="mt-3 bg-white rounded-lg p-3 border border-blue-100">
+                    <p className="text-xs text-blue-900 mb-2 leading-snug">
+                      Only these AnnData slots are read. Anything in <code className="bg-blue-50 px-1 rounded">adata.raw.X</code>, <code className="bg-blue-50 px-1 rounded">adata.layers[...]</code>, or other groups is ignored. Move counts into <code className="bg-blue-50 px-1 rounded">adata.X</code> before shipping.
+                    </p>
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-gray-500">
+                          <th className="text-left font-medium pb-1">Slot</th>
+                          <th className="text-left font-medium pb-1">Role</th>
+                          <th className="text-left font-medium pb-1">Required?</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-blue-900">
+                        <tr className="border-t border-blue-100">
+                          <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.X</code></td>
+                          <td className="py-1">Raw integer count matrix <code className="bg-blue-50 px-1 rounded">(n_cells, n_vars)</code>. Source for QC, HVG, binning, UMAP.</td>
+                          <td className="py-1 font-medium">Yes</td>
+                        </tr>
+                        <tr className="border-t border-blue-100">
+                          <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.var[&quot;gene_id&quot;]</code></td>
+                          <td className="py-1">Int gene token IDs the trainer feeds to the model. Without it cross-dataset gene matching breaks.</td>
+                          <td className="py-1">Strongly recommended</td>
+                        </tr>
+                        <tr className="border-t border-blue-100">
+                          <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.obs</code>, <code className="bg-blue-50 px-1 rounded">adata.var</code></td>
+                          <td className="py-1">Preserved verbatim. QC and HVG arrays are written alongside.</td>
+                          <td className="py-1">Optional</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Disclosure 3 — manifest.yaml builder form */}
                 <button
                   onClick={() => setShowManifestForm(!showManifestForm)}
                   className="flex items-center text-xs text-blue-600 hover:text-blue-900 mt-3 transition-colors duration-150 ease-out active:scale-[0.97]"

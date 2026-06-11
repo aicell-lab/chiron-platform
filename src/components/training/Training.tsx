@@ -3698,21 +3698,23 @@ const Training: React.FC = () => {
                                     </thead>
                                     <tbody>
                                       {manifest.zarr_files.map((f: any) => {
-                                        // Tabula's model token-sequence length. If this number changes in
-                                        // framework.yaml the warning below must follow. Surfaced as a
-                                        // constant so future me knows where to look.
-                                        const TABULA_IN_FEATURE = 1200;
-                                        const overflow = typeof f.n_vars === 'number' && f.n_vars > TABULA_IN_FEATURE;
                                         const hist: number[] | undefined = f.hvg_histogram_counts;
-                                        const maxCount = hist && hist.length ? Math.max(1, ...hist) : 1;
                                         const hasUmap = !!f.umap_version;
-                                        const umapSampled: number | undefined = f.umap_n_sampled;
+                                        // QC stats from the data-server. Absent on legacy / pre-v0.5 zarrs.
+                                        const qcRan = typeof f.qc_n_cells_kept === 'number' || typeof f.qc_n_genes_kept === 'number';
+                                        const cellsDropped = typeof f.n_cells_dropped === 'number' ? f.n_cells_dropped : null;
+                                        const genesDropped = typeof f.n_genes_dropped === 'number' ? f.n_genes_dropped : null;
+                                        // 1200 in the current framework.yaml; the data-server stamps
+                                        // each zarr with the actual value it used so the UI doesn't
+                                        // have to assume.
+                                        const inFeature: number | null = typeof f.hvg_in_feature === 'number' ? f.hvg_in_feature : null;
+                                        const nSelected: number | null = typeof f.hvg_n_selected === 'number' ? f.hvg_n_selected : null;
                                         return (
                                           <React.Fragment key={f.name}>
                                             <tr className="border-t border-gray-200">
                                               <td className="py-0.5 font-mono text-gray-600 text-xs truncate" title={f.name}>{f.name}</td>
                                               <td className="py-0.5 text-right text-gray-600">{f.n_samples?.toLocaleString() ?? '-'}</td>
-                                              <td className={`py-0.5 text-right ${overflow ? 'text-amber-700 font-medium' : 'text-gray-600'}`}>
+                                              <td className="py-0.5 text-right text-gray-600">
                                                 {f.n_vars?.toLocaleString() ?? '-'}
                                               </td>
                                               <td className="py-0.5 text-center">
@@ -3750,11 +3752,23 @@ const Training: React.FC = () => {
                                                 )}
                                               </td>
                                             </tr>
-                                            {overflow && (
+                                            {qcRan && (
                                               <tr>
                                                 <td colSpan={5} className="pb-0.5 pl-2 pt-0">
-                                                  <p className="text-[10px] text-amber-700 leading-tight">
-                                                    <strong>{f.n_vars?.toLocaleString()}</strong> stored genes &gt; model input length <strong>{TABULA_IN_FEATURE}</strong>. The trainer will keep the top {TABULA_IN_FEATURE.toLocaleString()} most variable genes per the HVG ranking shown to the left.
+                                                  <p className="text-[10px] text-gray-500 leading-tight">
+                                                    QC dropped{' '}
+                                                    <strong className="text-gray-700">{(cellsDropped ?? 0).toLocaleString()}</strong>{' '}
+                                                    cells and{' '}
+                                                    <strong className="text-gray-700">{(genesDropped ?? 0).toLocaleString()}</strong>{' '}
+                                                    genes (&lt; 250 detected each).
+                                                    {nSelected !== null && inFeature !== null && (
+                                                      <>
+                                                        {' '}Training on the top{' '}
+                                                        <strong className="text-gray-700">{nSelected.toLocaleString()}</strong>{' '}
+                                                        most variable genes
+                                                        {nSelected < inFeature ? ` (model input length ${inFeature.toLocaleString()}, padded)` : ''}.
+                                                      </>
+                                                    )}
                                                   </p>
                                                 </td>
                                               </tr>
