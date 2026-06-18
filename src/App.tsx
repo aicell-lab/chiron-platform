@@ -23,6 +23,7 @@ import Runs from './pages/Runs';
 import Models from './pages/Models';
 import ModelDetail from './pages/ModelDetail';
 import MyModels from './pages/MyModels';
+import Landing from './pages/Landing';
 
 // Create a wrapper component that uses Router hooks
 const AppContent: React.FC = () => {
@@ -80,7 +81,7 @@ const AppContent: React.FC = () => {
       />
       <main>
         <Routes>
-          <Route path="/" element={<Navigate to="/models" replace />} />
+          <Route path="/" element={<Landing />} />
           <Route path="/resources/:id" element={<div className="container mx-auto px-4"><ResourceDetails /></div>} />
           <Route path="/about" element={<div className="container mx-auto px-4"><About /></div>} />
           <Route path="/workers" element={<div className="container mx-auto px-4"><ResourceGrid type="worker" /></div>} />
