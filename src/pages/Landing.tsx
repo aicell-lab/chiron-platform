@@ -13,6 +13,14 @@ const SKILL_URL = 'https://chiron.aicell.io/skills/chiron-platform/SKILL.md';
 const EASE_OUT: [number, number, number, number] = [0.23, 1, 0.32, 1];
 const EASE_IN_OUT: [number, number, number, number] = [0.77, 0, 0.175, 1];
 
+// Concept animations and explainers are a work in progress — hidden until
+// they have been refined. Flip to true to re-enable the "How Chiron works"
+// section. All concept components below stay in the file so the next
+// editing round can iterate without resurrecting them. The widened boolean
+// type stops TypeScript from narrowing to the literal `false` and tripping
+// the no-unused-vars lint on the use site below.
+const SHOW_HOW_CHIRON_WORKS: boolean = false;
+
 type DirectionCardProps = {
   icon: React.ReactNode;
   title: string;
@@ -431,40 +439,43 @@ const Landing: React.FC = () => {
         </div>
       </section>
 
-      {/* How Chiron works */}
-      <section className="container mx-auto px-4 pb-16 max-w-5xl">
-        <div className="text-center max-w-2xl mx-auto mb-6">
-          <h2 className="text-2xl md:text-3xl font-semibold text-gray-800 mb-2">How Chiron works</h2>
-          <p className="text-sm text-gray-600">
-            Three concepts that underpin the platform. The animations loop continuously — give them a few seconds to walk you
-            through what happens.
-          </p>
-        </div>
+      {/* How Chiron works — hidden until the section is refined.
+          Flip SHOW_HOW_CHIRON_WORKS at the top of the file to re-enable. */}
+      {SHOW_HOW_CHIRON_WORKS && (
+        <section className="container mx-auto px-4 pb-16 max-w-5xl">
+          <div className="text-center max-w-2xl mx-auto mb-6">
+            <h2 className="text-2xl md:text-3xl font-semibold text-gray-800 mb-2">How Chiron works</h2>
+            <p className="text-sm text-gray-600">
+              Three concepts that underpin the platform. The animations loop continuously — give them a few seconds to walk
+              you through what happens.
+            </p>
+          </div>
 
-        <div className="bg-white/60 backdrop-blur-sm border border-white/40 rounded-3xl px-6 md:px-10 py-4 divide-y divide-gray-100">
-          <Concept
-            index={0}
-            title="BioEngine: an open runtime for biomedical AI apps"
-            body="BioEngine is a Ray-based runtime that lets researchers package an AI tool — a model, a fine-tuning loop, an inference pipeline — as a versioned artifact and deploy it on their own hardware behind a Hypha RPC endpoint. Chiron is built on top of BioEngine. The Manager, Orchestrator and Trainer are all BioEngine apps."
-            link={{ href: BIOENGINE_URL, label: 'BioEngine on GitHub' }}
-            animation={<BioEngineAnim />}
-          />
-          <Concept
-            index={1}
-            title="Workers: two isolated containers per site"
-            body="Each participating site runs a BioEngine Worker that pairs a local data server (which exposes private single-cell data over an authenticated container-internal stream) with a Tabula Trainer (which holds the GPU-bound model). Raw data never leaves the site. Only transformer weights are exchanged with the rest of the federation."
-            link={{ href: SKILL_URL, label: 'Chiron platform skill' }}
-            animation={<WorkerAnim />}
-          />
-          <Concept
-            index={2}
-            title="Federated learning: train without sharing raw data"
-            body="A central orchestrator broadcasts the current global model to every participating worker. Each worker trains for one epoch on its private data and returns only the updated transformer weights. The orchestrator averages them with FedAvg into a new global model and starts the next round. Across the whole run the orchestrator only ever sees weights and scalar metrics."
-            link={{ href: BIORXIV_URL, label: 'Read the bioRxiv preprint' }}
-            animation={<FederatedAnim />}
-          />
-        </div>
-      </section>
+          <div className="bg-white/60 backdrop-blur-sm border border-white/40 rounded-3xl px-6 md:px-10 py-4 divide-y divide-gray-100">
+            <Concept
+              index={0}
+              title="BioEngine: an open runtime for biomedical AI apps"
+              body="BioEngine is a Ray-based runtime that lets researchers package an AI tool — a model, a fine-tuning loop, an inference pipeline — as a versioned artifact and deploy it on their own hardware behind a Hypha RPC endpoint. Chiron is built on top of BioEngine. The Manager, Orchestrator and Trainer are all BioEngine apps."
+              link={{ href: BIOENGINE_URL, label: 'BioEngine on GitHub' }}
+              animation={<BioEngineAnim />}
+            />
+            <Concept
+              index={1}
+              title="Workers: two isolated containers per site"
+              body="Each participating site runs a BioEngine Worker that pairs a local data server (which exposes private single-cell data over an authenticated container-internal stream) with a Tabula Trainer (which holds the GPU-bound model). Raw data never leaves the site. Only transformer weights are exchanged with the rest of the federation."
+              link={{ href: SKILL_URL, label: 'Chiron platform skill' }}
+              animation={<WorkerAnim />}
+            />
+            <Concept
+              index={2}
+              title="Federated learning: train without sharing raw data"
+              body="A central orchestrator broadcasts the current global model to every participating worker. Each worker trains for one epoch on its private data and returns only the updated transformer weights. The orchestrator averages them with FedAvg into a new global model and starts the next round. Across the whole run the orchestrator only ever sees weights and scalar metrics."
+              link={{ href: BIORXIV_URL, label: 'Read the bioRxiv preprint' }}
+              animation={<FederatedAnim />}
+            />
+          </div>
+        </section>
+      )}
 
       {/* Footer */}
       <footer className="container mx-auto px-4 pb-10">
