@@ -4,15 +4,15 @@ description: Single entry point for an AI agent working on the Chiron platform. 
 compatibility: Designed for Claude Code, Gemini CLI, or any agent that can read a URL, call Hypha RPC, and execute Python.
 metadata:
   author: chiron-platform
-  version: "1.0"
+  version: "1.1"
   sub-skills:
     - apps/explore-tabula-models.md
     - apps/chiron-manager.md
     - apps/chiron-orchestrator.md
     - apps/tabula-trainer.md
+    - references/data-prep.md
     - references/trainer-artifact-template.md
   related-skills:
-    - https://chiron.aicell.io/skills/chiron-data-prep/SKILL.md
     - https://bioimage.io/public/skills/bioengine/SKILL.md
 ---
 
@@ -27,7 +27,7 @@ This skill is the dispatcher. Pick a task below.
 | # | Task | Sub-skill |
 |---|------|-----------|
 | 1 | Explore published Tabula checkpoints, load weights, run inference locally | [apps/explore-tabula-models.md](apps/explore-tabula-models.md) |
-| 2 | Set up a BioEngine Worker for Chiron, register your datasets | [§ 2 below](#2-set-up-a-chiron-worker) + [chiron-data-prep skill](https://chiron.aicell.io/skills/chiron-data-prep/SKILL.md) + [bioengine skill](https://bioimage.io/public/skills/bioengine/SKILL.md) |
+| 2 | Set up a BioEngine Worker for Chiron, register your datasets | [§ 2 below](#2-set-up-a-chiron-worker) + [references/data-prep.md](references/data-prep.md) + [bioengine skill](https://bioimage.io/public/skills/bioengine/SKILL.md) |
 | 3 | Launch and monitor a federated training session | [apps/chiron-manager.md](apps/chiron-manager.md) → [apps/chiron-orchestrator.md](apps/chiron-orchestrator.md) → [apps/tabula-trainer.md](apps/tabula-trainer.md) |
 | 4 | Add a new trainer for another foundation model (scGPT, Geneformer, ...) | [references/trainer-artifact-template.md](references/trainer-artifact-template.md) |
 
@@ -50,7 +50,7 @@ See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
 You need three things, in order.
 
 1. **Install and run a BioEngine Worker.** Follow the bioengine skill at [bioimage.io/public/skills/bioengine/SKILL.md](https://bioimage.io/public/skills/bioengine/SKILL.md) §1 (Set up a BioEngine worker). For Chiron specifically: launch the worker with `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}'` so the Chiron Manager comes up on startup. Easiest is the browser wizard at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker), which writes a one-line launch command for Docker, Podman, Singularity or Apptainer based on a short form.
-2. **Prepare and register your datasets.** Follow the [chiron-data-prep skill](https://chiron.aicell.io/skills/chiron-data-prep/SKILL.md). The skill explains the per-dataset folder layout, the `manifest.yaml` schema, the expected AnnData keys (`adata.X` raw counts, `adata.var["gene_id"]` gene tokens), and the per-dataset QC pipeline the data server applies on first read.
+2. **Prepare and register your datasets.** Follow the data-prep sub-skill at [references/data-prep.md](references/data-prep.md). It explains the per-dataset folder layout, the `manifest.yaml` schema, the expected AnnData keys (`adata.X` raw counts, `adata.var["gene_id"]` gene tokens), and the per-dataset QC pipeline the data server applies on first read.
 3. **Confirm the worker is online.** Once the BioEngine worker is up, the Chiron interface at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker) will show its name, its registered datasets, and its hardware. You can also query [apps/chiron-manager.md](apps/chiron-manager.md) `get_worker_info()` and `get_datasets_info()` directly via Hypha RPC.
 
 ## 3. Run federated training
@@ -99,4 +99,4 @@ manager = await server.get_service(managers[0]["id"])
 - **Mixing workspaces.** A `HYPHA_TOKEN` issued for a personal workspace will not see Chiron services. Make sure the token is for `chiron-platform` and that `connect_to_server` passes `workspace="chiron-platform"`.
 - **Orphan trainer registrations.** A trainer that registered to an orchestrator and then crashed without unregistering will leave a stale entry. Call `orchestrator.list_trainers()` and `orchestrator.remove_trainer(trainer_service_id)` to clean up, or restart the orchestrator app.
 - **Wrong artifact ID format for pretrained weights.** `load_pretrained_weights` and `create_trainer(pretrained_weights_artifact=...)` expect `{"artifact_id": "<ws>/<alias>", "file_path": "model.pth"}`. Passing only `artifact_id` (no `file_path`) silently does nothing.
-- **Forgetting `manifest.yaml`.** The data server discovers a dataset folder only if it contains a `manifest.yaml`. See the [chiron-data-prep skill](https://chiron.aicell.io/skills/chiron-data-prep/SKILL.md).
+- **Forgetting `manifest.yaml`.** The data server discovers a dataset folder only if it contains a `manifest.yaml`. See [references/data-prep.md](references/data-prep.md).

@@ -575,7 +575,7 @@ ${getRunCommand()}
   // paths rule, we DO NOT bake the user's DATA_DIR or dataset id into the
   // prompt — the agent asks the user on their machine instead.
   const getDataPrepPrompt = (): string => {
-    return `Read https://chiron.aicell.io/skills/chiron-data-prep/SKILL.md and help me prepare my single-cell data for Tabula federated training on this Chiron worker.
+    return `Read https://chiron.aicell.io/skills/chiron-platform/references/data-prep.md and help me prepare my single-cell data for Tabula federated training on this Chiron worker.
 
 I have one or more .h5ad or .zarr files I'd like to ingest. Please ask me for:
   - the path to my worker's data directory
@@ -897,7 +897,7 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
                       </p>
                       <div className="mt-2 flex items-stretch gap-2">
                         <code className="flex-1 min-w-0 px-2 py-1.5 text-[11px] font-mono text-gray-700 bg-white border border-indigo-200 rounded overflow-x-auto whitespace-nowrap">
-                          Read https://chiron.aicell.io/skills/chiron-data-prep/SKILL.md…
+                          Read https://chiron.aicell.io/skills/chiron-platform/references/data-prep.md…
                         </code>
                         <button
                           onClick={copyDataPrepPrompt}

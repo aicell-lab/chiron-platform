@@ -1,10 +1,11 @@
 ---
-name: chiron-data-prep
-description: Prepare single-cell data for Tabula federated training on a Chiron worker. Covers folder layout, manifest.yaml, and what the data-server handles for you (h5ad → zarr conversion, QC, value binning, HVG ranking, UMAP).
+name: chiron-platform/data-prep
+parent: chiron-platform
+description: Prepare single-cell data for Tabula federated training on a Chiron worker. Covers folder layout, manifest.yaml, and what the data-server handles for you (h5ad → zarr conversion, QC, value binning, HVG ranking, UMAP). Sub-skill of the chiron-platform skill.
 compatibility: Designed for Claude Code, Gemini CLI, or any agent that can read a URL and execute Python.
 metadata:
   author: chiron-platform
-  version: "1.1"
+  version: "1.2"
   pip: "scanpy>=1.10"
   server_handles:
     - h5ad → zarr conversion on first read + every 30 s rescan
@@ -16,7 +17,7 @@ metadata:
 
 # Prepare single-cell data for Tabula federated training
 
-This skill explains what a Chiron worker expects on disk and how to get an `.h5ad` file ready for training. You should read this once at the start of a session and then act.
+This is a sub-skill of the [chiron-platform skill](../SKILL.md). It explains what a Chiron worker expects on disk and how to get an `.h5ad` file ready for training. Read this once at the start of a data-onboarding session and then act.
 
 ## TL;DR for the agent
 
