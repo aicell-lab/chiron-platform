@@ -3,10 +3,10 @@
 Scenario
 ========
 
-1. Deploy a Chiron Orchestrator on the Chiron Worker - Boston (CPU only).
+1. Deploy a Chiron Orchestrator on the Chiron Worker - Stanford (CPU only).
 2. Deploy two trainers from scratch (no pretrained weights):
-     - Chiron Worker - Berlin   (thymus)
-     - Chiron Worker - Stanford (liver)
+     - Chiron Worker - Berlin (thymus)
+     - Chiron Worker - Boston (aging — skin_aging_blsa)
 3. Register both with the orchestrator and start training for 5 rounds with
    `initial_weights = chiron-platform/tabula-foundation`. The orchestrator
    broadcasts the transformer-only slice of that checkpoint to every trainer at
@@ -34,8 +34,8 @@ on the first hard failure.
 
 Prereqs
 =======
-- The four Chiron Workers (Boston / Berlin / Stanford / Stockholm) must be
-  online, with their datasets available.
+- The four Chiron Workers (Stockholm / Boston / Berlin / Stanford) must be
+  online, with their datasets available (Stanford runs the orchestrator only).
 - `chiron-platform/tabula-trainer` and `chiron-platform/chiron-orchestrator`
   apps must be uploaded.
 - `chiron-platform/tabula-foundation` and `chiron-platform/tabula-blood`
@@ -78,10 +78,10 @@ BATCH_SIZE = 8
 EXPECTED_BATCHES_PER_ROUND = 90  # full demo dataset
 
 # Site → expected dataset name. We only run trainers on these three sites; the
-# orchestrator goes on Boston (no GPU contention, no dataset).
+# orchestrator goes on Stanford (no GPU contention, no dataset).
 SITES = {
     "berlin":    {"dataset": "thymus"},
-    "stanford":  {"dataset": "liver"},
+    "boston":    {"dataset": "skin_aging_blsa"},
     "stockholm": {"dataset": "blood_perturb_rna_001"},
 }
 
@@ -368,7 +368,7 @@ async def main():
     am = await server.get_service("public/artifact-manager")
 
     # Track everything we create so cleanup runs even on failure.
-    orch_site = "boston"
+    orch_site = "stanford"
     orch_app_id: Optional[str] = None
     orch_svc: Optional[str] = None
     trainer_apps: Dict[str, str] = {}   # site → app_id
@@ -376,7 +376,7 @@ async def main():
     published_artifacts: List[str] = []
 
     try:
-        log_step("Step 1 — deploy orchestrator on Boston")
+        log_step("Step 1 — deploy orchestrator on Stanford")
         mid = await mgr_for(server, orch_site)
         orch_app_id = await hypha_post(mid, "create_orchestrator", {
             "token": app_token,
@@ -389,8 +389,8 @@ async def main():
             raise RuntimeError("orchestrator did not reach RUNNING")
         log(f"   service = {orch_svc}")
 
-        log_step("Step 2 — deploy initial 2 trainers (Berlin + Stanford, no pretrained)")
-        for site in ("berlin", "stanford"):
+        log_step("Step 2 — deploy initial 2 trainers (Berlin + Boston, no pretrained)")
+        for site in ("berlin", "boston"):
             res = await deploy_trainer(server, site, pretrained_artifact=None, app_token=app_token, user_id=user_id)
             trainer_apps[site] = res["app_id"]
             trainer_svcs[site] = res["service_id"]

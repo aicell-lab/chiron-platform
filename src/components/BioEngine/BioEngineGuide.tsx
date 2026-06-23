@@ -711,10 +711,9 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
                 {showDataExample && (
                   <div className="mt-3 bg-gray-900 rounded-lg p-3">
                     <pre className="text-green-400 text-xs font-mono overflow-x-auto whitespace-pre">{`/path/to/data/
-├── liver/
-│   ├── liver_healthy.h5ad
-│   ├── liver_disease.h5ad
-│   └── manifest.yaml         ← describes this tissue
+├── aging/
+│   ├── blsa_fibroblasts.h5ad
+│   └── manifest.yaml         ← describes this dataset
 ├── blood/
 │   ├── pbmc_10k.zarr/        ← already-converted zarr is fine too
 │   └── manifest.yaml
