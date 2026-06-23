@@ -165,6 +165,12 @@ interface ClusterStatus {
   used_cpu: number;
   total_gpu: number;
   used_gpu: number;
+  // Bytes (aggregated across all nodes by chiron-manager). Optional because
+  // older workers / managers may not populate them.
+  total_gpu_memory?: number;
+  used_gpu_memory?: number;
+  total_memory?: number;
+  used_memory?: number;
 }
 
 interface ManagerInfoModalData {
@@ -603,6 +609,11 @@ const Training: React.FC = () => {
   const [newOrchestratorArtifactId, setNewOrchestratorArtifactId] = useState('chiron-platform/chiron-orchestrator');
   const [newTrainerDatasets, setNewTrainerDatasets] = useState<string[]>([]);
   const [newTrainerArtifactId, setNewTrainerArtifactId] = useState('chiron-platform/tabula-trainer');
+  // Hardware-aware upper bound for this trainer's training batch size. Set
+  // once at deploy time based on the worker's GPU memory; the trainer
+  // clamps any per-session fit_config batch_size at this value so a session
+  // organizer doesn't have to know each site's hardware.
+  const [newTrainerMaxBatchSize, setNewTrainerMaxBatchSize] = useState<number>(32);
   const [localModelWeights, setLocalModelWeights] = useState<Array<{path: string; client_name: string; saved_at: string | null; description: string | null; datasets: Record<string, any>; train_samples: number; num_rounds: number; total_samples_seen: number}> | null>(null);
   const [selectedWeightsPath, setSelectedWeightsPath] = useState<string | null>(null);
   const [isLoadingLocalWeights, setIsLoadingLocalWeights] = useState(false);
@@ -1429,7 +1440,7 @@ const Training: React.FC = () => {
       try {
         const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
         const ownerId = user?.id as string | undefined;
-        const trainerParams: Record<string, any> = { token: applicationToken, datasets: datasetsArg, trainer_artifact_id: trainerArtifactArg, owner_id: ownerId };
+        const trainerParams: Record<string, any> = { token: applicationToken, datasets: datasetsArg, trainer_artifact_id: trainerArtifactArg, owner_id: ownerId, max_batch_size: newTrainerMaxBatchSize };
         if (pretrainedPathArg) trainerParams.pretrained_weights_path = pretrainedPathArg;
         if (pretrainedArtifactArg) trainerParams.pretrained_weights_artifact = { artifact_id: pretrainedArtifactArg, file_path: 'model.pth' };
         await callHyphaService(managerId, 'create_trainer', trainerParams, { timeoutMs: 180000 });
@@ -3519,6 +3530,41 @@ const Training: React.FC = () => {
                     <label className="block text-xs font-semibold text-gray-700 mb-1.5">Artifact ID</label>
                     <input type="text" value={newTrainerArtifactId} onChange={e => setNewTrainerArtifactId(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="chiron-platform/tabula-trainer" />
                   </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Max batch size</label>
+                    <p className="text-xs text-gray-400 -mt-1 mb-1.5">
+                      Hardware-aware upper bound for this trainer. Any session that requests a larger <code className="bg-gray-100 px-1 rounded">batch_size</code> is clamped to this value. Pick based on the worker's GPU memory (e.g., 32 for a 24 GB card, 8 for a small GPU).
+                    </p>
+                    {(() => {
+                      const cs = managers.find(m => m.serviceId === launchDialogManagerId)?.workerInfo?.cluster_status;
+                      if (!cs || !cs.total_gpu_memory || cs.total_gpu_memory <= 0) return null;
+                      const totalGiB = cs.total_gpu_memory / (1024 ** 3);
+                      const gpuCount = cs.total_gpu || 0;
+                      const perGpuGiB = gpuCount > 0 ? totalGiB / gpuCount : totalGiB;
+                      const usedGiB = (cs.used_gpu_memory || 0) / (1024 ** 3);
+                      return (
+                        <div className="text-xs text-gray-600 -mt-1 mb-1.5 bg-emerald-50 border border-emerald-100 rounded-md px-2 py-1.5">
+                          <span className="font-medium text-emerald-700">This worker:</span>{' '}
+                          {gpuCount > 0 ? `${gpuCount}× GPU, ` : ''}
+                          {totalGiB.toFixed(1)} GiB total{gpuCount > 1 ? ` (~${perGpuGiB.toFixed(1)} GiB per GPU)` : ''}
+                          {usedGiB > 0 && ` · ${usedGiB.toFixed(1)} GiB currently in use`}
+                        </div>
+                      );
+                    })()}
+                    <input
+                      type="number"
+                      min={1}
+                      max={512}
+                      step={1}
+                      value={newTrainerMaxBatchSize}
+                      onChange={e => {
+                        const v = parseInt(e.target.value, 10);
+                        if (Number.isFinite(v) && v >= 1) setNewTrainerMaxBatchSize(Math.min(512, v));
+                      }}
+                      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="32"
+                    />
+                  </div>
                   {/* Pretrained weights selection — local-worker saves + chiron-models full tabula models */}
                   <div>
                     <label className="block text-xs font-semibold text-gray-700 mb-1.5">Pretrained weights <span className="text-gray-400 font-normal">(optional)</span></label>
@@ -3648,10 +3694,29 @@ const Training: React.FC = () => {
                         <div>
                           <h5 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Cluster Resources</h5>
                           <div className="grid grid-cols-2 gap-3">
-                            {[
-                              { label: 'CPU', val: `${infoModalData.clusterStatus.used_cpu?.toFixed(1)} / ${infoModalData.clusterStatus.total_cpu?.toFixed(1)} cores`, pct: (infoModalData.clusterStatus.used_cpu || 0) / (infoModalData.clusterStatus.total_cpu || 1), color: 'bg-blue-500' },
-                              ...(infoModalData.clusterStatus.total_gpu > 0 ? [{ label: 'GPU', val: `${infoModalData.clusterStatus.used_gpu} / ${infoModalData.clusterStatus.total_gpu}`, pct: (infoModalData.clusterStatus.used_gpu || 0) / (infoModalData.clusterStatus.total_gpu || 1), color: 'bg-emerald-500' }] : []),
-                            ].map(r => (
+                            {(() => {
+                              const cs = infoModalData.clusterStatus!;
+                              const fmtGiB = (b?: number) => {
+                                if (!b || b <= 0) return null;
+                                return `${(b / (1024 ** 3)).toFixed(1)} GiB`;
+                              };
+                              const totalGpuMem = fmtGiB(cs.total_gpu_memory);
+                              const usedGpuMem = fmtGiB(cs.used_gpu_memory);
+                              const totalRam = fmtGiB(cs.total_memory);
+                              const usedRam = fmtGiB(cs.used_memory);
+                              return [
+                                { label: 'CPU', val: `${cs.used_cpu?.toFixed(1)} / ${cs.total_cpu?.toFixed(1)} cores`, pct: (cs.used_cpu || 0) / (cs.total_cpu || 1), color: 'bg-blue-500' },
+                                ...(cs.total_gpu > 0
+                                  ? [{ label: 'GPU', val: `${cs.used_gpu} / ${cs.total_gpu}`, pct: (cs.used_gpu || 0) / (cs.total_gpu || 1), color: 'bg-emerald-500' }]
+                                  : []),
+                                ...(totalGpuMem
+                                  ? [{ label: 'GPU memory', val: `${usedGpuMem ?? '—'} / ${totalGpuMem}`, pct: (cs.used_gpu_memory || 0) / (cs.total_gpu_memory || 1), color: 'bg-indigo-500' }]
+                                  : []),
+                                ...(totalRam
+                                  ? [{ label: 'RAM', val: `${usedRam ?? '—'} / ${totalRam}`, pct: (cs.used_memory || 0) / (cs.total_memory || 1), color: 'bg-purple-500' }]
+                                  : []),
+                              ];
+                            })().map(r => (
                               <div key={r.label} className="bg-gray-50 rounded-xl p-3">
                                 <div className="flex items-center justify-between mb-1">
                                   <p className="text-xs font-medium text-gray-500">{r.label} used</p>

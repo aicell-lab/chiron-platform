@@ -236,6 +236,11 @@ async def deploy_trainer(server, site: str, *, pretrained_artifact: Optional[str
         "token": app_token,
         "datasets": [SITES[site]["dataset"]],
         "trainer_artifact_id": TRAINER_ARTIFACT,
+        # Hardware-aware cap. The session below also passes batch_size in
+        # fit_config — the trainer clamps that at max_batch_size, so the
+        # effective batch_size is min(session, max). Setting both to the
+        # same value here keeps the test deterministic.
+        "max_batch_size": BATCH_SIZE,
         "owner_id": user_id,
     }
     if pretrained_artifact is not None:
