@@ -3551,6 +3551,17 @@ const Training: React.FC = () => {
                         </div>
                       );
                     })()}
+                    {/* Reference GPU memory at common batch sizes, measured live on an
+                        RTX 3090 with the Tabula trainer + the demo blood dataset. Above
+                        the trainer's idle ~0.7 GiB baseline. Scaling is super-linear, so
+                        we don't extrapolate to in-between sizes. */}
+                    <div className="text-xs text-gray-600 -mt-1 mb-1.5 bg-gray-50 border border-gray-200 rounded-md px-2 py-1.5">
+                      <span className="font-medium text-gray-700">Reference memory:</span>{' '}
+                      <code className="bg-white px-1 rounded">8</code> ≈ 2 GB ·{' '}
+                      <code className="bg-white px-1 rounded">16</code> ≈ 6 GB ·{' '}
+                      <code className="bg-white px-1 rounded">32</code> ≈ 20 GB
+                      <span className="text-gray-400"> (RTX 3090, Tabula trainer)</span>
+                    </div>
                     <input
                       type="number"
                       min={1}
