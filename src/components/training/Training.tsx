@@ -3775,10 +3775,6 @@ const Training: React.FC = () => {
                                       {manifest.zarr_files.map((f: any) => {
                                         const hist: number[] | undefined = f.hvg_histogram_counts;
                                         const hasUmap = !!f.umap_version;
-                                        // QC stats from the data-server. Absent on legacy / pre-v0.5 zarrs.
-                                        const qcRan = typeof f.qc_n_cells_kept === 'number' || typeof f.qc_n_genes_kept === 'number';
-                                        const cellsDropped = typeof f.n_cells_dropped === 'number' ? f.n_cells_dropped : null;
-                                        const genesDropped = typeof f.n_genes_dropped === 'number' ? f.n_genes_dropped : null;
                                         // 1200 in the current framework.yaml; the data-server stamps
                                         // each zarr with the actual value it used so the UI doesn't
                                         // have to assume.
@@ -3827,23 +3823,14 @@ const Training: React.FC = () => {
                                                 )}
                                               </td>
                                             </tr>
-                                            {qcRan && (
+                                            {nSelected !== null && inFeature !== null && (
                                               <tr>
                                                 <td colSpan={5} className="pb-0.5 pl-2 pt-0">
                                                   <p className="text-[10px] text-gray-500 leading-tight">
-                                                    QC dropped{' '}
-                                                    <strong className="text-gray-700">{(cellsDropped ?? 0).toLocaleString()}</strong>{' '}
-                                                    cells and{' '}
-                                                    <strong className="text-gray-700">{(genesDropped ?? 0).toLocaleString()}</strong>{' '}
-                                                    genes (&lt; 250 detected each).
-                                                    {nSelected !== null && inFeature !== null && (
-                                                      <>
-                                                        {' '}Training on the top{' '}
-                                                        <strong className="text-gray-700">{nSelected.toLocaleString()}</strong>{' '}
-                                                        most variable genes
-                                                        {nSelected < inFeature ? ` (model input length ${inFeature.toLocaleString()}, padded)` : ''}.
-                                                      </>
-                                                    )}
+                                                    Training on the top{' '}
+                                                    <strong className="text-gray-700">{nSelected.toLocaleString()}</strong>{' '}
+                                                    most variable genes
+                                                    {nSelected < inFeature ? ` (model input length ${inFeature.toLocaleString()}, padded)` : ''}.
                                                   </p>
                                                 </td>
                                               </tr>
