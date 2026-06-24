@@ -186,49 +186,72 @@ const BioEngineClusterResources: React.FC<BioEngineClusterResourcesProps> = ({ r
           )}
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
-          {/* CPU Usage */}
-          <ResourceCard
-            title="CPU Cores"
-            available={rayCluster.cluster?.available_cpu}
-            used={rayCluster.cluster?.used_cpu}
-            total={rayCluster.cluster?.total_cpu || 0}
-            color="bg-blue-600"
-            bgColor="bg-gradient-to-br from-blue-50 to-blue-100"
-          />
+        {(() => {
+          // Bioengine's cluster summary currently only carries CPU/GPU; memory
+          // lives per-node. Sum the nodes as a fallback so the Memory and
+          // Object Store cards aren't stuck at "0 / 0 GB".
+          const sumNodes = (field: 'total_memory' | 'used_memory' | 'total_object_store_memory' | 'used_object_store_memory'): number => {
+            const nodes = rayCluster.nodes;
+            if (!nodes) return 0;
+            let total = 0;
+            for (const n of Object.values(nodes)) {
+              const v = (n as any)?.[field];
+              if (typeof v === 'number' && isFinite(v)) total += v;
+            }
+            return total;
+          };
+          const memTotal = rayCluster.cluster?.total_memory || sumNodes('total_memory');
+          const memUsed = rayCluster.cluster?.used_memory ?? sumNodes('used_memory');
+          const memAvail = rayCluster.cluster?.available_memory;
+          const osTotal = rayCluster.cluster?.total_object_store_memory || sumNodes('total_object_store_memory');
+          const osUsed = rayCluster.cluster?.used_object_store_memory ?? sumNodes('used_object_store_memory');
+          const osAvail = rayCluster.cluster?.available_object_store_memory;
+          return (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+              {/* CPU Usage */}
+              <ResourceCard
+                title="CPU Cores"
+                available={rayCluster.cluster?.available_cpu}
+                used={rayCluster.cluster?.used_cpu}
+                total={rayCluster.cluster?.total_cpu || 0}
+                color="bg-blue-600"
+                bgColor="bg-gradient-to-br from-blue-50 to-blue-100"
+              />
 
-          {/* GPU Usage */}
-          <ResourceCard
-            title="GPU Cards"
-            available={rayCluster.cluster?.available_gpu}
-            used={rayCluster.cluster?.used_gpu}
-            total={rayCluster.cluster?.total_gpu || 0}
-            color="bg-purple-600"
-            bgColor="bg-gradient-to-br from-purple-50 to-purple-100"
-          />
+              {/* GPU Usage */}
+              <ResourceCard
+                title="GPU Cards"
+                available={rayCluster.cluster?.available_gpu}
+                used={rayCluster.cluster?.used_gpu}
+                total={rayCluster.cluster?.total_gpu || 0}
+                color="bg-purple-600"
+                bgColor="bg-gradient-to-br from-purple-50 to-purple-100"
+              />
 
-          {/* Memory Usage */}
-          <ResourceCard
-            title="Memory"
-            available={rayCluster.cluster?.available_memory}
-            used={rayCluster.cluster?.used_memory}
-            total={rayCluster.cluster?.total_memory || 0}
-            color="bg-orange-600"
-            bgColor="bg-gradient-to-br from-orange-50 to-orange-100"
-            unit="GB"
-          />
+              {/* Memory Usage */}
+              <ResourceCard
+                title="Memory"
+                available={memAvail}
+                used={memUsed}
+                total={memTotal}
+                color="bg-orange-600"
+                bgColor="bg-gradient-to-br from-orange-50 to-orange-100"
+                unit="GB"
+              />
 
-          {/* Object Store Memory Usage */}
-          <ResourceCard
-            title="Object Store"
-            available={rayCluster.cluster?.available_object_store_memory}
-            used={rayCluster.cluster?.used_object_store_memory}
-            total={rayCluster.cluster?.total_object_store_memory || 0}
-            color="bg-teal-600"
-            bgColor="bg-gradient-to-br from-teal-50 to-teal-100"
-            unit="GB"
-          />
-        </div>
+              {/* Object Store Memory Usage */}
+              <ResourceCard
+                title="Object Store"
+                available={osAvail}
+                used={osUsed}
+                total={osTotal}
+                color="bg-teal-600"
+                bgColor="bg-gradient-to-br from-teal-50 to-teal-100"
+                unit="GB"
+              />
+            </div>
+          );
+        })()}
 
         {/* Expandable Pending Resources Section */}
         {rayCluster.cluster?.pending_resources && (
