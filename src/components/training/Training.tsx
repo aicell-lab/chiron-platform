@@ -3560,7 +3560,6 @@ const Training: React.FC = () => {
                       <code className="bg-white px-1 rounded">8</code> ≈ 2 GB ·{' '}
                       <code className="bg-white px-1 rounded">16</code> ≈ 6 GB ·{' '}
                       <code className="bg-white px-1 rounded">32</code> ≈ 20 GB
-                      <span className="text-gray-400"> (RTX 3090, Tabula trainer)</span>
                     </div>
                     <input
                       type="number"
