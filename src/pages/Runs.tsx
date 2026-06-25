@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useHyphaStore } from '../store/hyphaStore';
 import { MdHistory, MdRefresh } from 'react-icons/md';
 import { BiLoaderAlt } from 'react-icons/bi';
-import { FaChevronDown, FaChevronRight, FaExternalLinkAlt } from 'react-icons/fa';
+import { FaChevronDown, FaChevronRight, FaExternalLinkAlt, FaTrash } from 'react-icons/fa';
 import { Link } from 'react-router-dom';
 
 interface RoundMeta {
@@ -84,7 +84,7 @@ const LossSparkline: React.FC<{ losses: [number, number][] }> = ({ losses }) => 
   );
 };
 
-const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean }> = ({ run, defaultOpen }) => {
+const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean; onDelete: (run: RunArtifact) => void }> = ({ run, defaultOpen, onDelete }) => {
   const [open, setOpen] = useState(defaultOpen ?? false);
   const m = run.manifest;
   const status = run.liveStatus || m.status || 'completed';
@@ -127,6 +127,21 @@ const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean }> = ({ run, d
             <FaExternalLinkAlt size={10} /> Resume
           </Link>
         )}
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label="Delete run"
+          title="Delete run"
+          onClick={e => { e.stopPropagation(); onDelete(run); }}
+          onKeyDown={e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault(); e.stopPropagation(); onDelete(run);
+            }
+          }}
+          className="flex items-center justify-center w-8 h-8 text-gray-300 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors flex-shrink-0 cursor-pointer"
+        >
+          <FaTrash size={12} />
+        </span>
       </button>
 
       {open && (
@@ -227,6 +242,12 @@ const Runs: React.FC = () => {
   const [runs, setRuns] = useState<RunArtifact[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Confirmation dialog for delete. Holds the run pending deletion + the
+  // in-flight state so the Delete button can show a spinner while we wait
+  // for artifactManager.delete to finish.
+  const [pendingDelete, setPendingDelete] = useState<RunArtifact | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const fetchRuns = useCallback(async () => {
     if (!artifactManager || !server) return;
@@ -277,6 +298,34 @@ const Runs: React.FC = () => {
   }, [artifactManager, server]);
 
   useEffect(() => { fetchRuns(); }, [fetchRuns]);
+
+  // Confirmed delete: removes the run artifact (and its files) from
+  // chiron-training-runs. Published global weights and trainer models live
+  // in their own collections and stay untouched.
+  const confirmDelete = useCallback(async () => {
+    if (!pendingDelete || !artifactManager) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await artifactManager.delete({
+        artifact_id: pendingDelete.id,
+        delete_files: true,
+        recursive: true,
+        _rkwargs: true,
+      });
+      setRuns(prev => prev.filter(r => r.id !== pendingDelete.id));
+      setPendingDelete(null);
+    } catch (e: any) {
+      setDeleteError(e?.message ?? String(e));
+    } finally {
+      setDeleting(false);
+    }
+  }, [artifactManager, pendingDelete]);
+
+  const requestDelete = useCallback((run: RunArtifact) => {
+    setDeleteError(null);
+    setPendingDelete(run);
+  }, []);
 
   const runningRuns = runs.filter(r => r.liveStatus === 'running');
   const otherRuns = runs.filter(r => r.liveStatus !== 'running');
@@ -333,7 +382,7 @@ const Runs: React.FC = () => {
             <div>
               <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2 px-1">Active</p>
               <div className="space-y-3">
-                {runningRuns.map(r => <RunCard key={r.id} run={r} defaultOpen />)}
+                {runningRuns.map(r => <RunCard key={r.id} run={r} defaultOpen onDelete={requestDelete} />)}
               </div>
             </div>
           )}
@@ -341,10 +390,75 @@ const Runs: React.FC = () => {
             <div>
               {runningRuns.length > 0 && <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2 mt-4 px-1">History</p>}
               <div className="space-y-3">
-                {otherRuns.map(r => <RunCard key={r.id} run={r} />)}
+                {otherRuns.map(r => <RunCard key={r.id} run={r} onDelete={requestDelete} />)}
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Delete confirmation modal. Rendered at the page root so it overlays
+          whichever RunCard the user clicked into. Esc / backdrop click cancels
+          unless a delete is already in flight. */}
+      {pendingDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+          onClick={() => { if (!deleting) setPendingDelete(null); }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-run-title"
+            className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 space-y-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+                <FaTrash size={14} className="text-red-600" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h2 id="delete-run-title" className="text-base font-semibold text-gray-900">
+                  Delete training run?
+                </h2>
+                <p className="text-sm text-gray-600 mt-1 break-words">
+                  <span className="font-medium text-gray-800">{pendingDelete.manifest.name}</span>
+                </p>
+                <p className="text-xs text-gray-500 mt-2">
+                  This action cannot be undone. The run record and any files attached to it will be permanently removed.
+                  Published global weights and saved trainer models live in their own collections and are not affected.
+                </p>
+                {pendingDelete.liveStatus === 'running' && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1.5 mt-2">
+                    This run is still active. Consider stopping it from the Training tab first.
+                  </p>
+                )}
+              </div>
+            </div>
+            {deleteError && (
+              <div className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+                {deleteError}
+              </div>
+            )}
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setPendingDelete(null)}
+                disabled={deleting}
+                className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-xl transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmDelete}
+                disabled={deleting}
+                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 rounded-xl transition-colors disabled:opacity-60"
+              >
+                {deleting && <BiLoaderAlt className="animate-spin" size={14} />}
+                {deleting ? 'Deleting…' : 'Delete run'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
