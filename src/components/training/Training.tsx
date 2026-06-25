@@ -697,6 +697,7 @@ const Training: React.FC = () => {
   const [isLoadingRegisteredTrainers, setIsLoadingRegisteredTrainers] = useState(false);
   const [isPreparingTraining, setIsPreparingTraining] = useState(false);
   const [isStoppingTraining, setIsStoppingTraining] = useState(false);
+  const [isRequestingGracefulStop, setIsRequestingGracefulStop] = useState(false);
   const [resetStateSuccess, setResetStateSuccess] = useState(false);
   // Trainer service IDs that have participated in at least one round of the current run.
   // Used to distinguish "pending add" (registered but not yet active) from active trainers.
@@ -1955,6 +1956,29 @@ const Training: React.FC = () => {
     } finally { setIsStoppingTraining(false); }
   };
 
+  // Graceful stop: ask the orchestrator to exit after the current round
+  // finishes, instead of cancelling fit/evaluate mid-flight like stopTraining.
+  // The button stays clickable while the request is being acknowledged, then
+  // we rely on trainingStatus.stop_after_current_round to disable it.
+  const requestGracefulStop = async () => {
+    if (!selectedOrchestrator) return;
+    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    if (!orchestrator || orchestrator.status !== 'RUNNING') return;
+    setIsRequestingGracefulStop(true);
+    try {
+      const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+      await callHyphaService(orchSvcId, 'request_stop_after_current_round', {}, { timeoutMs: 30000 });
+      // Optimistically reflect the pending stop in local state. The next
+      // training-status poll will overwrite this with the orchestrator's
+      // authoritative value.
+      setTrainingStatus(prev => prev ? { ...prev, stop_after_current_round: true } : prev);
+    } catch (error) {
+      setErrorPopupMessage('Failed to Schedule Graceful Stop');
+      setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
+      setShowErrorPopup(true);
+    } finally { setIsRequestingGracefulStop(false); }
+  };
+
   const resetTrainingState = async () => {
     if (!selectedOrchestrator) return;
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
@@ -3071,11 +3095,33 @@ const Training: React.FC = () => {
 
                 {/* Always-visible action strip */}
                 <div className={`px-5 py-3 flex items-center gap-3 ${trainingConfigCollapsed ? '' : 'border-t border-gray-100'}`}>
-                  {isActivelyTraining && (
-                    <button onClick={stopTraining} disabled={isStoppingTraining} className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                      {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping...</> : <><FaStop size={12} /> Stop Training</>}
-                    </button>
-                  )}
+                  {isActivelyTraining && (() => {
+                    const stopPending = !!(trainingStatus && (trainingStatus as any).stop_after_current_round);
+                    return (
+                      <>
+                        <button
+                          onClick={requestGracefulStop}
+                          disabled={isRequestingGracefulStop || stopPending || isStoppingTraining}
+                          title="Finish the round in flight, then exit without starting any more rounds"
+                          className="flex items-center gap-2 px-4 py-2 bg-amber-500 text-white text-sm font-semibold rounded-xl hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                        >
+                          {stopPending
+                            ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping after this round…</>
+                            : isRequestingGracefulStop
+                              ? <><BiLoaderAlt className="animate-spin" size={14} /> Scheduling…</>
+                              : <><FaStop size={12} /> Stop After Round</>}
+                        </button>
+                        <button
+                          onClick={stopTraining}
+                          disabled={isStoppingTraining}
+                          title="Cancel the round in flight immediately — trainers return partial weights and the run is marked stopped"
+                          className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                        >
+                          {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping…</> : <><FaStop size={12} /> Stop Now</>}
+                        </button>
+                      </>
+                    );
+                  })()}
                   <button
                     onClick={() => showConfirmDialog(
                       'Clear Training History',
