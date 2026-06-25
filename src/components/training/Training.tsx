@@ -3544,8 +3544,18 @@ const Training: React.FC = () => {
                   <div>
                     <label className="block text-xs font-semibold text-gray-700 mb-1.5">Max batch size</label>
                     <p className="text-xs text-gray-400 -mt-1 mb-1.5">
-                      Hardware-aware upper bound for this trainer. Any session that requests a larger <code className="bg-gray-100 px-1 rounded">batch_size</code> is clamped to this value. Pick based on the worker's GPU memory (e.g., 32 for a 24 GB card, 8 for a small GPU).
+                      Hardware-aware upper bound for this trainer. Any session that requests a larger <code className="bg-gray-100 px-1 rounded">batch_size</code> is clamped to this value. Pick based on the worker's GPU memory.
                     </p>
+                    {/* Reference GPU memory at common batch sizes, measured live on an
+                        RTX 3090 with the Tabula trainer + the demo blood dataset. Above
+                        the trainer's idle ~0.7 GiB baseline. Scaling is super-linear, so
+                        we don't extrapolate to in-between sizes. */}
+                    <div className="text-xs text-gray-600 -mt-1 mb-1.5 bg-gray-50 border border-gray-200 rounded-md px-2 py-1.5">
+                      <span className="font-medium text-gray-700">Reference memory:</span>{' '}
+                      <code className="bg-white px-1 rounded">8</code> ≈ 2 GB ·{' '}
+                      <code className="bg-white px-1 rounded">16</code> ≈ 6 GB ·{' '}
+                      <code className="bg-white px-1 rounded">32</code> ≈ 20 GB
+                    </div>
                     {(() => {
                       const cs = managers.find(m => m.serviceId === launchDialogManagerId)?.workerInfo?.cluster_status;
                       if (!cs || !cs.total_gpu_memory || cs.total_gpu_memory <= 0) return null;
@@ -3562,16 +3572,6 @@ const Training: React.FC = () => {
                         </div>
                       );
                     })()}
-                    {/* Reference GPU memory at common batch sizes, measured live on an
-                        RTX 3090 with the Tabula trainer + the demo blood dataset. Above
-                        the trainer's idle ~0.7 GiB baseline. Scaling is super-linear, so
-                        we don't extrapolate to in-between sizes. */}
-                    <div className="text-xs text-gray-600 -mt-1 mb-1.5 bg-gray-50 border border-gray-200 rounded-md px-2 py-1.5">
-                      <span className="font-medium text-gray-700">Reference memory:</span>{' '}
-                      <code className="bg-white px-1 rounded">8</code> ≈ 2 GB ·{' '}
-                      <code className="bg-white px-1 rounded">16</code> ≈ 6 GB ·{' '}
-                      <code className="bg-white px-1 rounded">32</code> ≈ 20 GB
-                    </div>
                     <input
                       type="number"
                       min={1}
