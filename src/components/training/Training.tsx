@@ -1043,11 +1043,22 @@ const Training: React.FC = () => {
     }
   };
 
+  // BioEngine returns the app's service_ids either as an array of
+  // {websocket_service_id, webrtc_service_id} objects (older shape) or as a
+  // single object of the same shape (newer shape). Normalise to an array so
+  // downstream code can always do `serviceIds[0]?.websocket_service_id` and
+  // `serviceIds.forEach(...)` without crashing.
+  const normalizeServiceIds = (sids: any): any[] => {
+    if (Array.isArray(sids)) return sids;
+    if (sids && typeof sids === 'object') return [sids];
+    return [];
+  };
+
   const toOrchestratorApp = (managerId: string, appId: string, s: any): OrchestratorApp => ({
     managerId,
     appId,
     status: s.status,
-    serviceIds: s.service_ids || [],
+    serviceIds: normalizeServiceIds(s.service_ids),
     artifactId: s.artifact_id || 'chiron-platform/chiron-orchestrator',
     displayName: s.display_name,
     applicationId: appId,
@@ -1058,7 +1069,7 @@ const Training: React.FC = () => {
     managerId,
     appId,
     status: s.status,
-    serviceIds: s.service_ids || [],
+    serviceIds: normalizeServiceIds(s.service_ids),
     datasets: s.datasets || {},
     artifactId: s.artifact_id || 'chiron-platform/tabula-trainer',
     displayName: s.display_name,
