@@ -1065,6 +1065,23 @@ const Training: React.FC = () => {
     }
   };
 
+  // Derive the BioEngine worker's service id from a chiron-manager service
+  // id so we can deep-link to the right dashboard when a manager call hits
+  // a permission error. The manager id looks like
+  // "<workspace>/<workerClientId>-<replicaSuffix>:chiron-manager" (or the
+  // wildcard form "<workerClientId>-*:chiron-manager" used elsewhere); the
+  // matching worker id is "<workspace>/<workerClientId>:bioengine-worker".
+  // Splitting on ":bioengine" (the old hack) found no match and produced
+  // a malformed URL like ".../chiron-manager:bioengine-worker".
+  const managerIdToWorkerServiceId = (managerId: string): string => {
+    const slash = managerId.indexOf('/');
+    const workspace = slash >= 0 ? managerId.slice(0, slash) : '';
+    const rest = slash >= 0 ? managerId.slice(slash + 1) : managerId;
+    const clientPart = rest.split(':')[0]; // "<workerClientId>-<replicaSuffix>" or "<workerClientId>-*"
+    const workerClientId = clientPart.split('-')[0];
+    return workspace ? `${workspace}/${workerClientId}:bioengine-worker` : `${workerClientId}:bioengine-worker`;
+  };
+
   // BioEngine returns the app's service_ids either as an array of
   // {websocket_service_id, webrtc_service_id} objects (older shape) or as a
   // single object of the same shape (newer shape). Normalise to an array so
@@ -1614,7 +1631,7 @@ const Training: React.FC = () => {
       setErrorPopupMessage('Failed to Remove Orchestrator');
       setErrorPopupDetails(msg);
       if (msg.includes('worker admin')) {
-        setErrorPopupDashboardUrl(`${window.location.origin}/#/worker/dashboard?service_id=${managerId.split(':bioengine')[0]}:bioengine-worker`);
+        setErrorPopupDashboardUrl(`${window.location.origin}/#/worker/dashboard?service_id=${managerIdToWorkerServiceId(managerId)}`);
       }
       setShowErrorPopup(true);
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
@@ -1641,7 +1658,7 @@ const Training: React.FC = () => {
       setErrorPopupMessage('Failed to Remove Trainer');
       setErrorPopupDetails(msg);
       if (msg.includes('worker admin')) {
-        setErrorPopupDashboardUrl(`${window.location.origin}/#/worker/dashboard?service_id=${managerId.split(':bioengine')[0]}:bioengine-worker`);
+        setErrorPopupDashboardUrl(`${window.location.origin}/#/worker/dashboard?service_id=${managerIdToWorkerServiceId(managerId)}`);
       }
       setShowErrorPopup(true);
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
