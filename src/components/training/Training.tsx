@@ -756,6 +756,12 @@ const Training: React.FC = () => {
   const [confirmModalAction, setConfirmModalAction] = useState<(() => void) | null>(null);
   const [confirmModalDanger, setConfirmModalDanger] = useState(false);
   const [confirmModalConfirmLabel, setConfirmModalConfirmLabel] = useState<string>('Continue');
+  // Optional loading state for the confirm modal. While true the modal shows a
+  // spinner where the message would be and the confirm button is disabled. Used
+  // by flows that need to fetch information (e.g. is the latest global weight
+  // checkpoint already saved?) before they can show the right warning.
+  const [confirmModalLoading, setConfirmModalLoading] = useState(false);
+  const [confirmModalLoadingMessage, setConfirmModalLoadingMessage] = useState<string>('');
 
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [infoModalData, setInfoModalData] = useState<InfoModalData | null>(null);
@@ -1498,11 +1504,57 @@ const Training: React.FC = () => {
     const orchestratorId = `${managerId}::${orchestrator.appId}`;
     const isSelected = orchestratorId === selectedOrchestrator;
     if (isSelected && trainingHistory && ((trainingHistory.training_losses?.length > 0) || (trainingHistory.validation_losses?.length > 0))) {
-      showConfirmDialog(
-        'Delete Orchestrator with History',
-        'This orchestrator has training history that will be permanently lost. Continue?',
-        async () => { await performRemoveOrchestrator(managerId, false); }
+      // Show the modal in loading state immediately so the user gets feedback
+      // while we check whether the latest global weights have been published
+      // (in which case they can continue from that checkpoint later) or not
+      // (in which case all training progress is gone for good).
+      const latestRound = Math.max(
+        ...(trainingHistory.training_losses?.map(([r]) => r) ?? [0]),
+        ...(trainingHistory.validation_losses?.map(([r]) => r) ?? [0]),
+        0,
       );
+      const orchSvcId = orchestrator.serviceIds[0]?.websocket_service_id;
+      setConfirmModalTitle('Delete Orchestrator with History');
+      setConfirmModalMessage('');
+      setConfirmModalLoadingMessage('Checking whether the latest global weights have been published…');
+      setConfirmModalLoading(true);
+      setConfirmModalDanger(true);
+      setConfirmModalConfirmLabel('Delete');
+      setConfirmModalAction(() => async () => { await performRemoveOrchestrator(managerId, false); });
+      setShowConfirmModal(true);
+
+      (async () => {
+        let published: Array<{ artifact_id: string; round: number; description?: string; published_at: string }> = [];
+        try {
+          if (orchSvcId) {
+            published = await callHyphaService(orchSvcId, 'get_published_global_weights', {}, { timeoutMs: 15000 }) || [];
+          }
+        } catch (e) {
+          // get_published_global_weights is unavailable on orchestrators
+          // older than 0.2.4. Fall back to the historical warning so we
+          // don't silently mislead the operator on legacy deployments.
+          setConfirmModalMessage('This orchestrator has training history. All training progress will be permanently lost once it is deleted. Publish the current global weights from the Train tab first if you want to keep them.');
+          setConfirmModalLoading(false);
+          return;
+        }
+        const newest = published.length > 0
+          ? published.reduce((a, b) => (a.round >= b.round ? a : b))
+          : null;
+        let body: string;
+        if (newest && newest.round >= latestRound) {
+          // Published checkpoint is up to date with the in-memory state.
+          body = `The current global weights are already published at round ${newest.round} as:\n\n${newest.artifact_id}\n\nYou can later continue a training session from this checkpoint. Deleting this orchestrator clears its in-memory state but the published checkpoint is preserved.`;
+        } else if (newest) {
+          // Some rounds beyond the published checkpoint will be lost.
+          const lostRounds = latestRound - newest.round;
+          body = `The latest published global weights are at round ${newest.round} (artifact ${newest.artifact_id}). The in-memory state is at round ${latestRound}, so deleting now loses ${lostRounds} round${lostRounds === 1 ? '' : 's'} of training that haven't been published. Publish the current global weights from the Train tab first if you want to keep them.`;
+        } else {
+          // Nothing has been published yet.
+          body = `No global weights have been published from this orchestrator yet. All ${latestRound} round${latestRound === 1 ? '' : 's'} of training progress will be permanently lost. Publish the current global weights from the Train tab first if you want to keep them.`;
+        }
+        setConfirmModalMessage(body);
+        setConfirmModalLoading(false);
+      })();
       return;
     }
     if (orchestrator.status === 'RUNNING') {
@@ -4110,14 +4162,27 @@ const Training: React.FC = () => {
               <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${confirmModalDanger ? 'bg-red-100' : 'bg-amber-100'}`}>
                 <svg className={`w-5 h-5 ${confirmModalDanger ? 'text-red-600' : 'text-amber-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
               </div>
-              <div>
+              <div className="flex-1 min-w-0">
                 <h3 className="font-semibold text-gray-900 mb-1">{confirmModalTitle}</h3>
-                <p className="text-sm text-gray-600 whitespace-pre-wrap">{confirmModalMessage}</p>
+                {confirmModalLoading ? (
+                  <p className="text-sm text-gray-500 flex items-center gap-2">
+                    <BiLoaderAlt className="animate-spin" size={14} />
+                    {confirmModalLoadingMessage || 'Checking…'}
+                  </p>
+                ) : (
+                  <p className="text-sm text-gray-600 whitespace-pre-wrap">{confirmModalMessage}</p>
+                )}
               </div>
             </div>
             <div className="flex gap-3">
-              <button onClick={() => { setShowConfirmModal(false); setConfirmModalAction(null); setConfirmModalDanger(false); setConfirmModalConfirmLabel('Continue'); }} className="flex-1 py-2.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors">Cancel</button>
-              <button onClick={() => { const action = confirmModalAction; setShowConfirmModal(false); setConfirmModalAction(null); setConfirmModalDanger(false); setConfirmModalConfirmLabel('Continue'); action?.(); }} className={`flex-1 py-2.5 text-white text-sm font-medium rounded-xl transition-colors ${confirmModalDanger ? 'bg-red-600 hover:bg-red-700' : 'bg-amber-600 hover:bg-amber-700'}`}>{confirmModalConfirmLabel}</button>
+              <button onClick={() => { setShowConfirmModal(false); setConfirmModalAction(null); setConfirmModalDanger(false); setConfirmModalConfirmLabel('Continue'); setConfirmModalLoading(false); setConfirmModalLoadingMessage(''); }} className="flex-1 py-2.5 border border-gray-200 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors">Cancel</button>
+              <button
+                onClick={() => { const action = confirmModalAction; setShowConfirmModal(false); setConfirmModalAction(null); setConfirmModalDanger(false); setConfirmModalConfirmLabel('Continue'); setConfirmModalLoading(false); setConfirmModalLoadingMessage(''); action?.(); }}
+                disabled={confirmModalLoading}
+                className={`flex-1 py-2.5 text-white text-sm font-medium rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${confirmModalDanger ? 'bg-red-600 hover:bg-red-700' : 'bg-amber-600 hover:bg-amber-700'}`}
+              >
+                {confirmModalConfirmLabel}
+              </button>
             </div>
           </div>
         </div>
