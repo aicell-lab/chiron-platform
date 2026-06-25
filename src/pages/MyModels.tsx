@@ -100,18 +100,26 @@ const MyModels: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      // Pull both staged (drafts) and committed (published) artifacts tagged
-      // with this user's id. The orchestrator / trainer writes
-      // manifest.uploaded_by_user_id at create time from CHIRON_DEPLOYED_BY,
-      // which is set by the manager on every create_orchestrator /
-      // create_trainer call. Filtering on the manifest field works
-      // regardless of which workspace service account actually owns the
-      // artifact under the hood.
-      const { items } = await listArtifactChildren(MODELS_COLLECTION, {
-        filters: { manifest: { uploaded_by_user_id: user.id } },
+      // Pull both staged (drafts) and committed (published) artifacts under
+      // the chiron-models collection, then JS-filter on either
+      // manifest.uploaded_by_user_id or manifest.uploaded_by_user_email
+      // matching the logged-in user. The same human can show up under
+      // different Hypha ids depending on whether they authenticated via
+      // OAuth (e.g. github|49943582) or via a personal token (e.g.
+      // hungry-scooter-22449731) — the email is the only stable link, but
+      // the id match still covers cases where the email is missing.
+      const { items: allItems } = await listArtifactChildren(MODELS_COLLECTION, {
         stage: 'all',
-        limit: 100,
+        limit: 200,
         token: hyphaToken || undefined,
+      });
+      const myId = user.id;
+      const myEmail = (user as any)?.email as string | undefined;
+      const items = allItems.filter(a => {
+        const m = (a.manifest || {}) as any;
+        if (m.uploaded_by_user_id && m.uploaded_by_user_id === myId) return true;
+        if (myEmail && m.uploaded_by_user_email && m.uploaded_by_user_email === myEmail) return true;
+        return false;
       });
       // Sort: drafts first (so review is one click away), then by name.
       const sorted = [...items].sort((a, b) => {

@@ -1404,18 +1404,18 @@ const Training: React.FC = () => {
   const createOrchestrator = async (managerId: string) => {
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
-    // Guard: a previous create_orchestrator on this manager is still in flight.
-    // Without this, a fast double-click on the Start Orchestrator button (or a
-    // re-entrant call before the optimistic placeholder unmounts the dialog)
-    // would deploy_app twice and leave two orchestrators on the worker.
+    // Guard: a previous create_orchestrator on this manager is still in
+    // flight. Acquire the lock BEFORE any state setters so a second
+    // re-entrant call (fast double-click, user retry after HTTP timeout
+    // while the previous deploy is still running on the server, etc) can't
+    // slip through.
     if (mutatingManagersRef.current.has(managerId)) return;
+    mutatingManagersRef.current.add(managerId);
     // Close UI immediately
     setShowCreateOrchestrator(false);
     setShowLaunchDialog(false);
     setCreatingFor(null);
     setIsCreatingOrchestrator(true);
-    // Acquire lock first, then optimistic placeholder
-    mutatingManagersRef.current.add(managerId);
     const pendingAppId = `pending-${Date.now().toString(36)}`;
     setOrchestrators(prev => [...prev, {
       managerId,
@@ -1437,7 +1437,8 @@ const Training: React.FC = () => {
       try {
         const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
         const ownerId = user?.id as string | undefined;
-        await callHyphaService(managerId, 'create_orchestrator', { token: applicationToken, owner_id: ownerId }, { timeoutMs: 120000 });
+        const ownerEmail = (user?.email as string | undefined) || undefined;
+        await callHyphaService(managerId, 'create_orchestrator', { token: applicationToken, owner_id: ownerId, owner_email: ownerEmail }, { timeoutMs: 120000 });
       } catch (error) {
         setOrchestrators(prev => prev.filter(o => o.appId !== pendingAppId));
         setErrorPopupMessage('Failed to Create Orchestrator');
@@ -1455,10 +1456,13 @@ const Training: React.FC = () => {
 
   const createTrainer = async (managerId: string) => {
     if (newTrainerDatasets.length === 0) return;
-    // Guard against a re-entrant call (double-click on the deploy button)
-    // that would otherwise create two trainers on the worker. Same pattern
-    // as createOrchestrator above.
+    // Guard against a re-entrant call (double-click on the deploy button,
+    // user retrying after an HTTP timeout while the previous deploy is
+    // still running server-side, etc). Acquire the lock BEFORE any state
+    // setters so the second call can't slip through the gap between the
+    // check and the lock-acquisition.
     if (mutatingManagersRef.current.has(managerId)) return;
+    mutatingManagersRef.current.add(managerId);
     // Snapshot user-input state before clearing the form
     const datasetsArg = newTrainerDatasets;
     const trainerArtifactArg = newTrainerArtifactId;
@@ -1474,8 +1478,6 @@ const Training: React.FC = () => {
     setSelectedTrainerWeightsArtifactId(null);
     setIsWeightsDropdownOpen(false);
     setIsCreatingTrainer(true);
-    // Acquire lock first, then optimistic placeholder
-    mutatingManagersRef.current.add(managerId);
     const pendingAppId = `pending-${Date.now().toString(36)}`;
     const optimisticDatasets: Record<string, any> = {};
     for (const d of datasetsArg) optimisticDatasets[d] = { name: d };
@@ -1500,7 +1502,8 @@ const Training: React.FC = () => {
       try {
         const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
         const ownerId = user?.id as string | undefined;
-        const trainerParams: Record<string, any> = { token: applicationToken, datasets: datasetsArg, trainer_artifact_id: trainerArtifactArg, owner_id: ownerId, max_batch_size: newTrainerMaxBatchSize };
+        const ownerEmail = (user?.email as string | undefined) || undefined;
+        const trainerParams: Record<string, any> = { token: applicationToken, datasets: datasetsArg, trainer_artifact_id: trainerArtifactArg, owner_id: ownerId, owner_email: ownerEmail, max_batch_size: newTrainerMaxBatchSize };
         if (pretrainedPathArg) trainerParams.pretrained_weights_path = pretrainedPathArg;
         if (pretrainedArtifactArg) trainerParams.pretrained_weights_artifact = { artifact_id: pretrainedArtifactArg, file_path: 'model.pth' };
         await callHyphaService(managerId, 'create_trainer', trainerParams, { timeoutMs: 180000 });
@@ -1622,8 +1625,9 @@ const Training: React.FC = () => {
     setOrchestrators(prev => prev.map(o => o.managerId === managerId && o.appId === appId ? { ...o, status: 'DELETING' } : o));
     try {
       const callerId = user?.id as string | undefined;
+      const callerEmail = (user?.email as string | undefined) || undefined;
       await withManagerLock(managerId, () =>
-        callHyphaService(managerId, 'remove_orchestrator', { application_id: orchestrator.appId, force, caller_id: callerId }, { timeoutMs: 60000 })
+        callHyphaService(managerId, 'remove_orchestrator', { application_id: orchestrator.appId, force, caller_id: callerId, caller_email: callerEmail }, { timeoutMs: 60000 })
       );
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
@@ -1649,8 +1653,9 @@ const Training: React.FC = () => {
     setTrainers(prev => prev.map(t => t.managerId === managerId && t.appId === appId ? { ...t, status: 'DELETING' } : t));
     try {
       const callerId = user?.id as string | undefined;
+      const callerEmail = (user?.email as string | undefined) || undefined;
       await withManagerLock(managerId, () =>
-        callHyphaService(managerId, 'remove_trainer', { application_id: appId, force, caller_id: callerId }, { timeoutMs: 60000 })
+        callHyphaService(managerId, 'remove_trainer', { application_id: appId, force, caller_id: callerId, caller_email: callerEmail }, { timeoutMs: 60000 })
       );
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
@@ -2875,7 +2880,7 @@ const Training: React.FC = () => {
                               <td className="px-6 py-3.5 text-right">
                                 <div className="flex items-center justify-end gap-2">
                                   <button
-                                    onClick={() => { setLaunchDialogManagerId(worker.serviceId); setLaunchDialogTab('orchestrator'); setNewTrainerDatasets([]); setShowLaunchDialog(true); }}
+                                    onClick={() => { setLaunchDialogManagerId(worker.serviceId); setLaunchDialogTab('orchestrator'); setNewTrainerDatasets([]); setNewTrainerMaxBatchSize(32); setShowLaunchDialog(true); }}
                                     disabled={!manager?.isConnected}
                                     className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                                     title={manager?.isConnected ? 'Launch app on this worker' : 'Waiting for worker info'}
