@@ -2115,7 +2115,7 @@ const Training: React.FC = () => {
         appendSavedItem('global', { artifactId, description: desc, round, savedAt: Date.now() });
         setSaveStatus('global', 'success', SAVE_SUCCESS_TIMEOUT_MS);
       } catch (error) {
-        setErrorPopupMessage('Failed to Save Global Weights');
+        setErrorPopupMessage('Failed to Upload Global Weights');
         setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
         setShowErrorPopup(true);
         setSaveStatus('global', 'idle');
@@ -2157,7 +2157,7 @@ const Training: React.FC = () => {
         appendSavedItem(key, { artifactId, description: desc, round, sessionId, savedAt: Date.now() });
         setSaveStatus(key, 'success', SAVE_SUCCESS_TIMEOUT_MS);
       } catch (error) {
-        setErrorPopupMessage('Failed to Publish Trainer Model');
+        setErrorPopupMessage('Failed to Upload Trainer Model');
         setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
         setShowErrorPopup(true);
         setSaveStatus(key, 'idle');
@@ -3477,12 +3477,13 @@ const Training: React.FC = () => {
                         autoDesc={globalAutoDesc}
                         actions={
                           <button onClick={() => saveGlobalWeights(globalAutoDesc)} disabled={globalStatus === 'saving' || selectedGlobalRound === null}
+                            title="Upload the FedAvg global weights as a staged artifact. Review and publish to the Model Hub from My Models."
                             className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                             {globalStatus === 'saving'
-                              ? <>{spinner} Saving…</>
+                              ? <>{spinner} Uploading…</>
                               : globalStatus === 'success'
-                                ? <>{checkSvg} Published</>
-                                : <>{publishSvg} Publish</>}
+                                ? <>{checkSvg} Uploaded</>
+                                : <>{publishSvg} Upload Model</>}
                           </button>
                         }
                       />
@@ -3589,13 +3590,13 @@ const Training: React.FC = () => {
                               />
                               <div className={`flex flex-wrap items-center gap-2 rounded-lg p-1.5 -m-1.5 transition-colors`}>
                                 <button onClick={() => saveTrainerPublish(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
-                                  title={isConnected ? "Publish full model to chiron-models artifact hub" : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker; cannot save" : "Worker manager is not reachable; cannot save"}
+                                  title={isConnected ? "Upload the full Tabula model as a staged artifact. Review and publish to the Model Hub from My Models." : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker; cannot save" : "Worker manager is not reachable; cannot save"}
                                   className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
                                   {pubStatus === 'saving'
-                                    ? <>{spinner} Saving…</>
+                                    ? <>{spinner} Uploading…</>
                                     : pubStatus === 'success'
-                                      ? <>{checkSvg} Published</>
-                                      : <>{publishSvg} Publish</>}
+                                      ? <>{checkSvg} Uploaded</>
+                                      : <>{publishSvg} Upload Model</>}
                                 </button>
                                 <button onClick={() => saveTrainerLocal(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
                                   title={isConnected ? "Save to worker at ~/.bioengine/models/" : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker; cannot save" : "Worker manager is not reachable; cannot save"}

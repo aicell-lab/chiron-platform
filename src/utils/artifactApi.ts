@@ -43,6 +43,10 @@ export interface ListChildrenOptions {
   offset?: number;
   /** Auth token for non-public collections. */
   token?: string;
+  /** "all" returns committed + staged children; "committed" (default) only
+   * published artifacts; "staged" only drafts. Needed for My Models so the
+   * operator can review their uploaded-but-not-yet-published artifacts. */
+  stage?: 'all' | 'committed' | 'staged';
 }
 
 /**
@@ -66,6 +70,9 @@ export async function listArtifactChildren(
   }
   if (opts.keywords) {
     url.searchParams.set('keywords', opts.keywords);
+  }
+  if (opts.stage) {
+    url.searchParams.set('stage', opts.stage);
   }
   const headers: Record<string, string> = {};
   if (opts.token) headers['Authorization'] = `Bearer ${opts.token}`;
