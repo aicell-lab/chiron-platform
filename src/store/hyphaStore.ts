@@ -55,6 +55,17 @@ export interface HyphaState {
   fetchResource: (id: string) => Promise<void>;
   isLoading: boolean;
   error: string | null;
+
+  // Hypha-reachability signal. Any caller that observes a fetch / websocket
+  // failure flips the flag via `markHyphaUnreachable`; the global
+  // <HyphaStatusBanner /> at the layout root polls for recovery and calls
+  // `markHyphaReachable` when the backend is back. Per-section components
+  // (Models, Runs, Training, ...) defer their own error UI to the banner.
+  isHyphaUnreachable: boolean;
+  hyphaUnreachableSince: number | null;
+  hyphaUnreachableMessage: string | null;
+  markHyphaUnreachable: (errorMessage?: string | null) => void;
+  markHyphaReachable: () => void;
 }
 
 export const useHyphaStore = create<HyphaState>((set, get) => ({
@@ -77,6 +88,25 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
   selectedResource: null,
   isLoading: false,
   error: null,
+  isHyphaUnreachable: false,
+  hyphaUnreachableSince: null,
+  hyphaUnreachableMessage: null,
+  markHyphaUnreachable: (errorMessage?: string | null) => set(state =>
+    state.isHyphaUnreachable
+      ? (errorMessage && errorMessage !== state.hyphaUnreachableMessage
+          ? { hyphaUnreachableMessage: errorMessage }
+          : state)
+      : {
+          isHyphaUnreachable: true,
+          hyphaUnreachableSince: Date.now(),
+          hyphaUnreachableMessage: errorMessage ?? null,
+        }
+  ),
+  markHyphaReachable: () => set(state =>
+    state.isHyphaUnreachable
+      ? { isHyphaUnreachable: false, hyphaUnreachableSince: null, hyphaUnreachableMessage: null }
+      : state
+  ),
   setServer: (server) => set({ server }),
   setUser: (user) => set({ user }),
   setIsInitialized: (isInitialized) => set({ isInitialized }),
@@ -129,6 +159,10 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
         user: server.config.user,
         isInitialized: true
       });
+      // A successful websocket connect is the strongest signal that Hypha
+      // is back; clear any stale unreachable flag a fetch or earlier
+      // connection attempt may have set.
+      get().markHyphaReachable();
 
       return server;
     } catch (error) {
@@ -144,6 +178,12 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
         user: null,
         isInitialized: false
       });
+      // Websocket connect failures look the same to the user as a REST
+      // outage; flip the global flag so the banner appears on pages that
+      // don't otherwise call a hard-coded Hypha endpoint.
+      get().markHyphaUnreachable(
+        error instanceof Error ? error.message : 'Failed to connect to Hypha'
+      );
       throw error;
     }
   },

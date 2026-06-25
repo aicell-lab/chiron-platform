@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { HashRouter, Routes, Route, useLocation, Navigate } from 'react-router-dom';
 import Navbar from './components/Navbar';
+import HyphaStatusBanner from './components/HyphaStatusBanner';
 
 import ResourceGrid from './components/ResourceGrid';
 import ResourceDetails from './components/ResourceDetails';
@@ -61,6 +62,7 @@ const AppContent: React.FC = () => {
   if (isAgentLabRoute) {
     return (
       <div className="flex flex-col h-screen">
+        <HyphaStatusBanner />
         <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
           <Routes>
             <Route path="/lab" element={<AgentLab />} />
@@ -73,6 +75,7 @@ const AppContent: React.FC = () => {
 
   return (
     <div className="min-h-screen flex flex-col">
+      <HyphaStatusBanner />
       <Navbar />
       <Snackbar 
         isOpen={snackbarOpen}
