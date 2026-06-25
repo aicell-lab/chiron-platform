@@ -788,16 +788,31 @@ const Training: React.FC = () => {
     const q = location.search.startsWith('?') ? location.search.slice(1) : location.search;
     return new URLSearchParams(q).get('orchestrator_id');
   }, [location.search]);
+  // Optional ?step= param (numeric 1-3 or named workers/apps/train) lets
+  // callers like the runs page deep-link straight to step 3 ("Continue
+  // session"). Without it we default to step 2 once the URL-selected
+  // orchestrator is found, which matches the historical behaviour.
+  const urlStep = useMemo(() => {
+    const q = location.search.startsWith('?') ? location.search.slice(1) : location.search;
+    const raw = new URLSearchParams(q).get('step');
+    if (!raw) return null;
+    const named: Record<string, 1 | 2 | 3> = { workers: 1, apps: 2, train: 3 };
+    if (raw in named) return named[raw];
+    const n = parseInt(raw, 10);
+    if (n === 1 || n === 2 || n === 3) return n as 1 | 2 | 3;
+    return null;
+  }, [location.search]);
   // Snapshot the URL's orchestrator_id at mount time. The user can clear the
   // URL or deselect mid-session; we only want to auto-apply the *initial*
   // value, never re-apply it later (that would block deselection).
   const initialUrlOrchestratorIdRef = useRef(urlOrchestratorId);
+  const initialUrlStepRef = useRef(urlStep);
 
   // One-shot auto-select from URL on initial mount: when `orchestrators`
-  // finally contains an entry matching the URL's ?orchestrator_id, select it
-  // and jump straight to step 2 (Select Apps). Guarded by a ref so we don't
-  // re-apply the URL value after the user deselects (which would otherwise
-  // make the deselect appear to do nothing).
+  // finally contains an entry matching the URL's ?orchestrator_id, select
+  // it and jump to the URL-requested step (default step 2). Guarded by a
+  // ref so we don't re-apply the URL value after the user deselects (which
+  // would otherwise make the deselect appear to do nothing).
   const urlSelectionAppliedRef = useRef(false);
   useEffect(() => {
     if (urlSelectionAppliedRef.current) return;
@@ -813,7 +828,7 @@ const Training: React.FC = () => {
     const match = orchestrators.find(o => o.serviceIds?.[0]?.websocket_service_id === wsid);
     if (match) {
       setSelectedOrchestrator(`${match.managerId}::${match.appId}`);
-      setCurrentStep(2);
+      setCurrentStep(initialUrlStepRef.current ?? 2);
       urlSelectionAppliedRef.current = true;
     }
   }, [orchestrators, selectedOrchestrator]);
@@ -3244,14 +3259,14 @@ const Training: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{trainingStatus.stage ? STAGE_LABELS[trainingStatus.stage] : 'Idle'}</span>
                       {(() => {
-                        const r = trainingStatus.current_training_round;
+                        // Show the round currently in flight, not the count of
+                        // completed rounds. The orchestrator already decrements
+                        // current_training_round on cancellation, so when a
+                        // round is interrupted the label naturally drops back
+                        // to the last completed round.
+                        const r = Math.max(1, trainingStatus.current_training_round);
                         const total = trainingStatus.target_round;
-                        // completed = rounds where both fit and evaluate are done
-                        // fit started → r-1 completed; evaluate started → r-1 completed; between rounds (stage null, still running) → r completed
-                        const completed = trainingStatus.stage === null && trainingStatus.is_running
-                          ? r
-                          : Math.max(0, r - 1);
-                        return <span className="text-xs text-gray-500">Round {completed} / {total}</span>;
+                        return <span className="text-xs text-gray-500">Round {r} / {total}</span>;
                       })()}
                     </div>
                   </div>

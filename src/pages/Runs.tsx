@@ -115,18 +115,24 @@ const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean; onDelete: (ru
           {trainLosses.length > 0 && <LossSparkline losses={trainLosses} />}
           {valLosses.length > 0 && <span className="text-emerald-400"><LossSparkline losses={valLosses} /></span>}
         </div>
-        {status === 'running' && (
-          <Link to="/training" onClick={e => e.stopPropagation()}
-            className="flex items-center gap-1 px-3 py-1.5 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 transition-colors flex-shrink-0">
-            <FaExternalLinkAlt size={10} /> View
-          </Link>
-        )}
-        {status === 'resumable' && (
-          <Link to="/training" onClick={e => e.stopPropagation()}
-            className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded-lg hover:bg-blue-700 transition-colors flex-shrink-0">
-            <FaExternalLinkAlt size={10} /> Resume
-          </Link>
-        )}
+        {(status === 'running' || status === 'resumable') && (() => {
+          // Deep-link to /#/training with the orchestrator pre-selected and the
+          // wizard jumped to step 3 ("Train"). Without these params the page
+          // lands on step 1 and the operator has to click through to find
+          // their own session again.
+          const orchSvcId = m.orchestrator_service_id;
+          const to = `/training?orchestrator_id=${encodeURIComponent(orchSvcId)}&step=train`;
+          const isRunning = status === 'running';
+          return (
+            <Link
+              to={to}
+              onClick={e => e.stopPropagation()}
+              className={`flex items-center gap-1 px-3 py-1.5 text-white text-xs font-semibold rounded-lg transition-colors flex-shrink-0 ${isRunning ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-blue-600 hover:bg-blue-700'}`}
+            >
+              <FaExternalLinkAlt size={10} /> {isRunning ? 'View' : 'Resume'}
+            </Link>
+          );
+        })()}
         <span
           role="button"
           tabIndex={0}
