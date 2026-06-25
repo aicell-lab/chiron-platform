@@ -836,6 +836,13 @@ const Training: React.FC = () => {
   // Keep the URL synced with the currently selected orchestrator's
   // websocket_service_id. Removing the selection clears the param.
   useEffect(() => {
+    // While we're still waiting to apply a ?orchestrator_id= from the
+    // initial URL (orchestrators list hasn't loaded yet), do nothing —
+    // otherwise this effect runs first, sees selectedOrchestrator===null,
+    // and strips the param the page just landed with. The other effect
+    // then re-adds it a few seconds later when the orchestrators load,
+    // making the URL visibly flicker on Resume-from-runs deep-links.
+    if (!urlSelectionAppliedRef.current && !selectedOrchestrator) return;
     const params = new URLSearchParams(location.search.startsWith('?') ? location.search.slice(1) : location.search);
     let nextValue: string | null = null;
     if (selectedOrchestrator) {
