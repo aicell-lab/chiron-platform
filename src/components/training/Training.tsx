@@ -1372,11 +1372,16 @@ const Training: React.FC = () => {
   const createOrchestrator = async (managerId: string) => {
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
+    // Guard: a previous create_orchestrator on this manager is still in flight.
+    // Without this, a fast double-click on the Start Orchestrator button (or a
+    // re-entrant call before the optimistic placeholder unmounts the dialog)
+    // would deploy_app twice and leave two orchestrators on the worker.
+    if (mutatingManagersRef.current.has(managerId)) return;
     // Close UI immediately
     setShowCreateOrchestrator(false);
     setShowLaunchDialog(false);
     setCreatingFor(null);
-    setIsCreatingOrchestrator(false);
+    setIsCreatingOrchestrator(true);
     // Acquire lock first, then optimistic placeholder
     mutatingManagersRef.current.add(managerId);
     const pendingAppId = `pending-${Date.now().toString(36)}`;
@@ -1408,6 +1413,7 @@ const Training: React.FC = () => {
         setShowErrorPopup(true);
       } finally {
         mutatingManagersRef.current.delete(managerId);
+        setIsCreatingOrchestrator(false);
       }
       // Lock released; refresh picks up real state (replacing the placeholder on success)
       await refreshWorkerInfo(managerId);
@@ -1417,6 +1423,10 @@ const Training: React.FC = () => {
 
   const createTrainer = async (managerId: string) => {
     if (newTrainerDatasets.length === 0) return;
+    // Guard against a re-entrant call (double-click on the deploy button)
+    // that would otherwise create two trainers on the worker. Same pattern
+    // as createOrchestrator above.
+    if (mutatingManagersRef.current.has(managerId)) return;
     // Snapshot user-input state before clearing the form
     const datasetsArg = newTrainerDatasets;
     const trainerArtifactArg = newTrainerArtifactId;
@@ -1431,7 +1441,7 @@ const Training: React.FC = () => {
     setSelectedWeightsPath(null);
     setSelectedTrainerWeightsArtifactId(null);
     setIsWeightsDropdownOpen(false);
-    setIsCreatingTrainer(false);
+    setIsCreatingTrainer(true);
     // Acquire lock first, then optimistic placeholder
     mutatingManagersRef.current.add(managerId);
     const pendingAppId = `pending-${Date.now().toString(36)}`;
@@ -1469,6 +1479,7 @@ const Training: React.FC = () => {
         setShowErrorPopup(true);
       } finally {
         mutatingManagersRef.current.delete(managerId);
+        setIsCreatingTrainer(false);
       }
       await refreshWorkerInfo(managerId);
       scheduleWorkerRefresh(managerId);
@@ -1484,17 +1495,21 @@ const Training: React.FC = () => {
     setShowConfirmModal(true);
   };
 
-  const removeOrchestrator = async (managerId: string) => {
+  const removeOrchestrator = async (managerId: string, appId: string) => {
     const manager = managers.find(m => m.serviceId === managerId);
     if (!manager) return;
-    const orchestrator = orchestrators.find(o => o.managerId === managerId);
+    // Match on managerId AND appId — without the appId filter, this used to
+    // pick the first orchestrator on the manager regardless of which row's
+    // trash icon the user clicked, marking every orchestrator on that
+    // manager as DELETING in the UI while only removing one on the backend.
+    const orchestrator = orchestrators.find(o => o.managerId === managerId && o.appId === appId);
     if (!orchestrator) return;
 
     if (orchestrator.isBusy) {
       showConfirmDialog(
         'Delete Busy Orchestrator',
         'This orchestrator is currently running a training session.\n\nDeleting it will abort the session and may leave trainers in an inconsistent state. Are you sure?',
-        async () => { await performRemoveOrchestrator(managerId, true); },
+        async () => { await performRemoveOrchestrator(managerId, appId, true); },
         true,
         'Delete'
       );
@@ -1520,7 +1535,7 @@ const Training: React.FC = () => {
       setConfirmModalLoading(true);
       setConfirmModalDanger(true);
       setConfirmModalConfirmLabel('Delete');
-      setConfirmModalAction(() => async () => { await performRemoveOrchestrator(managerId, false); });
+      setConfirmModalAction(() => async () => { await performRemoveOrchestrator(managerId, appId, false); });
       setShowConfirmModal(true);
 
       (async () => {
@@ -1561,18 +1576,18 @@ const Training: React.FC = () => {
       showConfirmDialog(
         'Delete Orchestrator',
         'Are you sure you want to delete this orchestrator? Training history will be lost.',
-        async () => { await performRemoveOrchestrator(managerId, false); }
+        async () => { await performRemoveOrchestrator(managerId, appId, false); }
       );
       return;
     }
-    await performRemoveOrchestrator(managerId, false);
+    await performRemoveOrchestrator(managerId, appId, false);
   };
 
-  const performRemoveOrchestrator = async (managerId: string, force: boolean) => {
-    const orchestrator = orchestrators.find(o => o.managerId === managerId);
+  const performRemoveOrchestrator = async (managerId: string, appId: string, force: boolean) => {
+    const orchestrator = orchestrators.find(o => o.managerId === managerId && o.appId === appId);
     if (!orchestrator) return;
     markRecentlyDeleted(orchestrator.appId);
-    setOrchestrators(prev => prev.map(o => o.managerId === managerId ? { ...o, status: 'DELETING' } : o));
+    setOrchestrators(prev => prev.map(o => o.managerId === managerId && o.appId === appId ? { ...o, status: 'DELETING' } : o));
     try {
       const callerId = user?.id as string | undefined;
       await withManagerLock(managerId, () =>
@@ -2775,7 +2790,7 @@ const Training: React.FC = () => {
                                         <div key={o.appId} className="flex items-center gap-1 justify-center">
                                           {getStatusBadge(o.status, () => openAppLogsModal(worker.serviceId, o.appId, `Orchestrator · ${o.appId}`))}
                                           {o.isBusy && <BusyBadge />}
-                                          <button onClick={() => removeOrchestrator(worker.serviceId)} className="text-red-400 hover:text-red-600 ml-0.5 flex-shrink-0" title="Remove"><FaTrash size={10} /></button>
+                                          <button onClick={() => removeOrchestrator(worker.serviceId, o.appId)} className="text-red-400 hover:text-red-600 ml-0.5 flex-shrink-0" title="Remove"><FaTrash size={10} /></button>
                                         </div>
                                       ))}
                                     </div>
