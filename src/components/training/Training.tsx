@@ -3670,19 +3670,76 @@ const Training: React.FC = () => {
                         </div>
                       );
                     })()}
-                    <input
-                      type="number"
-                      min={1}
-                      max={512}
-                      step={1}
-                      value={newTrainerMaxBatchSize}
-                      onChange={e => {
-                        const v = parseInt(e.target.value, 10);
-                        if (Number.isFinite(v) && v >= 1) setNewTrainerMaxBatchSize(Math.min(512, v));
-                      }}
-                      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="32"
-                    />
+                    {/* Stepping is on powers of 2 (2, 4, 8, 16, 32, 64, 128,
+                        256, 512) because GPU memory cost roughly doubles per
+                        step — see the reference strip above. Manual typing is
+                        still free-form: a user can type 29 and we accept it;
+                        clicking + then snaps up to the next power of 2 (32),
+                        - snaps down to the previous (16). */}
+                    {(() => {
+                      const MIN_BS = 1;
+                      const MAX_BS = 512;
+                      const stepUp = (n: number) => {
+                        const next = Math.pow(2, Math.floor(Math.log2(Math.max(n, 1))) + 1);
+                        return Math.min(MAX_BS, next);
+                      };
+                      const stepDown = (n: number) => {
+                        if (n <= MIN_BS) return MIN_BS;
+                        const prev = Math.pow(2, Math.ceil(Math.log2(n)) - 1);
+                        return Math.max(MIN_BS, Math.floor(prev));
+                      };
+                      const atMin = newTrainerMaxBatchSize <= MIN_BS;
+                      const atMax = newTrainerMaxBatchSize >= MAX_BS;
+                      return (
+                        <div className="flex items-stretch">
+                          <button
+                            type="button"
+                            aria-label="Halve to previous power of 2"
+                            onClick={() => setNewTrainerMaxBatchSize(stepDown(newTrainerMaxBatchSize))}
+                            disabled={atMin}
+                            className="px-3 text-sm font-semibold text-gray-600 bg-gray-50 border border-r-0 border-gray-200 rounded-l-lg hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          >
+                            −
+                          </button>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            value={newTrainerMaxBatchSize}
+                            onChange={e => {
+                              const raw = e.target.value.replace(/\D/g, '');
+                              if (raw === '') return;
+                              const v = parseInt(raw, 10);
+                              if (Number.isFinite(v) && v >= MIN_BS) {
+                                setNewTrainerMaxBatchSize(Math.min(MAX_BS, v));
+                              }
+                            }}
+                            onKeyDown={e => {
+                              // Match the +/- buttons on keyboard so power-user
+                              // arrow-stepping doesn't drop back to ±1.
+                              if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                setNewTrainerMaxBatchSize(stepUp(newTrainerMaxBatchSize));
+                              } else if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                setNewTrainerMaxBatchSize(stepDown(newTrainerMaxBatchSize));
+                              }
+                            }}
+                            className="flex-1 min-w-0 px-3 py-2 text-sm text-center border-y border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:relative"
+                            placeholder="32"
+                          />
+                          <button
+                            type="button"
+                            aria-label="Double to next power of 2"
+                            onClick={() => setNewTrainerMaxBatchSize(stepUp(newTrainerMaxBatchSize))}
+                            disabled={atMax}
+                            className="px-3 text-sm font-semibold text-gray-600 bg-gray-50 border border-l-0 border-gray-200 rounded-r-lg hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          >
+                            +
+                          </button>
+                        </div>
+                      );
+                    })()}
                   </div>
                   {/* Pretrained weights selection — local-worker saves + chiron-models full tabula models */}
                   <div>
