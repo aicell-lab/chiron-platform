@@ -209,6 +209,12 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
   const mapRef      = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
   const markersRef  = useRef<Map<string, any>>(new Map());
+  // Track the icon-relevant state (role, active, count, latlng) we last
+  // rendered for each group so we can skip setIcon when nothing visible
+  // changed. setIcon swaps the marker's HTML, which restarts the CSS
+  // pulse animation from scale(0.5) — calling it every 3s poll made the
+  // pulse jerk back to its starting frame each tick.
+  const markerStateRef = useRef<Map<string, { role: string; active: boolean; count: number; lat: number; lng: number }>>(new Map());
   const polylinesRef = useRef<Map<string, any>>(new Map());
   // True for one microtask after a marker click so the popupclose handler
   // (fired by Leaflet closing the previous popup) does not clear the new selection.
@@ -249,24 +255,35 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
     // Remove stale markers
     const currentKeys = new Set(groups.map(g => g.key));
     markersRef.current.forEach((marker, key) => {
-      if (!currentKeys.has(key)) { map.removeLayer(marker); markersRef.current.delete(key); }
+      if (!currentKeys.has(key)) {
+        map.removeLayer(marker);
+        markersRef.current.delete(key);
+        markerStateRef.current.delete(key);
+      }
     });
 
     // Add / update markers
     groups.forEach(group => {
       const color = ROLE_COLORS[group.role];
-      const icon = makeIcon(L, color, group.role, group.active, group.workers.length);
+      const count = group.workers.length;
       const popupHtml = makePopupHtml(group);
-
       const zIndexOffset = (group.role === 'orchestrator' || group.role === 'both') ? 1000 : 0;
+      const prev = markerStateRef.current.get(group.key);
+      const positionChanged = !prev || prev.lat !== group.lat || prev.lng !== group.lng;
+      const iconChanged = !prev || prev.role !== group.role || prev.active !== group.active || prev.count !== count;
 
       if (markersRef.current.has(group.key)) {
         const m = markersRef.current.get(group.key);
-        m.setLatLng([group.lat, group.lng]);
-        m.setIcon(icon);
+        if (positionChanged) m.setLatLng([group.lat, group.lng]);
+        // Only swap the icon when something visible about it actually
+        // changed. Otherwise the existing DOM node stays mounted and the
+        // pulse animation keeps cycling instead of restarting at scale(0.5)
+        // on every poll tick.
+        if (iconChanged) m.setIcon(makeIcon(L, color, group.role, group.active, count));
         m.setPopupContent(popupHtml);
         m.setZIndexOffset(zIndexOffset);
       } else {
+        const icon = makeIcon(L, color, group.role, group.active, count);
         const m = L.marker([group.lat, group.lng], { icon, zIndexOffset }).addTo(map).bindPopup(popupHtml);
         if (onSelect) {
           m.on('click', () => {
@@ -279,6 +296,7 @@ const FederatedWorldMap: React.FC<FederatedWorldMapProps> = ({ workers, connecti
         }
         markersRef.current.set(group.key, m);
       }
+      markerStateRef.current.set(group.key, { role: group.role, active: group.active, count, lat: group.lat, lng: group.lng });
     });
 
     // Fit bounds

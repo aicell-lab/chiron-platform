@@ -2365,27 +2365,55 @@ const Training: React.FC = () => {
     return map;
   }, [trainers]);
 
+  // Falling-edge grace for the map pulse. trainingStatus polls every 3s; a
+  // trainer that times out or hits a transient connection error briefly
+  // disappears from the trainers_progress dict (no `status` field) and
+  // would otherwise drop straight out of activeIds, killing the pulse for
+  // one tick before it comes back. Hold each manager's "active" flag for
+  // PULSE_GRACE_MS after we last saw it active so a couple of dropped polls
+  // smooth over without the pin going dark.
+  const PULSE_GRACE_MS = 8000;
+  const lastActiveAtRef = useRef<Map<string, number>>(new Map());
+
   const mapWorkersWithActive = useMemo<MapWorker[]>(() => {
-    if (!isTraining || !trainingStatus?.stage) return mapWorkers;
+    if (!isTraining || !trainingStatus?.stage) {
+      // Not in a training session — clear stale grace records so the next
+      // session starts fresh.
+      lastActiveAtRef.current.clear();
+      return mapWorkers;
+    }
     const orchObj = selectedOrchestrator
       ? orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator)
       : null;
     const orchManagerId = orchObj?.managerId;
     const stage = trainingStatus.stage;
-    const activeIds = new Set<string>();
+    const freshlyActive = new Set<string>();
     if (stage === 'aggregation' || stage === 'distribution') {
       // Only orchestrator pulses — it's doing the averaging / distributing weights
-      if (orchManagerId) activeIds.add(orchManagerId);
+      if (orchManagerId) freshlyActive.add(orchManagerId);
     } else {
       // fit / evaluate: only trainers that are still RUNNING pulse
       Object.entries(trainingStatus.trainers_progress).forEach(([serviceId, prog]) => {
         const s = prog.status;
         if (s === 'RUNNING' || s === 'PENDING') {
           const managerId = serviceToManagerId[serviceId];
-          if (managerId) activeIds.add(managerId);
+          if (managerId) freshlyActive.add(managerId);
         }
       });
     }
+    // Update the lastActiveAt timestamp for everything we saw this tick,
+    // then derive the visible-active set by also including managers seen
+    // within the grace window even if they're missing right now.
+    const now = Date.now();
+    freshlyActive.forEach(id => lastActiveAtRef.current.set(id, now));
+    const activeIds = new Set<string>(freshlyActive);
+    lastActiveAtRef.current.forEach((seenAt, id) => {
+      if (now - seenAt > PULSE_GRACE_MS) {
+        lastActiveAtRef.current.delete(id);
+      } else {
+        activeIds.add(id);
+      }
+    });
     return mapWorkers.map(w => activeIds.has(w.id) ? { ...w, active: true } : w);
   }, [mapWorkers, isTraining, trainingStatus, selectedOrchestrator, orchestrators, serviceToManagerId]);
 
