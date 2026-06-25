@@ -36,7 +36,10 @@ const ModelRow: React.FC<ModelRowProps> = ({ artifact, onPublish, isPublishing }
   const alias = artifact.alias || artifact.id.split('/').pop();
   // Hypha marks staged children with staging != null in the artifact record.
   // We also accept committed_at === null as a fallback.
-  const isStaged = !!(artifact as any).staging || (artifact as any).committed_at == null;
+  // Hypha's artifact record exposes `staging: true` while the artifact is a
+  // draft, and `staging: false` after commit promotes it. `committed_at` is
+  // not a reliable signal on this Hypha version (always null in our tests).
+  const isStaged = (artifact as any).staging === true;
 
   return (
     <div className="flex items-stretch gap-4 bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
@@ -112,8 +115,8 @@ const MyModels: React.FC = () => {
       });
       // Sort: drafts first (so review is one click away), then by name.
       const sorted = [...items].sort((a, b) => {
-        const aStaged = !!(a as any).staging || (a as any).committed_at == null;
-        const bStaged = !!(b as any).staging || (b as any).committed_at == null;
+        const aStaged = (a as any).staging === true;
+        const bStaged = (b as any).staging === true;
         if (aStaged !== bStaged) return aStaged ? -1 : 1;
         const an = (a.manifest?.name || a.alias || '').toLowerCase();
         const bn = (b.manifest?.name || b.alias || '').toLowerCase();
@@ -141,7 +144,7 @@ const MyModels: React.FC = () => {
       // Optimistically flip the row in local state so the badge / button
       // updates immediately. The next load() pass will overwrite this
       // with whatever the server actually has.
-      setItems(prev => prev.map(a => a.id === artifact.id ? { ...a, staging: null, committed_at: Date.now() / 1000 } as any : a));
+      setItems(prev => prev.map(a => a.id === artifact.id ? { ...a, staging: false } as any : a));
     } catch (e: any) {
       setPublishError(e?.message || 'Failed to publish');
     } finally {
