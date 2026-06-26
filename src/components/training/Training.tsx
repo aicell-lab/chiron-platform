@@ -740,6 +740,14 @@ const Training: React.FC = () => {
   type TrainerSession = { session_id: string; is_current: boolean; checkpoints: CheckpointEntry[] };
   const [globalCheckpoints, setGlobalCheckpoints] = useState<CheckpointEntry[]>([]);
   const [selectedGlobalRound, setSelectedGlobalRound] = useState<number | null>(null);
+  // True once the user has explicitly clicked a round in the global checkpoint
+  // picker. Until then the default tracks whatever round the orchestrator
+  // currently has as its newest checkpoint. Without this, an early fetch
+  // (right after the last round's training_losses lands but before the
+  // orchestrator finishes persisting the global checkpoint) would set the
+  // default to round N-1 and `prev ?? maxRound` would keep it stuck there
+  // even after round N's checkpoint appears in a later refetch.
+  const globalRoundManuallySetRef = React.useRef(false);
   // keyed by trainer websocket service ID → list of sessions (newest first)
   const [trainerCheckpoints, setTrainerCheckpoints] = useState<Record<string, TrainerSession[]>>({});
   // keyed by trainer service ID → { session_id, round }
@@ -2683,12 +2691,17 @@ const Training: React.FC = () => {
         setGlobalCheckpoints(ckpts || []);
         if (ckpts && ckpts.length > 0) {
           const maxRound = Math.max(...ckpts.map(c => c.round));
-          setSelectedGlobalRound(prev => prev ?? maxRound);
+          // Auto-track the latest round unless the user has clicked a
+          // specific one — see globalRoundManuallySetRef above.
+          if (!globalRoundManuallySetRef.current) setSelectedGlobalRound(maxRound);
         }
       } catch { /* silent */ }
     })();
     return () => { cancelled = true; };
-  }, [selectedOrchestrator, trainingOrchestratorId, isTraining]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Refetch when the training history grows by a round — the orchestrator
+    // sometimes finishes persisting the global checkpoint a beat after the
+    // round's training_losses entry lands.
+  }, [selectedOrchestrator, trainingOrchestratorId, isTraining, trainingHistory?.training_losses?.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch per-trainer checkpoints for all history participants
   useEffect(() => {
@@ -3581,7 +3594,7 @@ const Training: React.FC = () => {
                             <div className="flex gap-1 flex-wrap">
                               {globalCheckpoints.map(ck => (
                                 <button key={ck.round}
-                                  onClick={() => setSelectedGlobalRound(ck.round)}
+                                  onClick={() => { globalRoundManuallySetRef.current = true; setSelectedGlobalRound(ck.round); }}
                                   className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-colors ${selectedGlobalRound === ck.round ? 'bg-violet-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
                                   Round {ck.round}
                                 </button>
