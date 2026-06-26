@@ -1,9 +1,11 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useHyphaStore } from '../store/hyphaStore';
 import { MdHistory, MdRefresh } from 'react-icons/md';
 import { BiLoaderAlt } from 'react-icons/bi';
 import { FaChevronDown, FaChevronRight, FaExternalLinkAlt, FaTrash } from 'react-icons/fa';
 import { Link } from 'react-router-dom';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { listHyphaServices, callHyphaService } from '../utils/hyphaHttp';
 
 interface RoundMeta {
   round: number;
@@ -30,6 +32,12 @@ interface RunArtifact {
     status: 'running' | 'completed' | 'stopped';
     started_at: string;
     orchestrator_service_id: string;
+    // Identifier of this run, minted by the orchestrator when it created
+    // the artifact. Re-checked against the orchestrator's current run_id on
+    // every status poll — mismatch means the orchestrator's training state
+    // has been reset since, so this artifact is no longer resumable even
+    // though the orchestrator service is still alive.
+    run_id?: string;
     config: Record<string, any>;
     trainers: Record<string, { client_name: string; datasets: Array<{ id: string; name: string }>; train_samples: number }>;
     rounds: RoundMeta[];
@@ -40,9 +48,36 @@ interface RunArtifact {
     published_global_weights: Array<{ artifact_id: string; round: number; description?: string; published_at: string }>;
     saved_trainer_models: Record<string, any>;
   };
-  // resolved at display time
   liveStatus?: 'running' | 'resumable' | 'completed' | 'stopped';
 }
+
+// Worker name + geo location, resolved on demand from the BioEngine worker
+// behind each trainer/orchestrator service id. Keyed by the worker service id
+// (e.g. "chiron-platform/8jeJoA...:bioengine-worker"), not the
+// trainer/orchestrator service id — multiple apps on the same worker share one
+// entry.
+interface WorkerInfo {
+  name?: string;
+  region?: string;
+  country_name?: string;
+  country_code?: string;
+  loading: boolean;
+  reachable: boolean;
+}
+
+// "chiron-platform/<workerClientId>-<replica>:<svcName>" →
+// "chiron-platform/<workerClientId>:bioengine-worker". Returns null if the
+// service id is malformed (no workspace).
+const parseWorkerServiceId = (svcId: string): string | null => {
+  const slash = svcId.indexOf('/');
+  if (slash < 0) return null;
+  const workspace = svcId.slice(0, slash);
+  const rest = svcId.slice(slash + 1);
+  const clientPart = rest.split(':')[0];
+  const workerClientId = clientPart.split('-')[0];
+  if (!workerClientId) return null;
+  return `${workspace}/${workerClientId}:bioengine-worker`;
+};
 
 const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   const cfg: Record<string, { bg: string; dot: string; label: string }> = {
@@ -60,13 +95,28 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   );
 };
 
+const CountryFlag: React.FC<{ code?: string }> = ({ code }) => {
+  if (!code) return null;
+  return (
+    <img
+      src={`https://flagcdn.com/w20/${code.toLowerCase()}.png`}
+      alt={code}
+      className="w-4 h-3 object-cover rounded-sm inline-block flex-shrink-0"
+      loading="lazy"
+    />
+  );
+};
+
 const formatTs = (iso?: string) => {
   if (!iso) return '-';
   try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); }
   catch { return iso; }
 };
 
-const LossSparkline: React.FC<{ losses: [number, number][] }> = ({ losses }) => {
+// Tiny inline sparkline kept in the collapsed header row so the user can
+// glance the loss trend without expanding. Real chart lives in the expanded
+// section.
+const LossSparkline: React.FC<{ losses: [number, number][]; stroke: string }> = ({ losses, stroke }) => {
   if (!losses || losses.length === 0) return null;
   const vals = losses.map(([, l]) => l);
   const min = Math.min(...vals), max = Math.max(...vals);
@@ -78,20 +128,79 @@ const LossSparkline: React.FC<{ losses: [number, number][] }> = ({ losses }) => 
     return `${x},${y}`;
   }).join(' ');
   return (
-    <svg width={W} height={H} className="opacity-70">
-      <polyline points={pts} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    <svg width={W} height={H} className="opacity-80">
+      <polyline points={pts} fill="none" stroke={stroke} strokeWidth="1.5" strokeLinejoin="round" />
     </svg>
   );
 };
 
-const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean; onDelete: (run: RunArtifact) => void }> = ({ run, defaultOpen, onDelete }) => {
+// Renders worker name + flag + region, country. Falls back gracefully while
+// the lookup is in flight or has failed.
+const WorkerBadge: React.FC<{ info?: WorkerInfo; fallback?: string }> = ({ info, fallback }) => {
+  if (!info || info.loading) {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-gray-400 text-xs">
+        <BiLoaderAlt className="animate-spin" size={12} />
+        Resolving…
+      </span>
+    );
+  }
+  const name = info.name || fallback || 'Unknown worker';
+  const hasGeo = info.region || info.country_name;
+  return (
+    <div className="flex flex-col min-w-0">
+      <p className="text-sm font-medium text-gray-800 truncate" title={name}>{name}</p>
+      {hasGeo ? (
+        <p className="text-xs text-gray-500 flex items-center gap-1.5 mt-0.5 truncate">
+          <CountryFlag code={info.country_code} />
+          <span className="truncate">{[info.region, info.country_name].filter(Boolean).join(', ')}</span>
+        </p>
+      ) : (
+        <p className="text-xs text-gray-400 mt-0.5">Location unavailable</p>
+      )}
+    </div>
+  );
+};
+
+interface RunCardProps {
+  run: RunArtifact;
+  defaultOpen?: boolean;
+  onDelete: (run: RunArtifact) => void;
+  workerInfoMap: Record<string, WorkerInfo>;
+}
+
+const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInfoMap }) => {
   const [open, setOpen] = useState(defaultOpen ?? false);
   const m = run.manifest;
   const status = run.liveStatus || m.status || 'completed';
-  const numRounds = m.rounds?.length ?? 0;
-  const numTrainers = Object.keys(m.trainers ?? {}).length;
-  const trainLosses = m.history?.training_losses ?? [];
-  const valLosses = m.history?.validation_losses ?? [];
+  const completedRounds = m.rounds?.length ?? 0;
+  const trainerSvcIds = useMemo(() => Object.keys(m.trainers ?? {}), [m.trainers]);
+  const numTrainers = trainerSvcIds.length;
+  const trainLosses = useMemo(() => m.history?.training_losses ?? [], [m.history]);
+  const valLosses   = useMemo(() => m.history?.validation_losses ?? [], [m.history]);
+
+  // Build chart data from per-round meta. The rounds list is the source of
+  // truth — m.history is a derived per-epoch view that may include
+  // intermediate evaluation points that don't align with discrete rounds.
+  const chartData = useMemo(() => {
+    if (m.rounds && m.rounds.length > 0) {
+      return m.rounds.map(r => ({ round: r.round, train: r.training_loss, val: r.validation_loss }));
+    }
+    // Fallback to history if rounds aren't populated (older runs).
+    const byRound: Record<number, { round: number; train?: number | null; val?: number | null }> = {};
+    for (const [round, loss] of trainLosses) {
+      byRound[round] = { ...(byRound[round] ?? { round }), round, train: loss };
+    }
+    for (const [round, loss] of valLosses) {
+      byRound[round] = { ...(byRound[round] ?? { round }), round, val: loss };
+    }
+    return Object.values(byRound).sort((a, b) => a.round - b.round);
+  }, [m.rounds, trainLosses, valLosses]);
+
+  const lastTrain = chartData.length > 0 ? chartData[chartData.length - 1].train : null;
+  const lastVal = chartData.length > 0 ? chartData[chartData.length - 1].val : null;
+  const orchWorkerSvcId = parseWorkerServiceId(m.orchestrator_service_id);
+  const orchWorkerInfo = orchWorkerSvcId ? workerInfoMap[orchWorkerSvcId] : undefined;
 
   return (
     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
@@ -107,13 +216,22 @@ const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean; onDelete: (ru
             <StatusBadge status={status} />
           </div>
           <p className="text-xs text-gray-400 mt-0.5">
-            {formatTs(m.started_at)} · {numRounds} round{numRounds !== 1 ? 's' : ''} · {numTrainers} site{numTrainers !== 1 ? 's' : ''}
+            {formatTs(m.started_at)} · {completedRounds} round{completedRounds !== 1 ? 's' : ''} completed · {numTrainers} trainer{numTrainers !== 1 ? 's' : ''}
+            {(lastTrain != null || lastVal != null) && (
+              <>
+                {' · '}
+                {lastTrain != null && <span className="text-blue-500">train {lastTrain.toFixed(3)}</span>}
+                {lastTrain != null && lastVal != null && ' · '}
+                {lastVal != null && <span className="text-emerald-500">val {lastVal.toFixed(3)}</span>}
+              </>
+            )}
           </p>
         </div>
-        {/* Mini sparklines */}
-        <div className="hidden sm:flex items-center gap-3 flex-shrink-0 text-blue-400">
-          {trainLosses.length > 0 && <LossSparkline losses={trainLosses} />}
-          {valLosses.length > 0 && <span className="text-emerald-400"><LossSparkline losses={valLosses} /></span>}
+        {/* Inline sparklines — visible on every screen size now so the
+            loss trend is never invisible. */}
+        <div className="flex items-center gap-3 flex-shrink-0">
+          {trainLosses.length > 0 && <LossSparkline losses={trainLosses} stroke="#3b82f6" />}
+          {valLosses.length > 0 && <LossSparkline losses={valLosses} stroke="#10b981" />}
         </div>
         {(status === 'running' || status === 'resumable') && (() => {
           // Deep-link to /#/training with the orchestrator pre-selected and the
@@ -127,7 +245,7 @@ const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean; onDelete: (ru
             <Link
               to={to}
               onClick={e => e.stopPropagation()}
-              className={`flex items-center gap-1 px-3 py-1.5 text-white text-xs font-semibold rounded-lg transition-colors flex-shrink-0 ${isRunning ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-blue-600 hover:bg-blue-700'}`}
+              className={`flex items-center gap-1 px-3 py-1.5 text-white text-xs font-semibold rounded-lg transition-colors flex-shrink-0 active:scale-[0.97] ${isRunning ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-blue-600 hover:bg-blue-700'}`}
             >
               <FaExternalLinkAlt size={10} /> {isRunning ? 'View' : 'Resume'}
             </Link>
@@ -151,15 +269,12 @@ const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean; onDelete: (ru
       </button>
 
       {open && (
-        <div className="border-t border-gray-100 px-5 py-4 space-y-5">
+        <div className="border-t border-gray-100 px-5 py-5 space-y-6">
           {/* Config summary */}
           {m.config && Object.keys(m.config).length > 0 && (
             <div>
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Config</p>
               <div className="flex flex-wrap gap-2">
-                {m.config.num_rounds != null && (
-                  <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full">{m.config.num_rounds} rounds</span>
-                )}
                 {m.config.per_round_timeout != null && (
                   <span className="text-xs bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full">{m.config.per_round_timeout}s timeout</span>
                 )}
@@ -173,17 +288,71 @@ const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean; onDelete: (ru
             </div>
           )}
 
-          {/* Sites */}
+          {/* Loss chart */}
+          {chartData.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Training & Validation Loss</p>
+              <div className="w-full h-56 bg-gray-50/50 rounded-xl border border-gray-100 p-3">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={chartData} margin={{ top: 8, right: 16, bottom: 4, left: 0 }}>
+                    <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" />
+                    <XAxis dataKey="round" tick={{ fontSize: 11, fill: '#6b7280' }} label={{ value: 'Round', position: 'insideBottom', offset: -2, fontSize: 11, fill: '#6b7280' }} />
+                    <YAxis tick={{ fontSize: 11, fill: '#6b7280' }} width={48} />
+                    <Tooltip
+                      contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e7eb' }}
+                      formatter={(v: any) => typeof v === 'number' ? v.toFixed(4) : v}
+                    />
+                    <Legend wrapperStyle={{ fontSize: 11 }} iconType="line" />
+                    <Line type="monotone" dataKey="train" stroke="#3b82f6" strokeWidth={2} dot={{ r: 2 }} name="Train" connectNulls />
+                    <Line type="monotone" dataKey="val"   stroke="#10b981" strokeWidth={2} dot={{ r: 2 }} name="Val"   connectNulls />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
+
+          {/* Orchestrator */}
+          <div>
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Orchestrator</p>
+            <div className="bg-gray-50/60 border border-gray-100 rounded-xl px-4 py-3">
+              <WorkerBadge info={orchWorkerInfo} fallback="Orchestrator worker" />
+            </div>
+          </div>
+
+          {/* Trainers */}
           {numTrainers > 0 && (
             <div>
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Sites</p>
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(m.trainers).map(([svcId, t]) => (
-                  <div key={svcId} className="text-xs bg-gray-50 border border-gray-100 rounded-lg px-3 py-1.5">
-                    <p className="font-medium text-gray-800">{t.client_name}</p>
-                    <p className="text-gray-400">{t.datasets?.map((d: any) => d.name || d.id).join(', ') || '-'}</p>
-                  </div>
-                ))}
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Trainers</p>
+              <div className="space-y-2">
+                {trainerSvcIds.map(svcId => {
+                  const t = m.trainers[svcId];
+                  const workerSvcId = parseWorkerServiceId(svcId);
+                  const workerInfo = workerSvcId ? workerInfoMap[workerSvcId] : undefined;
+                  const datasets = t?.datasets ?? [];
+                  return (
+                    <div
+                      key={svcId}
+                      className="flex items-start gap-4 bg-gray-50/60 border border-gray-100 rounded-xl px-4 py-3"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <WorkerBadge info={workerInfo} fallback={t?.client_name || 'Trainer worker'} />
+                      </div>
+                      {datasets.length > 0 && (
+                        <div className="flex flex-wrap justify-end gap-1.5 max-w-[60%]">
+                          {datasets.map(d => (
+                            <span
+                              key={d.id}
+                              title={d.id}
+                              className="text-xs bg-white border border-gray-200 text-gray-700 px-2 py-0.5 rounded-md"
+                            >
+                              {d.name || d.id}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -199,7 +368,7 @@ const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean; onDelete: (ru
                       <th className="text-left pb-1.5 pr-4">Round</th>
                       <th className="text-left pb-1.5 pr-4">Train Loss</th>
                       <th className="text-left pb-1.5 pr-4">Val Loss</th>
-                      <th className="text-left pb-1.5">Sites</th>
+                      <th className="text-left pb-1.5">Trainers</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -208,7 +377,13 @@ const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean; onDelete: (ru
                         <td className="py-1.5 pr-4 font-medium text-gray-700">{r.round}</td>
                         <td className="py-1.5 pr-4 text-blue-600">{r.training_loss != null ? r.training_loss.toFixed(4) : '-'}</td>
                         <td className="py-1.5 pr-4 text-emerald-600">{r.validation_loss != null ? r.validation_loss.toFixed(4) : '-'}</td>
-                        <td className="py-1.5 text-gray-500">{r.trainers?.map(t => t.client_name).join(', ')}</td>
+                        <td className="py-1.5 text-gray-500">
+                          {(r.trainers ?? []).map(t => {
+                            const workerSvcId = parseWorkerServiceId(t.service_id);
+                            const wi = workerSvcId ? workerInfoMap[workerSvcId] : undefined;
+                            return wi?.name || t.client_name;
+                          }).join(', ')}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -232,11 +407,6 @@ const RunCard: React.FC<{ run: RunArtifact; defaultOpen?: boolean; onDelete: (ru
               </div>
             </div>
           )}
-
-          {/* Orchestrator service ID */}
-          <div className="text-xs text-gray-400 font-mono truncate" title={m.orchestrator_service_id}>
-            Orchestrator: {m.orchestrator_service_id}
-          </div>
         </div>
       )}
     </div>
@@ -254,6 +424,16 @@ const Runs: React.FC = () => {
   const [pendingDelete, setPendingDelete] = useState<RunArtifact | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Resolved worker info keyed by worker service id. Shared across all run
+  // cards — same worker is usually referenced by multiple runs.
+  const [workerInfoMap, setWorkerInfoMap] = useState<Record<string, WorkerInfo>>({});
+
+  // Ref-mirrored copies so the 30s status-poll interval doesn't restart on
+  // every state change.
+  const runsRef = useRef(runs);
+  useEffect(() => { runsRef.current = runs; }, [runs]);
+  const serverRef = useRef(server);
+  useEffect(() => { serverRef.current = server; }, [server]);
 
   const fetchRuns = useCallback(async () => {
     if (!artifactManager || !server) return;
@@ -280,10 +460,18 @@ const Runs: React.FC = () => {
         if (m.status !== 'running') {
           return { ...run, liveStatus: m.status ?? 'completed' };
         }
-        // Try to reach the orchestrator
+        // Try to reach the orchestrator. If the orchestrator returns a
+        // different run_id than the one stored on this artifact, its
+        // training state has been reset and this run is no longer
+        // resumable — surface it as Completed so the user is not invited
+        // to Resume into someone else's session.
         try {
           const orchSvc = await server.getService(m.orchestrator_service_id);
           const status = await orchSvc.get_training_status();
+          const orchRunId = status?.run_id ?? null;
+          if (m.run_id && orchRunId && m.run_id !== orchRunId) {
+            return { ...run, liveStatus: 'completed' };
+          }
           const liveStatus = status?.is_running ? 'running' : 'resumable';
           return { ...run, liveStatus };
         } catch {
@@ -304,6 +492,136 @@ const Runs: React.FC = () => {
   }, [artifactManager, server]);
 
   useEffect(() => { fetchRuns(); }, [fetchRuns]);
+
+  // Auto-poll orchestrator status every 30s so a run flipping from running →
+  // resumable (e.g. orchestrator went idle) reflects without a manual refresh.
+  // Only the liveStatus is updated; we don't re-list the collection here to
+  // avoid pulling history payloads on every tick.
+  useEffect(() => {
+    if (!server) return;
+    const interval = setInterval(async () => {
+      const currentRuns = runsRef.current;
+      const live = serverRef.current;
+      if (!live || currentRuns.length === 0) return;
+      const updates = await Promise.all(currentRuns.map(async run => {
+        const m = run.manifest;
+        if (m.status === 'completed' || m.status === 'stopped') {
+          return { id: run.id, liveStatus: m.status };
+        }
+        try {
+          const orchSvc = await live.getService(m.orchestrator_service_id);
+          const status = await orchSvc.get_training_status();
+          const orchRunId = status?.run_id ?? null;
+          if (m.run_id && orchRunId && m.run_id !== orchRunId) {
+            return { id: run.id, liveStatus: 'completed' as const };
+          }
+          return {
+            id: run.id,
+            liveStatus: (status?.is_running ? 'running' : 'resumable') as 'running' | 'resumable',
+          };
+        } catch {
+          return { id: run.id, liveStatus: 'resumable' as const };
+        }
+      }));
+      setRuns(prev => prev.map(r => {
+        const u = updates.find(u => u.id === r.id);
+        return u && u.liveStatus !== r.liveStatus ? { ...r, liveStatus: u.liveStatus } : r;
+      }));
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [server]);
+
+  // Resolve worker info for every distinct worker referenced by the visible
+  // runs. Runs once per change in the set of worker service ids — caches in
+  // workerInfoMap so each worker is hit at most once across all cards.
+  useEffect(() => {
+    if (!server || runs.length === 0) return;
+    const needed = new Set<string>();
+    for (const run of runs) {
+      const m = run.manifest;
+      const orchWsId = parseWorkerServiceId(m.orchestrator_service_id);
+      if (orchWsId) needed.add(orchWsId);
+      for (const trainerSvcId of Object.keys(m.trainers ?? {})) {
+        const tWsId = parseWorkerServiceId(trainerSvcId);
+        if (tWsId) needed.add(tWsId);
+      }
+    }
+    // Filter to workers we haven't resolved (or are not currently resolving)
+    const toResolve = [...needed].filter(id => !workerInfoMap[id]);
+    if (toResolve.length === 0) return;
+
+    // Mark as loading immediately so concurrent renders don't double-fetch.
+    setWorkerInfoMap(prev => {
+      const next = { ...prev };
+      for (const id of toResolve) {
+        if (!next[id]) next[id] = { loading: true, reachable: false };
+      }
+      return next;
+    });
+
+    // Group by workspace so we hit listServices once per workspace.
+    const byWorkspace: Record<string, string[]> = {};
+    for (const id of toResolve) {
+      const ws = id.slice(0, id.indexOf('/'));
+      if (!byWorkspace[ws]) byWorkspace[ws] = [];
+      byWorkspace[ws].push(id);
+    }
+
+    const cancelRef = { current: false };
+    const resolveWorkspace = async (ws: string, ids: string[]) => {
+      // 1) Pull the worker name from the workspace's service list. The
+      //    bioengine-worker service registers with its display name; that's
+      //    the closest thing to a friendly site name we have.
+      const nameByClient: Record<string, string> = {};
+      try {
+        const services = await listHyphaServices(ws, { timeoutMs: 12000 });
+        const stripWs = (s: string) => s.includes('/') ? s.slice(s.indexOf('/') + 1) : s;
+        for (const s of services) {
+          if (!s?.id || typeof s.id !== 'string') continue;
+          if (!s.id.endsWith(':bioengine-worker') || s.id.includes('rtc')) continue;
+          const clientId = stripWs(s.id).split(':')[0];
+          if (clientId && s.name) nameByClient[clientId] = s.name;
+        }
+      } catch {
+        // Workspace might be unreachable for this user — keep going, the
+        // get_status fallback below may still work.
+      }
+      if (cancelRef.current) return;
+
+      // 2) For each worker, call get_status to fetch geo_location.
+      await Promise.all(ids.map(async workerSvcId => {
+        const clientId = workerSvcId.slice(ws.length + 1).split(':')[0];
+        let geo: any = null;
+        try {
+          const status = await callHyphaService<any>(workerSvcId, 'get_status', {}, { timeoutMs: 12000 });
+          geo = status?.geo_location ?? null;
+        } catch {
+          geo = null;
+        }
+        if (cancelRef.current) return;
+        setWorkerInfoMap(prev => ({
+          ...prev,
+          [workerSvcId]: {
+            loading: false,
+            reachable: geo !== null || !!nameByClient[clientId],
+            name: nameByClient[clientId],
+            region: geo?.region,
+            country_name: geo?.country_name,
+            country_code: geo?.country_code,
+          },
+        }));
+      }));
+    };
+
+    (async () => {
+      for (const [ws, ids] of Object.entries(byWorkspace)) {
+        await resolveWorkspace(ws, ids);
+      }
+    })();
+
+    return () => { cancelRef.current = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runs, server]);
 
   // Confirmed delete: removes the run artifact (and its files) from
   // chiron-training-runs. Published global weights and trainer models live
@@ -350,7 +668,7 @@ const Runs: React.FC = () => {
         <button
           onClick={fetchRuns}
           disabled={loading}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors disabled:opacity-50"
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors disabled:opacity-50 active:scale-[0.97]"
         >
           {loading ? <BiLoaderAlt className="animate-spin" size={14} /> : <MdRefresh size={14} />}
           Refresh
@@ -388,7 +706,7 @@ const Runs: React.FC = () => {
             <div>
               <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2 px-1">Active</p>
               <div className="space-y-3">
-                {runningRuns.map(r => <RunCard key={r.id} run={r} defaultOpen onDelete={requestDelete} />)}
+                {runningRuns.map(r => <RunCard key={r.id} run={r} defaultOpen onDelete={requestDelete} workerInfoMap={workerInfoMap} />)}
               </div>
             </div>
           )}
@@ -396,7 +714,7 @@ const Runs: React.FC = () => {
             <div>
               {runningRuns.length > 0 && <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2 mt-4 px-1">History</p>}
               <div className="space-y-3">
-                {otherRuns.map(r => <RunCard key={r.id} run={r} onDelete={requestDelete} />)}
+                {otherRuns.map(r => <RunCard key={r.id} run={r} onDelete={requestDelete} workerInfoMap={workerInfoMap} />)}
               </div>
             </div>
           )}
@@ -450,7 +768,7 @@ const Runs: React.FC = () => {
                 type="button"
                 onClick={() => setPendingDelete(null)}
                 disabled={deleting}
-                className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-xl transition-colors disabled:opacity-50"
+                className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-xl transition-colors disabled:opacity-50 active:scale-[0.97]"
               >
                 Cancel
               </button>
@@ -458,7 +776,7 @@ const Runs: React.FC = () => {
                 type="button"
                 onClick={confirmDelete}
                 disabled={deleting}
-                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 rounded-xl transition-colors disabled:opacity-60"
+                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 rounded-xl transition-colors disabled:opacity-60 active:scale-[0.97]"
               >
                 {deleting && <BiLoaderAlt className="animate-spin" size={14} />}
                 {deleting ? 'Deleting…' : 'Delete run'}
