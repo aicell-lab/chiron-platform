@@ -33,7 +33,11 @@ export class HyphaHttpError extends Error {
   method: string;
   bodyText?: string;
   constructor(serviceId: string, method: string, status: number, bodyText: string) {
-    super(`HTTP ${status} calling ${serviceId}/${method}: ${bodyText.slice(0, 240)}`);
+    // Keep the bulk of the response in `.message` so error popups and
+    // console logs surface enough of a Python traceback to be useful (the
+    // old 240-char limit cut things mid-sentence). Still bounded so a
+    // truly enormous error body can't blow up logs.
+    super(`HTTP ${status} calling ${serviceId}/${method}: ${bodyText.slice(0, 4000)}`);
     this.name = 'HyphaHttpError';
     this.status = status;
     this.serviceId = serviceId;

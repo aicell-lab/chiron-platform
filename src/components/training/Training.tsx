@@ -4259,7 +4259,11 @@ const Training: React.FC = () => {
               <h3 className="font-semibold text-gray-900">{errorPopupMessage}</h3>
             </div>
             <div className="flex-1 overflow-y-auto p-6">
-              <p className="text-sm text-gray-600 whitespace-pre-wrap">{errorPopupDetails}</p>
+              {/* `break-words` keeps long service ids and URLs from
+                  overflowing the modal horizontally (which used to make
+                  the visible text look truncated because the line ran
+                  off-screen instead of wrapping). */}
+              <p className="text-sm text-gray-600 whitespace-pre-wrap break-words">{errorPopupDetails}</p>
             </div>
             <div className="px-6 pb-5 flex-shrink-0 flex flex-col gap-2">
               {errorPopupDashboardUrl && (
