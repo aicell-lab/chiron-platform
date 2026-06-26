@@ -72,7 +72,18 @@ export async function callHyphaService<T = any>(
 ): Promise<T> {
   const { workspace, rest } = splitServiceId(serviceId);
   const baseUrl = opts.serverUrl ?? HYPHA_BASE;
-  const url = `${baseUrl}/${workspace}/services/${rest}/${method}`;
+  // When the service id contains a wildcard (e.g. the chiron-manager wildcard
+  // form `<workerClientId>-*:chiron-manager`), Hypha's default resolution
+  // picks the first matching registration. After a Ray Serve replica
+  // rotation the OLD client's Hypha service registration lingers (its
+  // websocket still looks open, its RPC handler is dead), so "first" lands
+  // on the stale replica and every call hangs. `_mode=last` instead picks
+  // the most recently registered service — always the live replica.
+  // Targeting only wildcard ids keeps the rest of the call sites
+  // unchanged (the Hypha HTTP layer would ignore _mode anyway when there's
+  // no ambiguity, but we keep the URL minimal).
+  const modeQuery = rest.includes('*') ? '?_mode=last' : '';
+  const url = `${baseUrl}/${workspace}/services/${rest}/${method}${modeQuery}`;
 
   const token = opts.token ?? useHyphaStore.getState().hyphaToken ?? undefined;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
