@@ -2058,11 +2058,18 @@ const Training: React.FC = () => {
         setTrainingStatus(status);
         const ids = Object.keys(status.trainers_progress ?? {});
         if (ids.length > 0) setParticipatedTrainerIds(new Set(ids));
-        // Poll until done
+        // Poll until done. After 3 consecutive get_training_status failures we
+        // assume the orchestrator is gone (its websocket dropped, replica
+        // rotated and was never replaced, etc.) and exit the training view so
+        // the user can Delete/Stop the registered trainers. See the matching
+        // counter in startTraining's polling loop for the rationale.
+        let consecutiveStatusFailures = 0;
+        const MAX_STATUS_FAILURES = 3;
         const statusInterval = setInterval(async () => {
           try {
             const s = await callHyphaService<any>(orchSvcId, 'get_training_status', {});
             if (cancelled) { clearInterval(statusInterval); return; }
+            consecutiveStatusFailures = 0;
             setTrainingStatus(s);
             const newIds = Object.keys(s.trainers_progress ?? {});
             if (newIds.length > 0) {
@@ -2077,7 +2084,13 @@ const Training: React.FC = () => {
               const h = await orchestratorService.get_training_history();
               if (h) setTrainingHistory(h);
             }
-          } catch { /* silent */ }
+          } catch {
+            consecutiveStatusFailures += 1;
+            if (consecutiveStatusFailures >= MAX_STATUS_FAILURES) {
+              setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
+              clearInterval(statusInterval);
+            }
+          }
         }, 3000);
       } catch { /* orchestrator not yet reachable — will retry on next dep change */ }
     };
@@ -2108,9 +2121,17 @@ const Training: React.FC = () => {
         setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true);
         setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
       });
+      // After this many consecutive get_training_status failures we treat the
+      // orchestrator as gone and exit the training view, so the user is not
+      // stranded with a UI that refuses Delete and Stop on a dead session.
+      // 3 × 3 s = ~9 s tolerance, comfortable enough to ride out one slow
+      // Hypha hop without flipping out of training mid-round.
+      let consecutiveStatusFailures = 0;
+      const MAX_STATUS_FAILURES = 3;
       const statusInterval = setInterval(async () => {
         try {
           const status = await callHyphaService<any>(orchSvcId, 'get_training_status', {});
+          consecutiveStatusFailures = 0;
           setTrainingStatus(status);
           // Accumulate trainer IDs that have appeared in trainers_progress
           const newIds = Object.keys(status.trainers_progress);
@@ -2126,7 +2147,14 @@ const Training: React.FC = () => {
             const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
             setTrainingHistory(history);
           }
-        } catch { /* silent */ }
+        } catch {
+          consecutiveStatusFailures += 1;
+          if (consecutiveStatusFailures >= MAX_STATUS_FAILURES) {
+            // Orchestrator unreachable — exit the training view so Delete/Stop unblock.
+            setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
+            clearInterval(statusInterval);
+          }
+        }
       }, 3000);
     } catch (error) {
       setErrorPopupMessage('Failed to Start Training');
