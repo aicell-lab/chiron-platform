@@ -12,6 +12,7 @@ import {
 } from '../utils/artifactApi';
 import { useHyphaStore } from '../store/hyphaStore';
 import { ArrowPathIcon, ArrowLeftIcon, ArrowDownTrayIcon } from '@heroicons/react/24/outline';
+import { BiLoaderAlt } from 'react-icons/bi';
 
 function formatBytes(bytes?: number): string {
   if (!bytes && bytes !== 0) return '';
@@ -38,7 +39,7 @@ function formatDate(ts?: number): string {
 
 const ModelDetail: React.FC = () => {
   const { alias } = useParams<{ alias: string }>();
-  const { hyphaToken } = useHyphaStore();
+  const { hyphaToken, artifactManager, user } = useHyphaStore();
   const artifactId = alias ? `chiron-platform/${alias}` : '';
 
   const [artifact, setArtifact] = useState<ArtifactRef | null>(null);
@@ -46,6 +47,9 @@ const ModelDetail: React.FC = () => {
   const [docs, setDocs] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Publish action state for staged artifacts the user can commit.
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -119,12 +123,50 @@ const ModelDetail: React.FC = () => {
     ? (manifest.tissues as string[])
     : undefined;
   const isGlobalTransformer = manifest.global_transformer === true;
+  // Publish state lives on `manifest.status`:
+  //   • "in_review"  — uploaded from the trainer/orchestrator, hidden
+  //                    from the public Model Hub, awaiting owner review.
+  //   • "published"  — owner clicked Publish; visible on the Hub.
+  //   • undefined    — legacy artifact (predates the field). Treated as
+  //                    published so curated tabula-* models keep showing.
+  const status = (manifest.status as string | undefined) || 'published';
+  const isInReview = status === 'in_review';
+  const userEmail = (user as any)?.email as string | undefined;
+  const ownsArtifact = (
+    (manifest.uploaded_by_user_id && manifest.uploaded_by_user_id === user?.id) ||
+    (userEmail && manifest.uploaded_by_user_email && manifest.uploaded_by_user_email === userEmail)
+  );
 
   // Surface a curated list of manifest fields plus everything else under "Other fields".
-  const featuredKeys = ['name', 'description', 'cover', 'tissue', 'tissues', 'global_transformer', 'source', 'author', 'created_at'];
+  const featuredKeys = ['name', 'description', 'cover', 'tissue', 'tissues', 'global_transformer', 'source', 'author', 'created_at', 'uploaded_by_user_id', 'uploaded_by_user_email', 'status'];
   const otherEntries = Object.entries(manifest).filter(
     ([k]) => !featuredKeys.includes(k),
   );
+
+  const handlePublish = async () => {
+    if (!artifactManager || !artifactId) return;
+    setPublishError(null);
+    setPublishing(true);
+    try {
+      // Flip the manifest status and persist. edit+commit, not just commit,
+      // because the source of truth for visibility on the Model Hub is the
+      // status field — Hypha's own staging flag is unreliable here (the
+      // orchestrator's create(stage=True) auto-commits in practice).
+      const newManifest = { ...manifest, status: 'published' };
+      await artifactManager.edit({
+        artifact_id: artifactId,
+        manifest: newManifest,
+        stage: true,
+        _rkwargs: true,
+      });
+      await artifactManager.commit({ artifact_id: artifactId, _rkwargs: true });
+      setArtifact(prev => prev ? ({ ...prev, manifest: newManifest } as ArtifactRef) : prev);
+    } catch (e: any) {
+      setPublishError(e?.message || 'Failed to publish');
+    } finally {
+      setPublishing(false);
+    }
+  };
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl">
@@ -145,9 +187,44 @@ const ModelDetail: React.FC = () => {
         )}
 
         <div className="p-6">
-          <h1 className="text-2xl font-semibold text-gray-900">{name}</h1>
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap mb-1">
+                {isInReview ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                    In review
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                    Published
+                  </span>
+                )}
+              </div>
+              <h1 className="text-2xl font-semibold text-gray-900">{name}</h1>
+            </div>
+            {isInReview && ownsArtifact && (
+              <button
+                type="button"
+                onClick={handlePublish}
+                disabled={publishing}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex-shrink-0 active:scale-[0.97]"
+              >
+                {publishing ? <><BiLoaderAlt className="animate-spin" size={14} /> Publishing…</> : 'Publish to Model Hub'}
+              </button>
+            )}
+          </div>
           {description && (
             <p className="mt-2 text-gray-700 whitespace-pre-line">{description}</p>
+          )}
+          {isInReview && ownsArtifact && (
+            <p className="mt-2 text-xs text-gray-500">
+              This model is in review and only visible to you on My Models. Publish it to make it appear in the public Model Hub.
+            </p>
+          )}
+          {publishError && (
+            <div className="mt-3 bg-red-50 border border-red-200 rounded-md p-3 text-sm text-red-700">{publishError}</div>
           )}
 
           <div className="mt-3 flex flex-wrap gap-1.5">

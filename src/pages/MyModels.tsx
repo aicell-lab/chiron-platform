@@ -4,14 +4,13 @@ import { useHyphaStore } from '../store/hyphaStore';
 import { ArtifactRef, listArtifactChildren, resolveCoverUrl } from '../utils/artifactApi';
 import { RiLoginBoxLine } from 'react-icons/ri';
 import { ArrowPathIcon } from '@heroicons/react/24/outline';
-import { BiLoaderAlt } from 'react-icons/bi';
 
 const MODELS_COLLECTION = 'chiron-platform/chiron-models';
 
-const StagedBadge: React.FC = () => (
+const InReviewBadge: React.FC = () => (
   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">
     <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-    Draft
+    In review
   </span>
 );
 
@@ -24,25 +23,21 @@ const PublishedBadge: React.FC = () => (
 
 interface ModelRowProps {
   artifact: ArtifactRef;
-  onPublish: (artifact: ArtifactRef) => Promise<void>;
-  isPublishing: boolean;
 }
 
-const ModelRow: React.FC<ModelRowProps> = ({ artifact, onPublish, isPublishing }) => {
+const ModelRow: React.FC<ModelRowProps> = ({ artifact }) => {
   const manifest = artifact.manifest || {};
   const name: string = manifest.name || artifact.alias || artifact.id.split('/').pop() || artifact.id;
   const description: string = manifest.description || '';
   const cover = resolveCoverUrl(manifest.cover, artifact.id);
   const alias = artifact.alias || artifact.id.split('/').pop();
-  // Hypha marks staged children with staging != null in the artifact record.
-  // We also accept committed_at === null as a fallback.
-  // Hypha's artifact record exposes `staging: true` while the artifact is a
-  // draft, and `staging: false` after commit promotes it. `committed_at` is
-  // not a reliable signal on this Hypha version (always null in our tests).
-  const isStaged = (artifact as any).staging === true;
+  // Status semantics live on `manifest.status` (single source of truth across
+  // the Trainer/Orchestrator save_*_weights writers and the ModelDetail
+  // Publish button). Missing status = legacy artifact = treat as published.
+  const isInReview = manifest.status === 'in_review';
 
-  return (
-    <div className="flex items-stretch gap-4 bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+  const card = (
+    <div className="flex items-stretch gap-4 bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden hover:shadow-md hover:border-blue-200 transition-all">
       <div className="w-32 sm:w-44 flex-shrink-0 bg-gray-50 flex items-center justify-center">
         {cover ? (
           <img src={cover} alt={name} className="object-contain w-full h-full p-2" loading="lazy" />
@@ -53,47 +48,33 @@ const ModelRow: React.FC<ModelRowProps> = ({ artifact, onPublish, isPublishing }
       <div className="flex-1 min-w-0 p-4 flex flex-col gap-2">
         <div className="flex items-start justify-between gap-3 flex-wrap">
           <div className="min-w-0">
-            <h3 className="text-base font-semibold text-gray-900 truncate" title={name}>
-              {alias ? (
-                <Link to={`/models/${alias}`} className="hover:underline">{name}</Link>
-              ) : name}
-            </h3>
+            <h3 className="text-base font-semibold text-gray-900 truncate" title={name}>{name}</h3>
             <p className="text-xs text-gray-400 font-mono truncate" title={artifact.id}>{artifact.id}</p>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
-            {isStaged ? <StagedBadge /> : <PublishedBadge />}
+            {isInReview ? <InReviewBadge /> : <PublishedBadge />}
           </div>
         </div>
         {description && (
           <p className="text-sm text-gray-600 line-clamp-2">{description}</p>
         )}
-        {isStaged && (
-          <div className="mt-auto pt-2 flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => { void onPublish(artifact); }}
-              disabled={isPublishing}
-              className="inline-flex items-center gap-2 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {isPublishing ? <><BiLoaderAlt className="animate-spin" size={14} /> Publishing…</> : 'Publish to Model Hub'}
-            </button>
-            <span className="text-xs text-gray-500">Drafts are visible only to you until you publish.</span>
+        {isInReview && (
+          <div className="mt-auto pt-2">
+            <span className="text-xs text-gray-500">Open the model to review and publish it.</span>
           </div>
         )}
       </div>
     </div>
   );
+
+  return alias ? <Link to={`/models/${alias}`} className="block">{card}</Link> : card;
 };
 
 const MyModels: React.FC = () => {
-  const { user, isLoggedIn, artifactManager, hyphaToken } = useHyphaStore();
+  const { user, isLoggedIn, hyphaToken } = useHyphaStore();
   const [items, setItems] = useState<ArtifactRef[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Track in-flight publish actions per artifact id so multiple rows can
-  // each show their own spinner without blocking the others.
-  const [publishingIds, setPublishingIds] = useState<Set<string>>(new Set());
-  const [publishError, setPublishError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!user?.id) return;
@@ -121,11 +102,12 @@ const MyModels: React.FC = () => {
         if (myEmail && m.uploaded_by_user_email && m.uploaded_by_user_email === myEmail) return true;
         return false;
       });
-      // Sort: drafts first (so review is one click away), then by name.
+      // Sort: in-review first (so the review action is one click away),
+      // then by name.
       const sorted = [...items].sort((a, b) => {
-        const aStaged = (a as any).staging === true;
-        const bStaged = (b as any).staging === true;
-        if (aStaged !== bStaged) return aStaged ? -1 : 1;
+        const aReview = a.manifest?.status === 'in_review';
+        const bReview = b.manifest?.status === 'in_review';
+        if (aReview !== bReview) return aReview ? -1 : 1;
         const an = (a.manifest?.name || a.alias || '').toLowerCase();
         const bn = (b.manifest?.name || b.alias || '').toLowerCase();
         return an.localeCompare(bn);
@@ -139,30 +121,6 @@ const MyModels: React.FC = () => {
   }, [user?.id, hyphaToken]);
 
   useEffect(() => { void load(); }, [load]);
-
-  const handlePublish = useCallback(async (artifact: ArtifactRef) => {
-    if (!artifactManager) {
-      setPublishError('Hypha is not connected; refresh and try again.');
-      return;
-    }
-    setPublishError(null);
-    setPublishingIds(prev => new Set(prev).add(artifact.id));
-    try {
-      await artifactManager.commit({ artifact_id: artifact.id, _rkwargs: true });
-      // Optimistically flip the row in local state so the badge / button
-      // updates immediately. The next load() pass will overwrite this
-      // with whatever the server actually has.
-      setItems(prev => prev.map(a => a.id === artifact.id ? { ...a, staging: false } as any : a));
-    } catch (e: any) {
-      setPublishError(e?.message || 'Failed to publish');
-    } finally {
-      setPublishingIds(prev => {
-        const next = new Set(prev);
-        next.delete(artifact.id);
-        return next;
-      });
-    }
-  }, [artifactManager]);
 
   if (!isLoggedIn || !user?.id) {
     return (
@@ -188,10 +146,6 @@ const MyModels: React.FC = () => {
         </div>
         <Link to="/models" className="text-sm text-blue-600 hover:underline">View Model Hub →</Link>
       </div>
-
-      {publishError && (
-        <div className="mb-4 bg-red-50 border border-red-200 rounded-md p-3 text-sm text-red-700">{publishError}</div>
-      )}
 
       {loading && items.length === 0 && (
         <div className="flex flex-col items-center justify-center py-20 text-gray-500">
@@ -222,12 +176,7 @@ const MyModels: React.FC = () => {
       {items.length > 0 && (
         <div className="space-y-3">
           {items.map(a => (
-            <ModelRow
-              key={a.id}
-              artifact={a}
-              onPublish={handlePublish}
-              isPublishing={publishingIds.has(a.id)}
-            />
+            <ModelRow key={a.id} artifact={a} />
           ))}
         </div>
       )}

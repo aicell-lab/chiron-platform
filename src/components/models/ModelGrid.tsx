@@ -31,7 +31,11 @@ const ModelGrid: React.FC<ModelGridProps> = ({
         limit,
         token: hyphaToken || undefined,
       });
-      const sorted = [...items].sort((a, b) => {
+      // Public Model Hub: hide anything still in the per-user review queue.
+      // Curated/legacy artifacts have no `status` field and are always
+      // shown (so the original tabula-* pretrained models keep appearing).
+      const visible = items.filter(a => a.manifest?.status !== 'in_review');
+      const sorted = visible.sort((a, b) => {
         const an = (a.manifest?.name || a.alias || '').toLowerCase();
         const bn = (b.manifest?.name || b.alias || '').toLowerCase();
         return an.localeCompare(bn);
