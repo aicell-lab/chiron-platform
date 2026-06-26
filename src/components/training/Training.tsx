@@ -1474,7 +1474,6 @@ const Training: React.FC = () => {
     setShowCreateOrchestrator(false);
     setShowLaunchDialog(false);
     setCreatingFor(null);
-    setIsCreatingOrchestrator(true);
     const pendingAppId = `pending-${Date.now().toString(36)}`;
     setOrchestrators(prev => [...prev, {
       managerId,
@@ -1494,7 +1493,17 @@ const Training: React.FC = () => {
     // Fire in background; do not await
     (async () => {
       try {
-        const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
+        // The application token must scope to the worker's workspace, not the
+        // user's default. A logged-in user's `server.config.workspace` is
+        // their own ws-user-* workspace, which they almost always have only
+        // `rw` in (admin lives on a sibling ws-user-* alias) — so
+        // generateToken there fails with "Only admin can generate token".
+        // The worker, manager, data server, and resulting orchestrator all
+        // live in the workspace prefix of the managerId; generating the
+        // token there gives the orchestrator the access it needs and the
+        // user is admin there if they could see the worker at all.
+        const targetWorkspace = managerId.split('/')[0] || server.config.workspace;
+        const applicationToken = await server.generateToken({ workspace: targetWorkspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
         const ownerId = user?.id as string | undefined;
         const ownerEmail = (user?.email as string | undefined) || undefined;
         await callManagerCompat(managerId, 'create_orchestrator', { token: applicationToken, owner_id: ownerId, owner_email: ownerEmail }, ['owner_email'], { timeoutMs: 120000 });
@@ -1545,7 +1554,6 @@ const Training: React.FC = () => {
     setSelectedWeightsPath(null);
     setSelectedTrainerWeightsArtifactId(null);
     setIsWeightsDropdownOpen(false);
-    setIsCreatingTrainer(true);
     const pendingAppId = `pending-${Date.now().toString(36)}`;
     const optimisticDatasets: Record<string, any> = {};
     for (const d of datasetsArg) optimisticDatasets[d] = { name: d };
@@ -1568,7 +1576,10 @@ const Training: React.FC = () => {
     // Fire in background; do not await
     (async () => {
       try {
-        const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
+        // See createOrchestrator — token must be scoped to the worker's
+        // workspace (parsed from managerId), not the user's default.
+        const targetWorkspace = managerId.split('/')[0] || server.config.workspace;
+        const applicationToken = await server.generateToken({ workspace: targetWorkspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
         const ownerId = user?.id as string | undefined;
         const ownerEmail = (user?.email as string | undefined) || undefined;
         const trainerParams: Record<string, any> = { token: applicationToken, datasets: datasetsArg, trainer_artifact_id: trainerArtifactArg, owner_id: ownerId, owner_email: ownerEmail, max_batch_size: newTrainerMaxBatchSize };
