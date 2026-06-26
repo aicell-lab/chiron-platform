@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useHyphaStore } from '../../store/hyphaStore';
 import { callHyphaService, listHyphaServices } from '../../utils/hyphaHttp';
 import { FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
@@ -604,8 +604,18 @@ const Training: React.FC = () => {
   const [showCreateOrchestrator, setShowCreateOrchestrator] = useState(false);
   const [showCreateTrainer, setShowCreateTrainer] = useState(false);
   const [creatingFor, setCreatingFor] = useState<string | null>(null);
-  const [isCreatingOrchestrator, setIsCreatingOrchestrator] = useState(false);
-  const [isCreatingTrainer, setIsCreatingTrainer] = useState(false);
+  // Per-manager deploy-in-flight maps. The deploy button used to share a
+  // single boolean across workers, which left it stuck on "Deploying…" on
+  // worker B while a deploy on worker A was still finishing — even though
+  // deploys to different workers are independent and safe to run in
+  // parallel. Track the set of managerIds currently mid-deploy instead so
+  // each dialog reads only its own state.
+  const [creatingOrchestratorMgrs, setCreatingOrchestratorMgrs] = useState<Record<string, true>>({});
+  const [creatingTrainerMgrs, setCreatingTrainerMgrs] = useState<Record<string, true>>({});
+  const isCreatingOrchestratorFor = (managerId: string | null): boolean =>
+    !!(managerId && creatingOrchestratorMgrs[managerId]);
+  const isCreatingTrainerFor = (managerId: string | null): boolean =>
+    !!(managerId && creatingTrainerMgrs[managerId]);
   const [newOrchestratorArtifactId, setNewOrchestratorArtifactId] = useState('chiron-platform/chiron-orchestrator');
   const [newTrainerDatasets, setNewTrainerDatasets] = useState<string[]>([]);
   const [newTrainerArtifactId, setNewTrainerArtifactId] = useState('chiron-platform/tabula-trainer');
@@ -1089,6 +1099,40 @@ const Training: React.FC = () => {
     return workspace ? `${workspace}/${workerClientId}:bioengine-worker` : `${workerClientId}:bioengine-worker`;
   };
 
+  // Call a manager method, then transparently retry without the listed kwargs
+  // if the manager is too old to accept them. Older chiron-manager versions
+  // (pre-0.1.9) reject `owner_email` / `caller_email` with a TypeError
+  // ("got an unexpected keyword argument 'caller_email'"), which surfaces as
+  // an HTTP 400 from the Hypha gateway. We want create/remove to keep
+  // working on those workers — the email-based ownership check just falls
+  // back to the user-id check.
+  const callManagerCompat = async (
+    managerId: string,
+    method: string,
+    kwargs: Record<string, any>,
+    fallbackDropKeys: string[],
+    opts: Parameters<typeof callHyphaService>[3] = {},
+  ): Promise<any> => {
+    try {
+      return await callHyphaService(managerId, method, kwargs, opts);
+    } catch (e: any) {
+      const msg = String(e?.message || e || '');
+      const matchedKey = fallbackDropKeys.find(k =>
+        msg.includes(`unexpected keyword argument '${k}'`) ||
+        msg.includes(`unexpected keyword argument "${k}"`),
+      );
+      if (!matchedKey) throw e;
+      // Strip ALL fallback keys at once — if one wasn't recognised, the rest
+      // probably aren't either, and a second retry would just race the same
+      // error on the next key.
+      const stripped: Record<string, any> = {};
+      for (const [k, v] of Object.entries(kwargs)) {
+        if (!fallbackDropKeys.includes(k)) stripped[k] = v;
+      }
+      return await callHyphaService(managerId, method, stripped, opts);
+    }
+  };
+
   // BioEngine returns the app's service_ids either as an array of
   // {websocket_service_id, webrtc_service_id} objects (older shape) or as a
   // single object of the same shape (newer shape). Normalise to an array so
@@ -1417,7 +1461,15 @@ const Training: React.FC = () => {
     // while the previous deploy is still running on the server, etc) can't
     // slip through.
     if (mutatingManagersRef.current.has(managerId)) return;
+    // Belt-and-suspenders: also refuse if a pending placeholder already
+    // exists for this manager. The lock should be enough, but the
+    // placeholder check covers the brief window after the lock is
+    // released (post-deploy + refresh) when the user could reopen the
+    // launch dialog and click again before refreshWorkerInfo has fully
+    // turned the placeholder into a real app row.
+    if (orchestrators.some(o => o.managerId === managerId && o.appId.startsWith('pending-'))) return;
     mutatingManagersRef.current.add(managerId);
+    setCreatingOrchestratorMgrs(prev => ({ ...prev, [managerId]: true }));
     // Close UI immediately
     setShowCreateOrchestrator(false);
     setShowLaunchDialog(false);
@@ -1445,18 +1497,21 @@ const Training: React.FC = () => {
         const applicationToken = await server.generateToken({ workspace: server.config.workspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
         const ownerId = user?.id as string | undefined;
         const ownerEmail = (user?.email as string | undefined) || undefined;
-        await callHyphaService(managerId, 'create_orchestrator', { token: applicationToken, owner_id: ownerId, owner_email: ownerEmail }, { timeoutMs: 120000 });
+        await callManagerCompat(managerId, 'create_orchestrator', { token: applicationToken, owner_id: ownerId, owner_email: ownerEmail }, ['owner_email'], { timeoutMs: 120000 });
       } catch (error) {
         setOrchestrators(prev => prev.filter(o => o.appId !== pendingAppId));
         setErrorPopupMessage('Failed to Create Orchestrator');
         setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
         setShowErrorPopup(true);
       } finally {
-        mutatingManagersRef.current.delete(managerId);
-        setIsCreatingOrchestrator(false);
+        setCreatingOrchestratorMgrs(prev => { const n = { ...prev }; delete n[managerId]; return n; });
       }
-      // Lock released; refresh picks up real state (replacing the placeholder on success)
-      await refreshWorkerInfo(managerId);
+      // Keep the lock held through the post-deploy refresh — otherwise the
+      // user could reopen the dialog and re-click in the brief window
+      // between deploy success and the worker reporting the new app, and
+      // the placeholder-check above wouldn't yet see the real row.
+      try { await refreshWorkerInfo(managerId); } catch { /* refresh is best-effort */ }
+      mutatingManagersRef.current.delete(managerId);
       scheduleWorkerRefresh(managerId);
     })();
   };
@@ -1469,7 +1524,13 @@ const Training: React.FC = () => {
     // setters so the second call can't slip through the gap between the
     // check and the lock-acquisition.
     if (mutatingManagersRef.current.has(managerId)) return;
+    // See createOrchestrator — also reject if there's already a pending
+    // trainer placeholder for this manager. Prevents a second deploy
+    // sneaking through after the lock is released but before the worker
+    // refresh has reconciled the placeholder into the real app row.
+    if (trainers.some(t => t.managerId === managerId && t.appId.startsWith('pending-'))) return;
     mutatingManagersRef.current.add(managerId);
+    setCreatingTrainerMgrs(prev => ({ ...prev, [managerId]: true }));
     // Snapshot user-input state before clearing the form
     const datasetsArg = newTrainerDatasets;
     const trainerArtifactArg = newTrainerArtifactId;
@@ -1513,17 +1574,21 @@ const Training: React.FC = () => {
         const trainerParams: Record<string, any> = { token: applicationToken, datasets: datasetsArg, trainer_artifact_id: trainerArtifactArg, owner_id: ownerId, owner_email: ownerEmail, max_batch_size: newTrainerMaxBatchSize };
         if (pretrainedPathArg) trainerParams.pretrained_weights_path = pretrainedPathArg;
         if (pretrainedArtifactArg) trainerParams.pretrained_weights_artifact = { artifact_id: pretrainedArtifactArg, file_path: 'model.pth' };
-        await callHyphaService(managerId, 'create_trainer', trainerParams, { timeoutMs: 180000 });
+        await callManagerCompat(managerId, 'create_trainer', trainerParams, ['owner_email'], { timeoutMs: 180000 });
       } catch (error) {
         setTrainers(prev => prev.filter(t => t.appId !== pendingAppId));
         setErrorPopupMessage('Failed to Create Trainer');
         setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
         setShowErrorPopup(true);
       } finally {
-        mutatingManagersRef.current.delete(managerId);
-        setIsCreatingTrainer(false);
+        setCreatingTrainerMgrs(prev => { const n = { ...prev }; delete n[managerId]; return n; });
       }
-      await refreshWorkerInfo(managerId);
+      // Hold the lock through the post-deploy refresh — see the matching
+      // change in createOrchestrator. Otherwise a re-click in the gap
+      // between deploy success and the worker reporting the new app
+      // would slip past both the lock and the placeholder check.
+      try { await refreshWorkerInfo(managerId); } catch { /* refresh is best-effort */ }
+      mutatingManagersRef.current.delete(managerId);
       scheduleWorkerRefresh(managerId);
     })();
   };
@@ -1634,7 +1699,7 @@ const Training: React.FC = () => {
       const callerId = user?.id as string | undefined;
       const callerEmail = (user?.email as string | undefined) || undefined;
       await withManagerLock(managerId, () =>
-        callHyphaService(managerId, 'remove_orchestrator', { application_id: orchestrator.appId, force, caller_id: callerId, caller_email: callerEmail }, { timeoutMs: 60000 })
+        callManagerCompat(managerId, 'remove_orchestrator', { application_id: orchestrator.appId, force, caller_id: callerId, caller_email: callerEmail }, ['caller_email'], { timeoutMs: 60000 })
       );
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
@@ -1662,7 +1727,7 @@ const Training: React.FC = () => {
       const callerId = user?.id as string | undefined;
       const callerEmail = (user?.email as string | undefined) || undefined;
       await withManagerLock(managerId, () =>
-        callHyphaService(managerId, 'remove_trainer', { application_id: appId, force, caller_id: callerId, caller_email: callerEmail }, { timeoutMs: 60000 })
+        callManagerCompat(managerId, 'remove_trainer', { application_id: appId, force, caller_id: callerId, caller_email: callerEmail }, ['caller_email'], { timeoutMs: 60000 })
       );
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
@@ -3475,14 +3540,25 @@ const Training: React.FC = () => {
 
                 return (
                   <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
-                    <div className="flex items-center gap-2 mb-4">
+                    <div className="flex items-center gap-3 mb-4">
                       <div className="w-7 h-7 bg-violet-500 rounded-lg flex items-center justify-center flex-shrink-0">
                         {publishSvg && <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" /></svg>}
                       </div>
-                      <div>
+                      <div className="flex-1 min-w-0">
                         <p className="font-semibold text-sm text-gray-900">Save Weights</p>
-                        <p className="text-xs text-gray-400 mt-0.5">Edit each description, then publish to the hub or save to the worker.</p>
+                        <p className="text-xs text-gray-400 mt-0.5">Edit each description, then upload to your library or save to the worker. Review and publish from My Models.</p>
                       </div>
+                      {/* Direct link to the review queue. Sits in the same
+                          row as the header so the user can jump straight
+                          to the model they just uploaded without scrolling
+                          back to the nav bar. */}
+                      <Link
+                        to="/my-models"
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-violet-700 bg-violet-50 hover:bg-violet-100 rounded-lg transition-colors flex-shrink-0 active:scale-[0.97]"
+                      >
+                        My Models
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" /></svg>
+                      </Link>
                     </div>
                     <div className="space-y-3">
                       <SaveCard
@@ -3693,8 +3769,8 @@ const Training: React.FC = () => {
                   <div className="text-xs text-gray-500 bg-gray-50 rounded-lg p-3">
                     Deploys a <strong>Chiron Orchestrator</strong> on this worker. The orchestrator coordinates FedAvg aggregation across registered trainers without accessing raw data.
                   </div>
-                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createOrchestrator(launchDialogManagerId!); }} disabled={isCreatingOrchestrator} className="w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                    {isCreatingOrchestrator ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Orchestrator</>}
+                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createOrchestrator(launchDialogManagerId!); }} disabled={isCreatingOrchestratorFor(launchDialogManagerId)} className="w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                    {isCreatingOrchestratorFor(launchDialogManagerId) ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Orchestrator</>}
                   </button>
                 </div>
               )}
@@ -3922,8 +3998,8 @@ const Training: React.FC = () => {
                       );
                     })()}
                   </div>
-                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainer || newTrainerDatasets.length === 0} className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                    {isCreatingTrainer ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Trainer ({newTrainerDatasets.length} dataset{newTrainerDatasets.length !== 1 ? 's' : ''})</>}
+                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainerFor(launchDialogManagerId) || newTrainerDatasets.length === 0} className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                    {isCreatingTrainerFor(launchDialogManagerId) ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Trainer ({newTrainerDatasets.length} dataset{newTrainerDatasets.length !== 1 ? 's' : ''})</>}
                   </button>
                 </div>
               )}
