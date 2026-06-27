@@ -29,7 +29,7 @@ This skill is the dispatcher. Pick a task below.
 | 1 | Explore published Tabula checkpoints, load weights, run inference locally | [apps/explore-tabula-models.md](apps/explore-tabula-models.md) |
 | 2 | Set up a BioEngine Worker for Chiron, register your datasets | [§ 2 below](#2-set-up-a-chiron-worker) + [references/data-prep.md](references/data-prep.md) + [bioengine skill](https://bioimage.io/public/skills/bioengine/SKILL.md) |
 | 3 | Launch and monitor a federated training session | [apps/chiron-manager.md](apps/chiron-manager.md) → [apps/chiron-orchestrator.md](apps/chiron-orchestrator.md) → [apps/tabula-trainer.md](apps/tabula-trainer.md) |
-| 4 | Add a new trainer for another foundation model (scGPT, Geneformer, ...) | [references/trainer-artifact-template.md](references/trainer-artifact-template.md) |
+| 4 | Contribute a trainer for another single cell foundation model | [references/trainer-artifact-template.md](references/trainer-artifact-template.md) |
 
 ## The Chiron platform in one paragraph
 
@@ -63,11 +63,9 @@ A federated training run involves three apps cooperating: the manager spawns the
 
 The Chiron web interface at [chiron.aicell.io/#/training](https://chiron.aicell.io/#/training) wraps the same RPC surface in a browser-based form. Driving it via RPC and via the UI are equivalent.
 
-## 4. Add a new trainer for another foundation model
+## 4. Contribute a trainer for another single cell foundation model
 
-Chiron's orchestrator and manager treat the trainer as a black box that satisfies the Flower client contract. Adding a new trainer for a model other than Tabula (for example scGPT, Geneformer) means writing a BioEngine app that exposes the same RPC surface as `tabula-trainer` but wraps a different model class. The orchestrator does not need code changes today; it accepts any service that implements the contract.
-
-See [references/trainer-artifact-template.md](references/trainer-artifact-template.md) for a full template, the required RPC contract, a skeleton Python deployment, a skeleton manifest, and the list of differences from the Tabula trainer to plan for.
+Chiron's orchestrator does not require code changes to host a new foundation model. The trainer template at [references/trainer-artifact-template.md](references/trainer-artifact-template.md) documents the per-model engineering: extend the base trainer image with the model's Python dependencies, implement the `trainer.py` against the same Flower client + Hypha RPC contract that `tabula-trainer` uses, and register the result as a new trainer artifact. Each worker image bundles a single foundation model's trainer at build time, so a site that wants to participate in federations for multiple foundation models deploys one worker per model. External contributions for additional foundation models are welcome.
 
 ## Conventions (read once)
 
