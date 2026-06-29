@@ -48,7 +48,10 @@ interface RunArtifact {
     published_global_weights: Array<{ artifact_id: string; round: number; description?: string; published_at: string }>;
     saved_trainer_models: Record<string, any>;
   };
-  liveStatus?: 'running' | 'resumable' | 'completed' | 'stopped';
+  // Single binary the UI cares about: 'continuable' (orchestrator alive AND
+  // its current run_id matches our manifest.run_id) or 'completed'
+  // (everything else — orch unreachable, reset, terminal status, etc).
+  liveStatus?: 'continuable' | 'completed';
 }
 
 // Worker name + geo location, resolved on demand from the BioEngine worker
@@ -79,21 +82,17 @@ const parseWorkerServiceId = (svcId: string): string | null => {
   return `${workspace}/${workerClientId}:bioengine-worker`;
 };
 
-const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
-  const cfg: Record<string, { bg: string; dot: string; label: string }> = {
-    running:   { bg: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500 animate-pulse', label: 'Running' },
-    resumable: { bg: 'bg-blue-100 text-blue-700',       dot: 'bg-blue-500',                 label: 'Resumable' },
-    completed: { bg: 'bg-gray-100 text-gray-600',       dot: 'bg-gray-400',                 label: 'Completed' },
-    stopped:   { bg: 'bg-amber-100 text-amber-700',     dot: 'bg-amber-500',                label: 'Stopped' },
-  };
-  const c = cfg[status] || cfg['completed'];
-  return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${c.bg}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
-      {c.label}
-    </span>
-  );
-};
+// Single status the UI exposes: "Completed", rendered ONLY when the run can
+// no longer be continued — either the orchestrator service is gone, or its
+// internal run_id has rotated (reset_training_state has been called). Runs
+// that ARE still continuable get a Continue button instead of a badge, so
+// the user never has to guess whether a row is actionable.
+const CompletedBadge: React.FC = () => (
+  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+    <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
+    Completed
+  </span>
+);
 
 const CountryFlag: React.FC<{ code?: string }> = ({ code }) => {
   if (!code) return null;
@@ -172,7 +171,13 @@ interface RunCardProps {
 const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInfoMap }) => {
   const [open, setOpen] = useState(defaultOpen ?? false);
   const m = run.manifest;
-  const status = run.liveStatus || m.status || 'completed';
+  // 'continuable' = orchestrator alive AND its run_id matches our manifest.run_id
+  //                  (the user can resume from where this run left off — fresh
+  //                   training rounds will append into THIS run artifact).
+  // 'completed'   = orchestrator unreachable OR has been reset (run_id rotated)
+  //                  OR the artifact's own status was already terminal at list time.
+  const status = run.liveStatus || 'completed';
+  const continuable = status === 'continuable';
   const completedRounds = m.rounds?.length ?? 0;
   const trainerSvcIds = useMemo(() => Object.keys(m.trainers ?? {}), [m.trainers]);
   const numTrainers = trainerSvcIds.length;
@@ -213,7 +218,7 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <p className="text-sm font-semibold text-gray-900 truncate">{m.name}</p>
-            <StatusBadge status={status} />
+            {!continuable && <CompletedBadge />}
           </div>
           <p className="text-xs text-gray-400 mt-0.5">
             {formatTs(m.started_at)} · {completedRounds} round{completedRounds !== 1 ? 's' : ''} completed · {numTrainers} trainer{numTrainers !== 1 ? 's' : ''}
@@ -233,21 +238,21 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
           {trainLosses.length > 0 && <LossSparkline losses={trainLosses} stroke="#3b82f6" />}
           {valLosses.length > 0 && <LossSparkline losses={valLosses} stroke="#10b981" />}
         </div>
-        {(status === 'running' || status === 'resumable') && (() => {
-          // Deep-link to /#/training with the orchestrator pre-selected and the
-          // wizard jumped to step 3 ("Train"). Without these params the page
-          // lands on step 1 and the operator has to click through to find
-          // their own session again.
+        {continuable && (() => {
+          // Continue button: deep-link to /#/training with the orchestrator
+          // pre-selected and the wizard jumped to step 2 ("Select Apps") so
+          // the user can adjust trainers and start more rounds. Without these
+          // params the page lands on step 1 and the operator has to click
+          // through to find their own session again.
           const orchSvcId = m.orchestrator_service_id;
-          const to = `/training?orchestrator_id=${encodeURIComponent(orchSvcId)}&step=train`;
-          const isRunning = status === 'running';
+          const to = `/training?orchestrator_id=${encodeURIComponent(orchSvcId)}&step=apps`;
           return (
             <Link
               to={to}
               onClick={e => e.stopPropagation()}
-              className={`flex items-center gap-1 px-3 py-1.5 text-white text-xs font-semibold rounded-lg transition-colors flex-shrink-0 active:scale-[0.97] ${isRunning ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-blue-600 hover:bg-blue-700'}`}
+              className="flex items-center gap-1 px-3 py-1.5 text-white text-xs font-semibold rounded-lg transition-colors flex-shrink-0 active:scale-[0.97] bg-blue-600 hover:bg-blue-700"
             >
-              <FaExternalLinkAlt size={10} /> {isRunning ? 'View' : 'Resume'}
+              <FaExternalLinkAlt size={10} /> Continue
             </Link>
           );
         })()}
@@ -297,7 +302,19 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
                   <LineChart data={chartData} margin={{ top: 8, right: 16, bottom: 4, left: 0 }}>
                     <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" />
                     <XAxis dataKey="round" tick={{ fontSize: 11, fill: '#6b7280' }} label={{ value: 'Round', position: 'insideBottom', offset: -2, fontSize: 11, fill: '#6b7280' }} />
-                    <YAxis tick={{ fontSize: 11, fill: '#6b7280' }} width={48} />
+                    {/* Tight y-scale: default recharts pads down to 0 which
+                        flattens late-round differences. Use dataMin/dataMax
+                        with a 5% breathing room so the curve fills the panel
+                        the way the Training step's LossChart does. */}
+                    <YAxis
+                      tick={{ fontSize: 11, fill: '#6b7280' }}
+                      width={48}
+                      domain={[
+                        (dataMin: number) => Number.isFinite(dataMin) ? dataMin - Math.max((dataMin) * 0.05, 0.01) : 0,
+                        (dataMax: number) => Number.isFinite(dataMax) ? dataMax + Math.max((dataMax) * 0.05, 0.01) : 1,
+                      ]}
+                      tickFormatter={(v: number) => v.toFixed(2)}
+                    />
                     <Tooltip
                       contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e7eb' }}
                       formatter={(v: any) => typeof v === 'number' ? v.toFixed(4) : v}
@@ -378,11 +395,26 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
                         <td className="py-1.5 pr-4 text-blue-600">{r.training_loss != null ? r.training_loss.toFixed(4) : '-'}</td>
                         <td className="py-1.5 pr-4 text-emerald-600">{r.validation_loss != null ? r.validation_loss.toFixed(4) : '-'}</td>
                         <td className="py-1.5 text-gray-500">
-                          {(r.trainers ?? []).map(t => {
-                            const workerSvcId = parseWorkerServiceId(t.service_id);
-                            const wi = workerSvcId ? workerInfoMap[workerSvcId] : undefined;
-                            return wi?.name || t.client_name;
-                          }).join(', ')}
+                          {(r.trainers ?? []).length === 0 ? (
+                            <span className="text-gray-300">-</span>
+                          ) : (
+                            <div className="flex flex-wrap gap-1">
+                              {(r.trainers ?? []).map(t => {
+                                const workerSvcId = parseWorkerServiceId(t.service_id);
+                                const wi = workerSvcId ? workerInfoMap[workerSvcId] : undefined;
+                                const label = wi?.name || t.client_name;
+                                return (
+                                  <span
+                                    key={t.service_id}
+                                    title={t.service_id}
+                                    className="inline-block bg-gray-100 text-gray-700 border border-gray-200 px-1.5 py-0.5 rounded text-[11px] leading-none"
+                                  >
+                                    {label}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -461,28 +493,32 @@ const Runs: React.FC = () => {
         return tb.localeCompare(ta);
       });
 
-      // Resolve live status by pinging orchestrators for 'running' artifacts
+      // For every run, ping its orchestrator to decide whether it's still
+      // continuable (orchestrator service reachable AND its current run_id
+      // matches the manifest.run_id of THIS run) or terminally done. We do
+      // not differentiate "completed" / "stopped" / "failed" / "running" —
+      // the only distinction the UI surfaces is whether the user can hit
+      // Continue to start more rounds on the same run artifact.
       const resolved = await Promise.all(sorted.map(async (run: any): Promise<RunArtifact> => {
         const m = run.manifest ?? {};
-        if (m.status !== 'running') {
-          return { ...run, liveStatus: m.status ?? 'completed' };
+        if (!m.orchestrator_service_id) {
+          return { ...run, liveStatus: 'completed' };
         }
-        // Try to reach the orchestrator. If the orchestrator returns a
-        // different run_id than the one stored on this artifact, its
-        // training state has been reset and this run is no longer
-        // resumable — surface it as Completed so the user is not invited
-        // to Resume into someone else's session.
         try {
           const orchSvc = await server.getService(m.orchestrator_service_id);
           const status = await orchSvc.get_training_status();
           const orchRunId = status?.run_id ?? null;
-          if (m.run_id && orchRunId && m.run_id !== orchRunId) {
+          // run_id mismatch = orchestrator has been reset; the original
+          // training state for THIS run is gone, so it can't be continued.
+          if (!m.run_id || !orchRunId || m.run_id !== orchRunId) {
             return { ...run, liveStatus: 'completed' };
           }
-          const liveStatus = status?.is_running ? 'running' : 'resumable';
-          return { ...run, liveStatus };
+          return { ...run, liveStatus: 'continuable' };
         } catch {
-          return { ...run, liveStatus: 'resumable' };
+          // Orchestrator service unreachable — treat as completed (the user
+          // would need to redeploy the orchestrator to continue, and that
+          // mints a fresh run_id, so there's no path back to THIS run).
+          return { ...run, liveStatus: 'completed' };
         }
       }));
 
@@ -512,22 +548,19 @@ const Runs: React.FC = () => {
       if (!live || currentRuns.length === 0) return;
       const updates = await Promise.all(currentRuns.map(async run => {
         const m = run.manifest;
-        if (m.status === 'completed' || m.status === 'stopped') {
-          return { id: run.id, liveStatus: m.status };
+        if (!m.orchestrator_service_id) {
+          return { id: run.id, liveStatus: 'completed' as const };
         }
         try {
           const orchSvc = await live.getService(m.orchestrator_service_id);
           const status = await orchSvc.get_training_status();
           const orchRunId = status?.run_id ?? null;
-          if (m.run_id && orchRunId && m.run_id !== orchRunId) {
+          if (!m.run_id || !orchRunId || m.run_id !== orchRunId) {
             return { id: run.id, liveStatus: 'completed' as const };
           }
-          return {
-            id: run.id,
-            liveStatus: (status?.is_running ? 'running' : 'resumable') as 'running' | 'resumable',
-          };
+          return { id: run.id, liveStatus: 'continuable' as const };
         } catch {
-          return { id: run.id, liveStatus: 'resumable' as const };
+          return { id: run.id, liveStatus: 'completed' as const };
         }
       }));
       setRuns(prev => prev.map(r => {
@@ -658,8 +691,12 @@ const Runs: React.FC = () => {
     setPendingDelete(run);
   }, []);
 
-  const runningRuns = runs.filter(r => r.liveStatus === 'running');
-  const otherRuns = runs.filter(r => r.liveStatus !== 'running');
+  // Single list, newest first. Continuable vs completed is signalled per-row
+  // (Continue button vs Completed badge); no top-level Active/History split.
+  const sortedRuns = useMemo(
+    () => [...runs].sort((a, b) => (b.manifest?.started_at ?? '').localeCompare(a.manifest?.started_at ?? '')),
+    [runs],
+  );
 
   return (
     <div className="px-6 py-6 max-w-4xl mx-auto">
@@ -708,23 +745,8 @@ const Runs: React.FC = () => {
       )}
 
       {isLoggedIn && runs.length > 0 && (
-        <div className="space-y-4">
-          {runningRuns.length > 0 && (
-            <div>
-              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2 px-1">Active</p>
-              <div className="space-y-3">
-                {runningRuns.map(r => <RunCard key={r.id} run={r} defaultOpen onDelete={requestDelete} workerInfoMap={workerInfoMap} />)}
-              </div>
-            </div>
-          )}
-          {otherRuns.length > 0 && (
-            <div>
-              {runningRuns.length > 0 && <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2 mt-4 px-1">History</p>}
-              <div className="space-y-3">
-                {otherRuns.map(r => <RunCard key={r.id} run={r} onDelete={requestDelete} workerInfoMap={workerInfoMap} />)}
-              </div>
-            </div>
-          )}
+        <div className="space-y-3">
+          {sortedRuns.map(r => <RunCard key={r.id} run={r} onDelete={requestDelete} workerInfoMap={workerInfoMap} />)}
         </div>
       )}
 
