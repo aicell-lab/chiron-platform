@@ -376,7 +376,17 @@ async def list_artifact_files(artifact_id: str) -> List[str]:
 async def verify_published(am, artifact_id: str, *, expect_global_transformer: bool, label: str) -> bool:
     info = await am.read(artifact_id)
     m = info.get("manifest") or {}
-    files = await list_artifact_files(artifact_id)
+    # save_global_weights returns the artifact_id BEFORE the file uploads
+    # finish (the upload is a fire-and-forget background task per the
+    # orchestrator 0.3.2 fix), so poll for the expected files with a 60s
+    # budget instead of asserting on the first read.
+    files: List[str] = []
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        files = await list_artifact_files(artifact_id)
+        if "model.pth" in files and "documentation.md" in files:
+            break
+        await asyncio.sleep(2)
     log(f"   {label} → {artifact_id}")
     log(f"     name = {m.get('name')!r}")
     log(f"     description = {(m.get('description') or '')[:90]!r}")
@@ -386,8 +396,8 @@ async def verify_published(am, artifact_id: str, *, expect_global_transformer: b
     ok &= check(m.get("global_transformer") is expect_global_transformer,
                 f"global_transformer == {expect_global_transformer}",
                 f"{label} expected global_transformer={expect_global_transformer}, got {m.get('global_transformer')}")
-    ok &= check("model.pth" in files, "model.pth present", f"{label} missing model.pth in artifact files")
-    ok &= check("documentation.md" in files, "documentation.md present", f"{label} missing documentation.md in artifact files")
+    ok &= check("model.pth" in files, "model.pth present (within 60s)", f"{label} missing model.pth in artifact files after 60s")
+    ok &= check("documentation.md" in files, "documentation.md present (within 60s)", f"{label} missing documentation.md in artifact files after 60s")
     return ok
 
 
