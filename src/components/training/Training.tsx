@@ -3018,13 +3018,20 @@ const Training: React.FC = () => {
                                 {isConnected ? (
                                   orchCount > 0 ? (
                                     <div className="flex flex-col gap-1 items-center">
-                                      {orchestrators.filter(o => o.managerId === worker.serviceId).slice().sort(compareByWorkerThenApp).map(o => (
-                                        <div key={o.appId} className="flex items-center gap-1 justify-center">
-                                          {getStatusBadge(o.status, () => openAppLogsModal(worker.serviceId, o.appId, `Orchestrator · ${o.appId}`))}
-                                          {o.isBusy && <BusyBadge />}
-                                          <button onClick={() => removeOrchestrator(worker.serviceId, o.appId)} className="text-red-400 hover:text-red-600 ml-0.5 flex-shrink-0" title="Remove"><FaTrash size={10} /></button>
-                                        </div>
-                                      ))}
+                                      {orchestrators.filter(o => o.managerId === worker.serviceId).slice().sort(compareByWorkerThenApp).map(o => {
+                                        const mine = isOwnedByMe(o);
+                                        return (
+                                          <div key={o.appId} className={`flex items-center gap-1 justify-center ${mine ? '' : 'opacity-50'}`} title={mine ? undefined : 'Deployed by another user'}>
+                                            {getStatusBadge(o.status, () => openAppLogsModal(worker.serviceId, o.appId, `Orchestrator · ${o.appId}`))}
+                                            {o.isBusy && <BusyBadge />}
+                                            {mine ? (
+                                              <button onClick={() => removeOrchestrator(worker.serviceId, o.appId)} className="text-red-400 hover:text-red-600 ml-0.5 flex-shrink-0" title="Remove"><FaTrash size={10} /></button>
+                                            ) : (
+                                              <button disabled className="text-gray-300 ml-0.5 flex-shrink-0 cursor-not-allowed" title="Only the user who deployed this orchestrator can remove it"><FaTrash size={10} /></button>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
                                     </div>
                                   ) : <span className="text-gray-300 text-xs">None</span>
                                 ) : <span className="text-gray-300 text-xs">-</span>}
@@ -3033,13 +3040,20 @@ const Training: React.FC = () => {
                                 {isConnected ? (
                                   trainerCount > 0 ? (
                                     <div className="flex flex-col gap-1 items-center">
-                                      {trainers.filter(t => t.managerId === worker.serviceId).slice().sort(compareByWorkerThenApp).map(t => (
-                                        <div key={t.appId} className="flex items-center gap-1 justify-center">
-                                          {getStatusBadge(t.status, () => openAppLogsModal(worker.serviceId, t.appId, `Trainer · ${t.appId}`))}
-                                          {t.isBusy && <BusyBadge />}
-                                          <button onClick={() => removeTrainer(worker.serviceId, t.appId)} className="text-red-400 hover:text-red-600 ml-0.5 flex-shrink-0" title="Remove"><FaTrash size={10} /></button>
-                                        </div>
-                                      ))}
+                                      {trainers.filter(t => t.managerId === worker.serviceId).slice().sort(compareByWorkerThenApp).map(t => {
+                                        const mine = isOwnedByMe(t);
+                                        return (
+                                          <div key={t.appId} className={`flex items-center gap-1 justify-center ${mine ? '' : 'opacity-50'}`} title={mine ? undefined : 'Deployed by another user'}>
+                                            {getStatusBadge(t.status, () => openAppLogsModal(worker.serviceId, t.appId, `Trainer · ${t.appId}`))}
+                                            {t.isBusy && <BusyBadge />}
+                                            {mine ? (
+                                              <button onClick={() => removeTrainer(worker.serviceId, t.appId)} className="text-red-400 hover:text-red-600 ml-0.5 flex-shrink-0" title="Remove"><FaTrash size={10} /></button>
+                                            ) : (
+                                              <button disabled className="text-gray-300 ml-0.5 flex-shrink-0 cursor-not-allowed" title="Only the user who deployed this trainer can remove it"><FaTrash size={10} /></button>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
                                     </div>
                                   ) : <span className="text-gray-300 text-xs">None</span>
                                 ) : <span className="text-gray-300 text-xs">-</span>}
