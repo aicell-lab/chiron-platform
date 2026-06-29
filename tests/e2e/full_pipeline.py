@@ -223,14 +223,17 @@ async def wait_for_orchestrator(server, site: str, app_id: str, timeout_s: float
         v = (info.get("orchestrators_status") or {}).get(app_id, {})
         if v.get("status") == "RUNNING":
             raw = v.get("service_ids")
-            if isinstance(raw, list):
-                lst = raw
-            elif isinstance(raw, dict):
-                lst = list(raw.values())
-            else:
-                lst = []
-            for entry in lst:
-                if isinstance(entry, dict) and entry.get("websocket_service_id"):
+            # service_ids comes back as a single dict, a list of dicts, or a
+            # dict-of-dicts (Hypha ObjectProxy in some cases). Walk every shape.
+            candidates = []
+            if hasattr(raw, "get") and raw.get("websocket_service_id"):
+                candidates.append(raw)
+            elif isinstance(raw, list):
+                candidates.extend(raw)
+            elif hasattr(raw, "values"):
+                candidates.extend(raw.values())
+            for entry in candidates:
+                if hasattr(entry, "get") and entry.get("websocket_service_id"):
                     return entry["websocket_service_id"]
     return None
 
@@ -247,14 +250,17 @@ async def wait_for_trainer(server, site: str, app_id: str, timeout_s: float = 24
         v = (info.get("trainers_status") or {}).get(app_id, {})
         if v.get("status") == "RUNNING":
             raw = v.get("service_ids")
-            if isinstance(raw, list):
-                lst = raw
-            elif isinstance(raw, dict):
-                lst = list(raw.values())
-            else:
-                lst = []
-            for entry in lst:
-                if isinstance(entry, dict) and entry.get("websocket_service_id"):
+            # service_ids comes back as a single dict, a list of dicts, or a
+            # dict-of-dicts (Hypha ObjectProxy in some cases). Walk every shape.
+            candidates = []
+            if hasattr(raw, "get") and raw.get("websocket_service_id"):
+                candidates.append(raw)
+            elif isinstance(raw, list):
+                candidates.extend(raw)
+            elif hasattr(raw, "values"):
+                candidates.extend(raw.values())
+            for entry in candidates:
+                if hasattr(entry, "get") and entry.get("websocket_service_id"):
                     return entry["websocket_service_id"]
     return None
 

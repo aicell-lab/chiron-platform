@@ -163,16 +163,21 @@ async def main():
     # client is in the user's workspace, which we can't easily inspect from
     # outside, so we cover that in the run-artifact test below).
     raw_svc_ids = info.get("service_ids")
-    # service_ids may come back as either list[dict] or dict[str, dict]
-    if isinstance(raw_svc_ids, list):
-        svc_list = raw_svc_ids
-    elif isinstance(raw_svc_ids, dict):
-        svc_list = list(raw_svc_ids.values())
-    else:
-        svc_list = []
+    # service_ids comes back in any of:
+    #   - a single dict with 'websocket_service_id' (Hypha ObjectProxy)
+    #   - a list of such dicts
+    #   - a dict whose values are such dicts
+    # Walk every shape and pick the first websocket id.
     orch_svc_id = None
-    for entry in svc_list:
-        if isinstance(entry, dict) and entry.get("websocket_service_id"):
+    candidates = []
+    if hasattr(raw_svc_ids, "get") and raw_svc_ids.get("websocket_service_id"):
+        candidates.append(raw_svc_ids)
+    elif isinstance(raw_svc_ids, list):
+        candidates.extend(raw_svc_ids)
+    elif hasattr(raw_svc_ids, "values"):
+        candidates.extend(raw_svc_ids.values())
+    for entry in candidates:
+        if hasattr(entry, "get") and entry.get("websocket_service_id"):
             orch_svc_id = entry["websocket_service_id"]
             break
     print(f"   orchestrator service id = {orch_svc_id}")
