@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useNavigate, useParams, Link } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -39,6 +39,7 @@ function formatDate(ts?: number): string {
 
 const ModelDetail: React.FC = () => {
   const { alias } = useParams<{ alias: string }>();
+  const navigate = useNavigate();
   const { hyphaToken, artifactManager, user } = useHyphaStore();
   const artifactId = alias ? `chiron-platform/${alias}` : '';
 
@@ -50,6 +51,11 @@ const ModelDetail: React.FC = () => {
   // Publish action state for staged artifacts the user can commit.
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
+  // Discard action state — only available for owned in-review artifacts.
+  // Two-step: open a confirm modal, then run the delete from there.
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  const [discardError, setDiscardError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -168,6 +174,42 @@ const ModelDetail: React.FC = () => {
     }
   };
 
+  const handleDiscard = async () => {
+    if (!artifactManager || !artifactId) return;
+    setDiscardError(null);
+    setDiscarding(true);
+    try {
+      // The orchestrator/trainer write the artifact with create(stage=True)
+      // and the staging flag often resolves immediately on Hypha — so
+      // version="stage" can already be invalid by the time the user clicks
+      // discard. Try the staged-version delete first; if that fails because
+      // there's no staged version, fall back to a recursive delete of the
+      // committed artifact.
+      try {
+        await artifactManager.delete({
+          artifact_id: artifactId,
+          version: 'stage',
+          delete_files: true,
+          recursive: true,
+          _rkwargs: true,
+        });
+      } catch (stageErr: any) {
+        await artifactManager.delete({
+          artifact_id: artifactId,
+          delete_files: true,
+          recursive: true,
+          _rkwargs: true,
+        });
+      }
+      setShowDiscardConfirm(false);
+      navigate('/my-models');
+    } catch (e: any) {
+      setDiscardError(e?.message || 'Failed to discard');
+    } finally {
+      setDiscarding(false);
+    }
+  };
+
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl">
       <Link to="/models" className="inline-flex items-center text-blue-600 hover:underline mb-4">
@@ -205,14 +247,24 @@ const ModelDetail: React.FC = () => {
               <h1 className="text-2xl font-semibold text-gray-900">{name}</h1>
             </div>
             {isInReview && ownsArtifact && (
-              <button
-                type="button"
-                onClick={handlePublish}
-                disabled={publishing}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex-shrink-0 active:scale-[0.97]"
-              >
-                {publishing ? <><BiLoaderAlt className="animate-spin" size={14} /> Publishing…</> : 'Publish to Model Hub'}
-              </button>
+              <div className="flex flex-col gap-2 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={handlePublish}
+                  disabled={publishing || discarding}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.97]"
+                >
+                  {publishing ? <><BiLoaderAlt className="animate-spin" size={14} /> Publishing…</> : 'Publish to Model Hub'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setDiscardError(null); setShowDiscardConfirm(true); }}
+                  disabled={publishing || discarding}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-white border border-red-200 text-red-700 hover:bg-red-50 text-sm font-semibold rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.97]"
+                >
+                  Discard Model
+                </button>
+              </div>
             )}
           </div>
           {description && (
@@ -225,6 +277,9 @@ const ModelDetail: React.FC = () => {
           )}
           {publishError && (
             <div className="mt-3 bg-red-50 border border-red-200 rounded-md p-3 text-sm text-red-700">{publishError}</div>
+          )}
+          {discardError && (
+            <div className="mt-3 bg-red-50 border border-red-200 rounded-md p-3 text-sm text-red-700">{discardError}</div>
           )}
 
           <div className="mt-3 flex flex-wrap gap-1.5">
@@ -337,6 +392,42 @@ const ModelDetail: React.FC = () => {
                 </React.Fragment>
               ))}
             </dl>
+          </div>
+        </div>
+      )}
+
+      {showDiscardConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col">
+            <div className="px-6 py-4 border-b border-gray-100">
+              <h3 className="font-semibold text-gray-900">Discard Model</h3>
+            </div>
+            <div className="px-6 py-4 text-sm text-gray-700">
+              <p>
+                This will permanently delete{' '}
+                <span className="font-mono text-gray-900">{artifactId}</span>{' '}
+                and all of its files from Chiron Models. This cannot be undone.
+              </p>
+              <p className="mt-2">Are you sure?</p>
+            </div>
+            <div className="px-6 py-3 border-t border-gray-100 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowDiscardConfirm(false)}
+                disabled={discarding}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-xl hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDiscard()}
+                disabled={discarding}
+                className="px-4 py-2 text-sm font-semibold text-white bg-red-600 rounded-xl hover:bg-red-700 disabled:opacity-50 flex items-center gap-2"
+              >
+                {discarding ? <><BiLoaderAlt className="animate-spin" size={14} /> Discarding…</> : 'Discard Model'}
+              </button>
+            </div>
           </div>
         </div>
       )}
