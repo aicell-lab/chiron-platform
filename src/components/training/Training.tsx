@@ -120,6 +120,8 @@ interface OrchestratorApp {
   displayName?: string;
   applicationId?: string;
   isBusy?: boolean;
+  ownerId?: string;
+  ownerEmail?: string;
 }
 
 interface TrainerApp {
@@ -133,6 +135,8 @@ interface TrainerApp {
   applicationId?: string;
   isBusy?: boolean;
   registeredOrchestratorId?: string;
+  ownerId?: string;
+  ownerEmail?: string;
 }
 
 type TrainingStage = 'fit' | 'evaluate' | 'aggregation' | 'distribution' | null;
@@ -576,6 +580,24 @@ const UmapView: React.FC<{ coords: number[][] | null; nSamples?: number }> = ({ 
 
 const Training: React.FC = () => {
   const { server, isLoggedIn, user, artifactManager } = useHyphaStore();
+
+  // True for apps with no owner tags (legacy deployments predating CHIRON_DEPLOYED_BY)
+  // or apps whose owner_id / owner_email matches the logged-in user. Used at the
+  // Training-step selection lists below to hide other users' orchestrators and
+  // trainers — picking those would still register against the active session's
+  // tokens but mixing across users tends to confuse the UI (Runs page filters on
+  // ownership, deletion is already owner-only). Mirror of the delete-permission
+  // check in chiron_manager/manager.py:_check_delete_permission.
+  const isOwnedByMe = useCallback((app: { ownerId?: string; ownerEmail?: string }): boolean => {
+    const oid = app.ownerId;
+    const oem = app.ownerEmail;
+    if (!oid && !oem) return true; // legacy, no owner tags
+    const userId = (user as any)?.id as string | undefined;
+    const userEmail = (user as any)?.email as string | undefined;
+    if (userId && oid && oid === userId) return true;
+    if (userEmail && oem && oem === userEmail) return true;
+    return false;
+  }, [user]);
 
   const [managers, setManagers] = useState<ManagerConnection[]>([]);
   const [connectingWorkspace, setConnectingWorkspace] = useState<string | null>(null);
@@ -1152,6 +1174,25 @@ const Training: React.FC = () => {
     return [];
   };
 
+  // Pull CHIRON_DEPLOYED_BY / CHIRON_DEPLOYED_BY_EMAIL out of the app's
+  // env_vars block. The manager sets these on the orchestrator/trainer
+  // deployment env at create time, keyed by deployment class name (e.g.
+  // {FederatedTrainingOrchestrator: {CHIRON_DEPLOYED_BY: "..."}}). We do
+  // not know which class name was used, so we walk every inner dict and
+  // return the first hit. Mirrors manager.py:_get_deployed_by.
+  const extractOwner = (s: any): { ownerId?: string; ownerEmail?: string } => {
+    const envVars = s?.application_env_vars;
+    if (!envVars || typeof envVars !== 'object') return {};
+    for (const inner of Object.values(envVars) as any[]) {
+      if (inner && typeof inner === 'object') {
+        const id = inner.CHIRON_DEPLOYED_BY;
+        const email = inner.CHIRON_DEPLOYED_BY_EMAIL;
+        if (id || email) return { ownerId: id || undefined, ownerEmail: email || undefined };
+      }
+    }
+    return {};
+  };
+
   const toOrchestratorApp = (managerId: string, appId: string, s: any): OrchestratorApp => ({
     managerId,
     appId,
@@ -1161,6 +1202,7 @@ const Training: React.FC = () => {
     displayName: s.display_name,
     applicationId: appId,
     isBusy: s.is_busy ?? false,
+    ...extractOwner(s),
   });
 
   const toTrainerApp = (managerId: string, appId: string, s: any): TrainerApp => ({
@@ -1174,6 +1216,7 @@ const Training: React.FC = () => {
     applicationId: appId,
     isBusy: s.is_busy ?? false,
     registeredOrchestratorId: s.registered_orchestrator_id ?? undefined,
+    ...extractOwner(s),
   });
 
   // Workspace add — just kicks off discovery. No more manager-resolution dance.
@@ -3045,7 +3088,7 @@ const Training: React.FC = () => {
                     <p className="text-xs text-gray-500 mt-0.5">Select one orchestrator to coordinate training</p>
                   </div>
                   <div className="p-4 space-y-2">
-                    {orchestrators.filter(o => o.status === 'RUNNING').length === 0 ? (
+                    {orchestrators.filter(o => o.status === 'RUNNING' && isOwnedByMe(o)).length === 0 ? (
                       <div className="text-center py-8 text-gray-400">
                         <FaClock className="mx-auto mb-2 opacity-40" size={24} />
                         <p className="text-sm">No running orchestrators</p>
@@ -3053,7 +3096,7 @@ const Training: React.FC = () => {
                       </div>
                     ) : (
                       orchestrators
-                        .filter(o => o.status === 'RUNNING')
+                        .filter(o => o.status === 'RUNNING' && isOwnedByMe(o))
                         .slice()
                         .sort(compareByWorkerThenApp)
                         .map(orch => {
@@ -3118,7 +3161,7 @@ const Training: React.FC = () => {
                     )}
                     {(() => {
                       const connectedRunningTrainers = trainers
-                        .filter(t => t.status === 'RUNNING')
+                        .filter(t => t.status === 'RUNNING' && isOwnedByMe(t))
                         .slice()
                         .sort(compareByWorkerThenApp);
                       const connectedSvcIds = new Set(connectedRunningTrainers.map(t => t.serviceIds[0]?.websocket_service_id).filter(Boolean));
