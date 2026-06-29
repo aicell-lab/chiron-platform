@@ -1544,17 +1544,15 @@ const Training: React.FC = () => {
     // Fire in background; do not await
     (async () => {
       try {
-        // The application token must scope to the worker's workspace, not the
-        // user's default. A logged-in user's `server.config.workspace` is
-        // their own ws-user-* workspace, which they almost always have only
-        // `rw` in (admin lives on a sibling ws-user-* alias) — so
-        // generateToken there fails with "Only admin can generate token".
-        // The worker, manager, data server, and resulting orchestrator all
-        // live in the workspace prefix of the managerId; generating the
-        // token there gives the orchestrator the access it needs and the
-        // user is admin there if they could see the worker at all.
-        const targetWorkspace = managerId.split('/')[0] || server.config.workspace;
-        const applicationToken = await server.generateToken({ workspace: targetWorkspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
+        // Generate a user-scoped (personal-workspace) 30-day read_write token.
+        // The orchestrator runs with this token as HYPHA_TOKEN so it acts AS
+        // the user when discovering services, calling trainer RPCs, writing
+        // run artifacts to ws-user-<id>/chiron-training-runs, and publishing
+        // checkpoints to chiron-platform/chiron-models. The manager spawning
+        // the orchestrator adds both the user's email and the manager's own
+        // service-account email to the orchestrator's authorized_users so
+        // both identities can reach it.
+        const applicationToken = await server.generateToken({ permission: 'read_write', expires_in: 3600 * 24 * 30 });
         const ownerId = user?.id as string | undefined;
         const ownerEmail = (user?.email as string | undefined) || undefined;
         await callManagerCompat(managerId, 'create_orchestrator', { token: applicationToken, owner_id: ownerId, owner_email: ownerEmail }, ['owner_email'], { timeoutMs: 120000 });
@@ -1627,10 +1625,12 @@ const Training: React.FC = () => {
     // Fire in background; do not await
     (async () => {
       try {
-        // See createOrchestrator — token must be scoped to the worker's
-        // workspace (parsed from managerId), not the user's default.
-        const targetWorkspace = managerId.split('/')[0] || server.config.workspace;
-        const applicationToken = await server.generateToken({ workspace: targetWorkspace, permission: 'read_write', expires_in: 3600 * 24 * 30 });
+        // See createOrchestrator: user-scoped (personal-workspace) 30-day
+        // read_write token. The trainer runs with this as HYPHA_TOKEN so it
+        // calls the data-server as the user and publishes checkpoints as
+        // the user. The manager adds user email + manager email to the
+        // trainer's authorized_users so both identities can call it.
+        const applicationToken = await server.generateToken({ permission: 'read_write', expires_in: 3600 * 24 * 30 });
         const ownerId = user?.id as string | undefined;
         const ownerEmail = (user?.email as string | undefined) || undefined;
         const trainerParams: Record<string, any> = { token: applicationToken, datasets: datasetsArg, trainer_artifact_id: trainerArtifactArg, owner_id: ownerId, owner_email: ownerEmail, max_batch_size: newTrainerMaxBatchSize };
