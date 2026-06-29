@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import yaml from 'js-yaml';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────────────
 
 type ArtifactType = {
   id: string;
@@ -26,8 +26,8 @@ interface RawFileEntry {
 
 interface DirEntry {
   kind: 'file' | 'dir';
-  displayName: string;
-  fullPath: string;
+  displayName: string;  // just the entry name at this level
+  fullPath: string;     // full path relative to artifact root
   size?: number;
   lastModified?: string;
 }
@@ -38,6 +38,12 @@ interface LoadedFile {
   isEditable: boolean;
 }
 
+interface PermissionInfo {
+  mode: 'admin' | 'token';
+  workspace?: string;
+  token?: string;
+}
+
 interface BioEngineAppManagerProps {
   serviceId: string;
   server: any;
@@ -46,15 +52,11 @@ interface BioEngineAppManagerProps {
   currentUserEmail?: string;
   availableWorkspaces?: string[];
   onArtifactUpdated?: (workspace?: string) => void;
-  ref?: React.Ref<{
-    openCreateDialog: () => void;
-    openEditDialog: (artifact: ArtifactType) => void;
-  }>;
 }
 
 type DialogMode = 'closed' | 'view' | 'edit' | 'create' | 'copy';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getFileLanguage(fileName: string): string {
   const ext = fileName.toLowerCase().split('.').pop() || '';
@@ -70,11 +72,7 @@ function getFileLanguage(fileName: string): string {
 
 function isEditableFile(fileName: string): boolean {
   const ext = fileName.toLowerCase().split('.').pop() || '';
-  const editableExts = [
-    'yaml', 'yml', 'py', 'js', 'ts', 'jsx', 'tsx', 'json', 'md', 'txt',
-    'sh', 'html', 'htm', 'css', 'ipynb', 'ijm', 'cfg', 'conf', 'ini',
-    'dockerfile', 'requirements', 'gitignore',
-  ];
+  const editableExts = ['yaml','yml','py','js','ts','jsx','tsx','json','md','txt','sh','html','htm','css','ipynb','ijm','cfg','conf','ini','dockerfile','requirements','gitignore'];
   return editableExts.includes(ext) || fileName === 'Dockerfile' || fileName === 'requirements.txt';
 }
 
@@ -86,26 +84,35 @@ function formatFileSize(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+/** Given a flat file list, compute entries visible at `dir`. */
 function getEntriesAtDir(rawFiles: RawFileEntry[], dir: string): DirEntry[] {
   const entries: DirEntry[] = [];
   const seenDirs = new Set<string>();
+
   for (const f of rawFiles) {
     const name = f.name;
     if (!name.startsWith(dir)) continue;
     const rel = name.slice(dir.length);
     if (!rel) continue;
+
     const slashIdx = rel.indexOf('/');
+    // A name is a directory if it contains a slash, ends with a slash,
+    // or the artifact manager returned type: 'directory' (no trailing slash).
     const isExplicitDir = f.type === 'directory' || rel.endsWith('/');
+
     if (slashIdx === -1 && !isExplicitDir) {
+      // plain file at this level
       const lm = f.last_modified
         ? new Date(typeof f.last_modified === 'number' ? f.last_modified * 1000 : f.last_modified).toLocaleString()
         : undefined;
       entries.push({ kind: 'file', displayName: rel, fullPath: name, size: f.size, lastModified: lm });
     } else {
+      // subdirectory (from an explicit dir entry or a nested file path)
       let dirName: string;
       if (slashIdx !== -1) {
         dirName = rel.slice(0, slashIdx + 1);
       } else {
+        // explicit dir entry without trailing slash — normalise to have one
         dirName = rel.replace(/\/?$/, '/');
       }
       if (!seenDirs.has(dirName)) {
@@ -114,6 +121,7 @@ function getEntriesAtDir(rawFiles: RawFileEntry[], dir: string): DirEntry[] {
       }
     }
   }
+
   return entries.sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
     return a.displayName.localeCompare(b.displayName);
@@ -127,42 +135,27 @@ function getParentDir(dir: string): string {
   return idx === -1 ? '' : trimmed.slice(0, idx + 1);
 }
 
-// ─── Default templates ────────────────────────────────────────────────────────
-
 const DEFAULT_MANIFEST = `id: my-new-app
 name: My New App
 description: A new BioEngine application
 id_emoji: 🚀
 type: ray-serve
-authorized_users:
-  - "*"  # Allow all users to access this app
 deployments:
-  - "main:MyNewApp"  # format: filename:ClassName
+  - "main:MyNewApp"
 `;
 
-const DEFAULT_MAIN_PY = `# Standard python libraries can be imported at the top
-import asyncio
+const DEFAULT_MAIN_PY = `import asyncio
 import time
 from datetime import datetime
 from typing import Any, Dict
 
-# Ray Serve and Hypha imports
 from ray import serve
 from pydantic import Field
 from hypha_rpc.utils.schema import schema_method
 
-# Non-standard libraries should be imported inside methods where they are used
-
 
 @serve.deployment(
-    ray_actor_options={
-        "num_cpus": 1,
-        "num_gpus": 0,
-        "memory": 2 * 1024**3,  # 2 GB
-        "runtime_env": {
-            "pip": [],  # Add your dependencies here
-        }
-    },
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0, "memory": 2 * 1024**3},
     max_ongoing_requests=10,
 )
 class MyNewApp:
@@ -187,31 +180,22 @@ class MyNewApp:
             "timestamp": datetime.now().isoformat(),
             "uptime": time.time() - self.start_time
         }
-
-    @schema_method
-    async def process(
-        self,
-        data: str = Field(..., description="Data to process")
-    ) -> Dict[str, Any]:
-        """Process some data with the application."""
-        return {
-            "status": "processed",
-            "input": data,
-            "output": f"Processed: {data}",
-            "timestamp": datetime.now().isoformat()
-        }
 `;
 
-// ─── Component ────────────────────────────────────────────────────────────────
+// ─── Component ───────────────────────────────────────────────────────────────
 
 const BioEngineAppManager = React.forwardRef<
   { openCreateDialog: () => void; openEditDialog: (artifact: ArtifactType) => void },
   BioEngineAppManagerProps
->(({ serviceId, server, isLoggedIn, adminUsers = [], currentUserEmail, availableWorkspaces = [], onArtifactUpdated }, ref) => {
-
-  const userWs: string = server?.config?.workspace || '';
-  const getWorkerWorkspace = () => serviceId ? serviceId.split('/')[0] : '';
-  const userIsAdmin = adminUsers.includes(currentUserEmail || '') || adminUsers.includes('*');
+>(({
+  serviceId,
+  server,
+  isLoggedIn,
+  adminUsers = [],
+  currentUserEmail,
+  availableWorkspaces = [],
+  onArtifactUpdated,
+}, ref) => {
 
   // ─ Mode & artifact
   const [mode, setMode] = useState<DialogMode>('closed');
@@ -225,27 +209,35 @@ const BioEngineAppManager = React.forwardRef<
   const [loadedFiles, setLoadedFiles] = useState<Record<string, LoadedFile>>({});
   const [fileLoading, setFileLoading] = useState(false);
 
-  // ─ Edit-mode change tracking
+  // ─ Edit-mode changes
   const [editedContents, setEditedContents] = useState<Record<string, string>>({});
-  const [newFiles, setNewFiles] = useState<Record<string, string>>({});
+  const [newFiles, setNewFiles] = useState<Record<string, string>>({});   // path → content
   const [deletedFiles, setDeletedFiles] = useState<Set<string>>(new Set());
-  const [editorKey, setEditorKey] = useState(0);
+  const [editorKey, setEditorKey] = useState(0); // bumped to force Monaco re-mount on discard
+
+  // ─ Permission
+  const [permission, setPermission] = useState<PermissionInfo | null>(null);
+  const [permChecking, setPermChecking] = useState(false);
+  const [permError, setPermError] = useState<string | null>(null);
 
   // ─ Loading / error
   const [initialLoading, setInitialLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // ─ Create dialog state
-  const [createFiles, setCreateFiles] = useState<Record<string, string>>({});
+  // ─ Create / copy
+  const [createFiles, setCreateFiles] = useState<Record<string, string>>({
+    'manifest.yaml': DEFAULT_MANIFEST,
+    'main.py': DEFAULT_MAIN_PY,
+  });
   const [createSelectedFile, setCreateSelectedFile] = useState('manifest.yaml');
+  const [createWorkspace, setCreateWorkspace] = useState('');
   const [createChecking, setCreateChecking] = useState(false);
 
-  // ─ Copy dialog state
-  const [copySaving, setCopySaving] = useState(false);
   const [copyWorkspace, setCopyWorkspace] = useState('');
+  const [copySaving, setCopySaving] = useState(false);
 
-  // ─ New file/folder input
+  // ─ New file / folder input
   const [newEntryName, setNewEntryName] = useState('');
   const [newEntryKind, setNewEntryKind] = useState<'file' | 'folder'>('file');
 
@@ -263,33 +255,52 @@ const BioEngineAppManager = React.forwardRef<
     return am;
   }, [server]);
 
-  const isUserOwnedArtifact = useCallback((artifactId: string): boolean => {
-    const userWorkspace = server.config?.workspace;
-    return !!(userWorkspace && artifactId.startsWith(userWorkspace));
+  const getWorkerWorkspace = useCallback((): string => {
+    return serviceId ? serviceId.split('/')[0] : '';
+  }, [serviceId]);
+
+  // ─── Token generation ──────────────────────────────────────────────────────
+
+  const generateWorkspaceToken = useCallback(async (workspace: string): Promise<string> => {
+    try {
+      if (typeof server.generateToken === 'function') {
+        const tok = await server.generateToken({ workspace, expires_in: 3600 });
+        return typeof tok === 'string' ? tok : (tok?.token ?? tok);
+      }
+    } catch (_) { /* fall through */ }
+    if (server.config?.token) return server.config.token;
+    throw new Error(`Cannot obtain a token for workspace "${workspace}". Make sure you are a member of that workspace.`);
   }, [server]);
 
-  const shouldShowSaveAsCopy = useCallback((artifactId: string): boolean => {
-    const isFromChironPlatform = artifactId.startsWith('chiron-platform/');
-    const userWorkspace = server.config?.workspace;
-    return isFromChironPlatform && userWorkspace !== 'chiron-platform';
-  }, [server]);
+  // ─── Permission check (called when entering edit mode) ───────────────────
 
-  // ─── Close dialog ─────────────────────────────────────────────────────────
+  const checkEditPermission = useCallback(async (): Promise<PermissionInfo> => {
+    const bioengineWorker = await server.getService(serviceId, { mode: 'random' });
+    const isAdmin = await bioengineWorker.check_access();
+    if (!isAdmin) {
+      throw new Error('You need admin access to this BioEngine worker to edit or copy apps.');
+    }
+    return { mode: 'admin' };
+  }, [serviceId, server]);
 
-  const handleCloseDialog = useCallback(() => {
-    setMode('closed');
-    setArtifact(null);
-    setRawFiles([]);
-    setFetchedDirs(new Set());
-    setLoadedFiles({});
-    setCurrentDir('');
-    setSelectedFile(null);
-    setEditedContents({});
-    setNewFiles({});
-    setDeletedFiles(new Set());
-    setError(null);
-    setNewEntryName('');
-  }, []);
+  // ─── Upload via worker ────────────────────────────────────────────────────
+
+  const uploadApp = useCallback(async (
+    filesToUpload: Array<{ name: string; content: string; type: string }>,
+    targetWorkspace?: string,
+  ): Promise<string> => {
+    const bioengineWorker = await server.getService(serviceId, { mode: 'random' });
+    if (targetWorkspace) {
+      const token = await generateWorkspaceToken(targetWorkspace);
+      return await bioengineWorker.upload_app({
+        files: filesToUpload,
+        workspace: targetWorkspace,
+        hypha_token: token,
+        _rkwargs: true,
+      });
+    }
+    return await bioengineWorker.upload_app({ files: filesToUpload, _rkwargs: true });
+  }, [serviceId, server, generateWorkspaceToken]);
 
   // ─── Load artifact file list ──────────────────────────────────────────────
 
@@ -305,9 +316,10 @@ const BioEngineAppManager = React.forwardRef<
       const fileList: RawFileEntry[] = await am.list_files({ artifact_id: art.id, _rkwargs: true });
       setRawFiles(fileList || []);
 
-      // Pre-load manifest.yaml content for immediate display
+      // Auto-select manifest.yaml so the user sees something immediately
       const hasManifest = (fileList || []).some((f: RawFileEntry) => f.name === 'manifest.yaml');
       if (hasManifest) {
+        // Load content inline so the editor is populated without a second click
         try {
           const url = await am.get_file({ artifact_id: art.id, file_path: 'manifest.yaml', _rkwargs: true });
           const res = await fetch(url);
@@ -317,14 +329,6 @@ const BioEngineAppManager = React.forwardRef<
           setLoadedFiles({ 'manifest.yaml': { content: '# Failed to load manifest.yaml', language: 'yaml', isEditable: false } });
         }
         setSelectedFile('manifest.yaml');
-      } else if (art.manifest) {
-        // Fall back to artifact metadata if no manifest.yaml file exists
-        try {
-          const cleanManifest = JSON.parse(JSON.stringify(art.manifest));
-          const manifestText = yaml.dump(cleanManifest, { indent: 2, lineWidth: 120, noRefs: true, skipInvalid: true });
-          setLoadedFiles({ 'manifest.yaml': { content: manifestText, language: 'yaml', isEditable: true } });
-          setSelectedFile('manifest.yaml');
-        } catch { /* skip */ }
       }
     } catch (err) {
       setError(`Failed to list files: ${err}`);
@@ -333,7 +337,7 @@ const BioEngineAppManager = React.forwardRef<
     }
   }, [getArtifactManager]);
 
-  // ─── Load a single file's content on click ────────────────────────────────
+  // ─── Load a single file's content ────────────────────────────────────────
 
   const loadFileContent = useCallback(async (art: ArtifactType, filePath: string) => {
     if (loadedFiles[filePath]) {
@@ -343,7 +347,7 @@ const BioEngineAppManager = React.forwardRef<
     if (!isEditableFile(filePath)) {
       setLoadedFiles(prev => ({
         ...prev,
-        [filePath]: { content: `// Binary file (not editable)`, language: 'plaintext', isEditable: false },
+        [filePath]: { content: `// Binary file — not editable`, language: 'plaintext', isEditable: false },
       }));
       setSelectedFile(filePath);
       return;
@@ -371,14 +375,16 @@ const BioEngineAppManager = React.forwardRef<
     }
   }, [loadedFiles, getArtifactManager]);
 
-  // ─── Navigate into a directory (lazy-fetch contents) ─────────────────────
+  // ─── Navigate into a directory, lazy-fetching its contents ──────────────
 
   const handleNavigateDir = useCallback(async (dirFullPath: string) => {
     setCurrentDir(dirFullPath);
     setSelectedFile(null);
+
     if (!artifact || fetchedDirs.has(dirFullPath)) return;
     setFetchedDirs(prev => new Set([...prev, dirFullPath]));
-    const cleanDir = dirFullPath.replace(/\/$/, '');
+
+    const cleanDir = dirFullPath.replace(/\/$/, ''); // strip trailing slash for API
     try {
       const am = await getArtifactManager();
       const subFiles: RawFileEntry[] = await am.list_files({
@@ -387,17 +393,20 @@ const BioEngineAppManager = React.forwardRef<
         _rkwargs: true,
       });
       if (!subFiles || subFiles.length === 0) return;
-      const prefix = dirFullPath;
+
+      // Normalize names: API may return relative names ("file.txt") or full paths ("frontend/file.txt")
+      const prefix = dirFullPath; // 'frontend/'
       const normalized: RawFileEntry[] = subFiles.map(f => ({
         ...f,
         name: f.name.startsWith(cleanDir + '/') ? f.name : prefix + f.name,
       }));
+
       setRawFiles(prev => {
         const existingNames = new Set(prev.map(f => f.name));
         const toAdd = normalized.filter(f => !existingNames.has(f.name));
         return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
       });
-    } catch (_) { /* silently ignore; directory will appear empty */ }
+    } catch (_) { /* silently ignore — directory will appear empty */ }
   }, [artifact, fetchedDirs, getArtifactManager]);
 
   // ─── Open view dialog ─────────────────────────────────────────────────────
@@ -406,6 +415,8 @@ const BioEngineAppManager = React.forwardRef<
     setArtifact(art);
     setMode('view');
     setError(null);
+    setPermError(null);
+    setPermission(null);
     setEditedContents({});
     setNewFiles({});
     setDeletedFiles(new Set());
@@ -414,9 +425,20 @@ const BioEngineAppManager = React.forwardRef<
 
   // ─── Enter edit mode ──────────────────────────────────────────────────────
 
-  const handleEnterEditMode = useCallback(() => {
-    setMode('edit');
-  }, []);
+  const handleEnterEditMode = useCallback(async () => {
+    if (!artifact) return;
+    setPermChecking(true);
+    setPermError(null);
+    try {
+      const perm = await checkEditPermission();
+      setPermission(perm);
+      setMode('edit');
+    } catch (err) {
+      setPermError(`Cannot enter edit mode: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setPermChecking(false);
+    }
+  }, [artifact, checkEditPermission]);
 
   // ─── Discard changes ──────────────────────────────────────────────────────
 
@@ -432,67 +454,71 @@ const BioEngineAppManager = React.forwardRef<
     setNewFiles({});
     setDeletedFiles(new Set());
     setSelectedFile(sel => (sel && newFiles[sel] !== undefined ? null : sel));
+    setPermission(null);
+    setPermError(null);
     setError(null);
     setEditorKey(k => k + 1);
   }, [newFiles]);
 
-  // ─── Collect all artifact files recursively ───────────────────────────────
-
-  const collectAllFiles = useCallback(async (art: ArtifactType, am: any): Promise<RawFileEntry[]> => {
-    const allFiles: RawFileEntry[] = [];
-    const listDir = async (dirPath: string) => {
-      const opts: any = { artifact_id: art.id, _rkwargs: true };
-      if (dirPath) opts.dir_path = dirPath;
-      const entries: RawFileEntry[] = await am.list_files(opts);
-      for (const e of entries || []) {
-        if (e.type === 'directory' || e.name.endsWith('/')) {
-          const sub = e.name.replace(/\/$/, '');
-          await listDir(dirPath ? `${dirPath}/${sub}` : sub);
-        } else {
-          const fullName = (dirPath && !e.name.startsWith(dirPath + '/'))
-            ? `${dirPath}/${e.name}` : e.name;
-          allFiles.push({ ...e, name: fullName });
-        }
-      }
-    };
-    await listDir('');
-    return allFiles;
-  }, []);
-
-  // ─── Update app (save changes) ────────────────────────────────────────────
+  // ─── Update app ───────────────────────────────────────────────────────────
 
   const handleUpdateApp = useCallback(async () => {
-    if (!artifact) return;
+    if (!artifact || !permission) return;
     setSaving(true);
     setError(null);
     try {
       const am = await getArtifactManager();
-      const bioengineWorker = await server.getService(serviceId);
-      const allFilesFlat = await collectAllFiles(artifact, am);
+
+      // Recursively list ALL files in the artifact (upload_app removes any file not in the list)
+      const allFilesFlat: RawFileEntry[] = [];
+      const listDir = async (dirPath: string) => {
+        const opts: any = { artifact_id: artifact.id, _rkwargs: true };
+        if (dirPath) opts.dir_path = dirPath;
+        const entries: RawFileEntry[] = await am.list_files(opts);
+        for (const e of entries || []) {
+          if (e.type === 'directory' || e.name.endsWith('/')) {
+            const sub = e.name.replace(/\/$/, '');
+            await listDir(dirPath ? `${dirPath}/${sub}` : sub);
+          } else {
+            // API may return names relative to dir_path or full artifact-root paths
+            const fullName = (dirPath && !e.name.startsWith(dirPath + '/'))
+              ? `${dirPath}/${e.name}`
+              : e.name;
+            allFilesFlat.push({ ...e, name: fullName });
+          }
+        }
+      };
+      await listDir('');
 
       const filesToUpload: Array<{ name: string; content: string; type: string }> = [];
+
       for (const rf of allFilesFlat) {
         if (deletedFiles.has(rf.name)) continue;
+
         const editedContent = editedContents[rf.name];
         if (editedContent !== undefined) {
           filesToUpload.push({ name: rf.name, content: editedContent, type: 'text' });
           continue;
         }
+
         const loaded = loadedFiles[rf.name];
         if (loaded?.isEditable) {
           filesToUpload.push({ name: rf.name, content: loaded.content, type: 'text' });
           continue;
         }
+
+        // File not yet loaded — fetch it now if it's a text file
         if (isEditableFile(rf.name)) {
           try {
             const url = await am.get_file({ artifact_id: artifact.id, file_path: rf.name, _rkwargs: true });
             const res = await fetch(url);
             if (res.ok) filesToUpload.push({ name: rf.name, content: await res.text(), type: 'text' });
-          } catch { /* skip unloadable */ }
+          } catch { /* skip unloadable — will be removed by worker */ }
         }
+        // Binary files cannot be re-uploaded through this interface and will be removed by the worker
       }
 
-      // Add newly created files
+      // Add new files (skip any that were discarded via deletedFiles)
       for (const [path, content] of Object.entries(newFiles)) {
         if (!deletedFiles.has(path) && !filesToUpload.some(f => f.name === path)) {
           filesToUpload.push({ name: path, content, type: 'text' });
@@ -503,39 +529,57 @@ const BioEngineAppManager = React.forwardRef<
         throw new Error('manifest.yaml is required');
       }
 
-      await bioengineWorker.save_application({ files: filesToUpload, _rkwargs: true });
-      onArtifactUpdated?.(artifact?.id.split('/')[0]);
+      await uploadApp(filesToUpload);
+      onArtifactUpdated?.(artifact.id.split('/')[0]);
       handleCloseDialog();
     } catch (err) {
       setError(`Failed to update app: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSaving(false);
     }
-  }, [artifact, serviceId, server, deletedFiles, editedContents, loadedFiles, newFiles,
-      onArtifactUpdated, getArtifactManager, collectAllFiles, handleCloseDialog]);
+  }, [artifact, permission, deletedFiles, editedContents, loadedFiles, newFiles, uploadApp, onArtifactUpdated, getArtifactManager]);
 
-  // ─── Save as copy (into user's workspace) ────────────────────────────────
+  // ─── Create Copy ─────────────────────────────────────────────────────────
 
   const handleOpenCopyDialog = useCallback(() => {
-    setCopyWorkspace(userWs || getWorkerWorkspace());
+    setCopyWorkspace(server.config?.workspace || '');
+    setCopySaving(false);
     setMode('copy');
-  }, [userWs]);
+  }, [server]);
 
   const handleCreateCopy = useCallback(async () => {
     if (!artifact) return;
+
     setCopySaving(true);
     setError(null);
-    const targetWs = copyWorkspace.trim() || userWs || getWorkerWorkspace();
     try {
       const am = await getArtifactManager();
-      const bioengineWorker = await server.getService(serviceId);
-      const allFilesFlat = await collectAllFiles(artifact, am);
+
+      // Recursively collect all files (same as handleUpdateApp)
+      const allFilesFlat: RawFileEntry[] = [];
+      const listDir = async (dirPath: string) => {
+        const opts: any = { artifact_id: artifact.id, _rkwargs: true };
+        if (dirPath) opts.dir_path = dirPath;
+        const entries: RawFileEntry[] = await am.list_files(opts);
+        for (const e of entries || []) {
+          if (e.type === 'directory' || e.name.endsWith('/')) {
+            const sub = e.name.replace(/\/$/, '');
+            await listDir(dirPath ? `${dirPath}/${sub}` : sub);
+          } else {
+            const fullName = (dirPath && !e.name.startsWith(dirPath + '/'))
+              ? `${dirPath}/${e.name}`
+              : e.name;
+            allFilesFlat.push({ ...e, name: fullName });
+          }
+        }
+      };
+      await listDir('');
 
       const filesToUpload: Array<{ name: string; content: string; type: string }> = [];
       for (const rf of allFilesFlat) {
         if (!isEditableFile(rf.name)) continue;
         const loaded = loadedFiles[rf.name];
-        let content: string | null = loaded?.isEditable ? loaded.content : null;
+        let content = loaded?.isEditable ? loaded.content : null;
         if (content === null) {
           try {
             const url = await am.get_file({ artifact_id: artifact.id, file_path: rf.name, _rkwargs: true });
@@ -544,7 +588,8 @@ const BioEngineAppManager = React.forwardRef<
           } catch { continue; }
         }
         if (content === null) continue;
-        // Strip workspace prefix from manifest id so copy gets a clean id
+
+        // Strip workspace prefix from manifest id so the copy gets a clean id
         if (rf.name === 'manifest.yaml') {
           try {
             const obj: any = yaml.load(content);
@@ -556,12 +601,12 @@ const BioEngineAppManager = React.forwardRef<
         }
         filesToUpload.push({ name: rf.name, content, type: 'text' });
       }
-
       if (!filesToUpload.some(f => f.name === 'manifest.yaml')) {
-        throw new Error('manifest.yaml was not loaded; open the file first, then try again.');
+        throw new Error('manifest.yaml was not loaded — open the file first to load its content.');
       }
 
-      await bioengineWorker.save_application({ files: filesToUpload, target_workspace: targetWs || undefined, _rkwargs: true });
+      const targetWs = copyWorkspace.trim() || getWorkerWorkspace() || undefined;
+      await uploadApp(filesToUpload, targetWs || undefined);
       onArtifactUpdated?.(targetWs);
       handleCloseDialog();
     } catch (err) {
@@ -569,8 +614,7 @@ const BioEngineAppManager = React.forwardRef<
     } finally {
       setCopySaving(false);
     }
-  }, [artifact, serviceId, server, loadedFiles, copyWorkspace, userWs, onArtifactUpdated,
-      getArtifactManager, collectAllFiles, handleCloseDialog]);
+  }, [artifact, copyWorkspace, rawFiles, loadedFiles, uploadApp, onArtifactUpdated, getArtifactManager]);
 
   // ─── Create new app ───────────────────────────────────────────────────────
 
@@ -578,27 +622,30 @@ const BioEngineAppManager = React.forwardRef<
     setArtifact(null);
     setCreateFiles({ 'manifest.yaml': DEFAULT_MANIFEST, 'main.py': DEFAULT_MAIN_PY });
     setCreateSelectedFile('manifest.yaml');
+    setCreateWorkspace(server.config?.workspace || '');
     setError(null);
     setCreateChecking(false);
     setMode('create');
-  }, []);
+  }, [server]);
 
   const handleCreateApp = useCallback(async () => {
     const manifestContent = createFiles['manifest.yaml'];
     if (!manifestContent) { setError('manifest.yaml is required.'); return; }
+
     let manifestObj: any;
     try { manifestObj = yaml.load(manifestContent); } catch (e) {
       setError(`Invalid YAML in manifest.yaml: ${e}`); return;
     }
-    if (!manifestObj?.id) { setError('manifest.yaml must have an "id" field.'); return; }
+    const appId = manifestObj?.id;
+    if (!appId) { setError('manifest.yaml must have an "id" field.'); return; }
+
     setCreateChecking(true);
     setError(null);
     try {
-      const bioengineWorker = await server.getService(serviceId);
       const filesToUpload = Object.entries(createFiles).map(([name, content]) => ({
         name, content, type: 'text' as const,
       }));
-      await bioengineWorker.save_application({ files: filesToUpload, _rkwargs: true });
+      await uploadApp(filesToUpload);
       onArtifactUpdated?.(getWorkerWorkspace());
       handleCloseDialog();
     } catch (err) {
@@ -606,7 +653,7 @@ const BioEngineAppManager = React.forwardRef<
     } finally {
       setCreateChecking(false);
     }
-  }, [createFiles, serviceId, server, onArtifactUpdated, handleCloseDialog]);
+  }, [createFiles, uploadApp, onArtifactUpdated]);
 
   // ─── Delete app ───────────────────────────────────────────────────────────
 
@@ -614,16 +661,10 @@ const BioEngineAppManager = React.forwardRef<
     if (!artifact) return;
     setDeleteLoading(true);
     try {
-      const isUserOwned = isUserOwnedArtifact(artifact.id);
-      if (isUserOwned) {
-        const am = await getArtifactManager();
-        await am.delete({ artifact_id: artifact.id, _rkwargs: true });
-      } else {
-        const bioengineWorker = await server.getService(serviceId);
-        await bioengineWorker.delete_application({ artifact_id: artifact.id, _rkwargs: true });
-      }
+      const am = await getArtifactManager();
+      await am.delete({ artifact_id: artifact.id, delete_files: true, _rkwargs: true });
       setDeleteOpen(false);
-      onArtifactUpdated?.(artifact?.id.split('/')[0]);
+      onArtifactUpdated?.();
       handleCloseDialog();
     } catch (err) {
       setError(`Failed to delete: ${err instanceof Error ? err.message : String(err)}`);
@@ -631,16 +672,19 @@ const BioEngineAppManager = React.forwardRef<
     } finally {
       setDeleteLoading(false);
     }
-  }, [artifact, serviceId, server, isUserOwnedArtifact, onArtifactUpdated,
-      getArtifactManager, handleCloseDialog]);
+  }, [artifact, getArtifactManager, onArtifactUpdated]);
 
-  // ─── Add new file/folder entry ────────────────────────────────────────────
+  // ─── New file / folder ────────────────────────────────────────────────────
 
   const handleAddEntry = useCallback(() => {
     const raw = newEntryName.trim();
     if (!raw) return;
-    const fullPath = newEntryKind === 'folder' ? currentDir + raw + '/' : currentDir + raw;
+    const fullPath = newEntryKind === 'folder'
+      ? currentDir + raw + '/'
+      : currentDir + raw;
+
     if (newEntryKind === 'folder') {
+      // Add a placeholder file so the folder appears in rawFiles
       const placeholder = fullPath + '.gitkeep';
       setRawFiles(prev => [...prev, { name: placeholder, type: 'file', size: 0 }]);
       setNewFiles(prev => ({ ...prev, [placeholder]: '' }));
@@ -656,6 +700,24 @@ const BioEngineAppManager = React.forwardRef<
     setNewEntryName('');
   }, [newEntryName, newEntryKind, currentDir]);
 
+  // ─── Close dialog ─────────────────────────────────────────────────────────
+
+  const handleCloseDialog = useCallback(() => {
+    setMode('closed');
+    setArtifact(null);
+    setRawFiles([]);
+    setLoadedFiles({});
+    setCurrentDir('');
+    setSelectedFile(null);
+    setEditedContents({});
+    setNewFiles({});
+    setDeletedFiles(new Set());
+    setPermission(null);
+    setPermError(null);
+    setError(null);
+    setNewEntryName('');
+  }, []);
+
   // ─── Expose imperative handle ─────────────────────────────────────────────
 
   React.useImperativeHandle(ref, () => ({
@@ -666,8 +728,10 @@ const BioEngineAppManager = React.forwardRef<
   // ─── Derived data ─────────────────────────────────────────────────────────
 
   const dirEntries = getEntriesAtDir(rawFiles, currentDir);
-  const isUserOwned = artifact ? isUserOwnedArtifact(artifact.id) : false;
-  const canCopy = artifact ? shouldShowSaveAsCopy(artifact.id) : false;
+  const isUserOwned = artifact ? artifact.id.startsWith(server.config?.workspace || '\0') : false;
+  const isBioimageIo = artifact?.id.startsWith('bioimage-io/') ?? false;
+  const userWs = server.config?.workspace || '';
+  const userIsAdmin = adminUsers.includes(currentUserEmail || '') || adminUsers.includes('*');
 
   const selectedFileData: LoadedFile | undefined = selectedFile
     ? (loadedFiles[selectedFile] ?? (newFiles[selectedFile] !== undefined
@@ -679,10 +743,11 @@ const BioEngineAppManager = React.forwardRef<
     ? (editedContents[selectedFile] ?? selectedFileData?.content ?? '')
     : '';
 
-  // ─── Sub-render: file browser sidebar ────────────────────────────────────
+  // ─── Sub-render: file browser ────────────────────────────────────────────
 
   const renderFileBrowser = (editable: boolean) => (
     <div className="w-56 flex-shrink-0 border-r border-gray-200 flex flex-col bg-gray-50">
+      {/* Breadcrumb / back */}
       <div className="px-3 py-2 border-b border-gray-200 flex items-center gap-1 min-h-[38px]">
         {currentDir ? (
           <button
@@ -697,9 +762,12 @@ const BioEngineAppManager = React.forwardRef<
         ) : (
           <span className="text-xs text-gray-400 font-medium">Files</span>
         )}
-        {currentDir && <span className="text-xs text-gray-500 truncate ml-1">{currentDir}</span>}
+        {currentDir && (
+          <span className="text-xs text-gray-500 truncate ml-1">{currentDir}</span>
+        )}
       </div>
 
+      {/* Entries */}
       <div className="flex-1 overflow-y-auto py-1">
         {dirEntries.length === 0 && !initialLoading && (
           <p className="text-xs text-gray-400 px-3 py-2">Empty directory</p>
@@ -710,8 +778,8 @@ const BioEngineAppManager = React.forwardRef<
             onClick={() => {
               if (entry.kind === 'dir') {
                 handleNavigateDir(entry.fullPath);
-              } else if (artifact) {
-                loadFileContent(artifact, entry.fullPath);
+              } else {
+                if (artifact) loadFileContent(artifact, entry.fullPath);
               }
             }}
             className={`w-full text-left flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-gray-100 transition-colors ${
@@ -720,7 +788,7 @@ const BioEngineAppManager = React.forwardRef<
           >
             {entry.kind === 'dir' ? (
               <svg className="w-4 h-4 text-yellow-500 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2h-8l-2-2z" />
+                <path d="M10 4H4c-1.11 0-2 .89-2 2v12c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2h-8l-2-2z"/>
               </svg>
             ) : (
               <svg className="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -728,16 +796,15 @@ const BioEngineAppManager = React.forwardRef<
               </svg>
             )}
             <span className="truncate flex-1">{entry.displayName}</span>
-            {entry.size !== undefined && entry.size > 0 && !editable && (
-              <span className="text-[10px] text-gray-400 flex-shrink-0">{formatFileSize(entry.size)}</span>
-            )}
             {editable && (() => {
               const isNewFile = entry.kind === 'file' && newFiles[entry.fullPath] !== undefined;
               const isNewDir = entry.kind === 'dir' && newFiles[entry.fullPath + '.gitkeep'] !== undefined;
               if (isNewFile || isNewDir) {
+                // Discard button: removes new entries entirely
                 return (
                   <>
-                    <span className="text-[10px] bg-green-100 text-green-700 rounded px-1">new</span>
+                    {isNewFile && <span className="text-[10px] bg-green-100 text-green-700 rounded px-1">new</span>}
+                    {isNewDir && <span className="text-[10px] bg-green-100 text-green-700 rounded px-1">new</span>}
                     <button
                       onClick={e => {
                         e.stopPropagation();
@@ -745,14 +812,13 @@ const BioEngineAppManager = React.forwardRef<
                           setNewFiles(prev => { const n = { ...prev }; delete n[entry.fullPath]; return n; });
                           setEditedContents(prev => { const n = { ...prev }; delete n[entry.fullPath]; return n; });
                           setLoadedFiles(prev => { const n = { ...prev }; delete n[entry.fullPath]; return n; });
-                          setRawFiles(prev => prev.filter(f => f.name !== entry.fullPath));
                           if (selectedFile === entry.fullPath) setSelectedFile(null);
                         } else {
+                          // Remove all new files under this folder
                           const prefix = entry.fullPath;
                           setNewFiles(prev => Object.fromEntries(Object.entries(prev).filter(([k]) => !k.startsWith(prefix))));
                           setEditedContents(prev => Object.fromEntries(Object.entries(prev).filter(([k]) => !k.startsWith(prefix))));
                           setLoadedFiles(prev => Object.fromEntries(Object.entries(prev).filter(([k]) => !k.startsWith(prefix))));
-                          setRawFiles(prev => prev.filter(f => !f.name.startsWith(prefix)));
                           if (selectedFile?.startsWith(prefix)) setSelectedFile(null);
                         }
                       }}
@@ -801,6 +867,7 @@ const BioEngineAppManager = React.forwardRef<
         ))}
       </div>
 
+      {/* New file/folder input (edit mode only) */}
       {editable && (
         <div className="border-t border-gray-200 p-2 space-y-1">
           <div className="flex gap-1">
@@ -841,10 +908,11 @@ const BioEngineAppManager = React.forwardRef<
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
         <div className="bg-white rounded-2xl shadow-lg w-full max-w-6xl mx-4 h-5/6 flex flex-col border border-gray-200">
 
+          {/* Header */}
           <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-3">
             <div className="w-9 h-9 bg-gradient-to-r from-violet-500 to-purple-600 rounded-xl flex items-center justify-center flex-shrink-0">
               <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
             </div>
             <div className="flex-1 min-w-0">
@@ -858,10 +926,11 @@ const BioEngineAppManager = React.forwardRef<
                 Edit Mode
               </span>
             )}
-            {!isEdit && (
+            {!isEdit && !permChecking && (
               <button
                 onClick={handleEnterEditMode}
-                className="px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-1.5"
+                disabled={permChecking}
+                className="px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1.5"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
@@ -869,8 +938,13 @@ const BioEngineAppManager = React.forwardRef<
                 Edit
               </button>
             )}
-            <button
-              onClick={isEdit ? handleDiscardChanges : handleCloseDialog}
+            {permChecking && (
+              <div className="flex items-center gap-2 text-sm text-gray-500">
+                <div className="w-4 h-4 border-2 border-gray-300 border-t-blue-600 rounded-full animate-spin" />
+                Checking permissions...
+              </div>
+            )}
+            <button onClick={isEdit ? handleDiscardChanges : handleCloseDialog}
               className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors"
               title={isEdit ? 'Discard changes and return to view mode' : 'Close'}
             >
@@ -880,6 +954,17 @@ const BioEngineAppManager = React.forwardRef<
             </button>
           </div>
 
+          {/* Permission error banner */}
+          {permError && (
+            <div className="px-6 py-3 bg-red-50 border-b border-red-200 text-sm text-red-700 flex items-center gap-2">
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              {permError}
+            </div>
+          )}
+
+          {/* Error banner */}
           {error && (
             <div className="px-6 py-3 bg-red-50 border-b border-red-200 text-sm text-red-700">
               <div className="flex items-start gap-2">
@@ -896,6 +981,7 @@ const BioEngineAppManager = React.forwardRef<
             </div>
           )}
 
+          {/* Body */}
           <div className="flex-1 flex min-h-0">
             {initialLoading ? (
               <div className="flex-1 flex items-center justify-center text-gray-500 text-sm gap-2">
@@ -905,6 +991,7 @@ const BioEngineAppManager = React.forwardRef<
             ) : (
               <>
                 {renderFileBrowser(isEdit)}
+                {/* Editor / preview */}
                 <div className="flex-1 min-w-0 flex flex-col">
                   {!selectedFile && (
                     <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">
@@ -915,7 +1002,7 @@ const BioEngineAppManager = React.forwardRef<
                     <>
                       {!selectedFileData?.isEditable && (
                         <div className="px-4 py-2 bg-amber-50 border-b border-amber-200 text-xs text-amber-800">
-                          Binary / non-text file (read only)
+                          Binary / non-text file — read only
                         </div>
                       )}
                       {fileLoading ? (
@@ -960,15 +1047,19 @@ const BioEngineAppManager = React.forwardRef<
             )}
           </div>
 
+          {/* Footer */}
           <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex items-center gap-3">
             {isEdit ? (
               <>
-                <button onClick={handleDiscardChanges} className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-100">
+                <button
+                  onClick={handleDiscardChanges}
+                  className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-100"
+                >
                   Discard Changes
                 </button>
                 {isUserOwned && (
                   <button
-                    onClick={() => { setDeleteOpen(true); setDeleteText(''); }}
+                    onClick={() => setDeleteOpen(true)}
                     className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center gap-2"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -978,12 +1069,15 @@ const BioEngineAppManager = React.forwardRef<
                   </button>
                 )}
                 <div className="ml-auto flex gap-3">
-                  {canCopy && (
-                    <button onClick={handleOpenCopyDialog} className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 flex items-center gap-2">
+                  {isBioimageIo && userWs !== 'bioimage-io' && (
+                    <button
+                      onClick={handleOpenCopyDialog}
+                      className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 flex items-center gap-2"
+                    >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                       </svg>
-                      Save as Copy
+                      Create Copy
                     </button>
                   )}
                   <button
@@ -991,9 +1085,7 @@ const BioEngineAppManager = React.forwardRef<
                     disabled={saving}
                     className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
                   >
-                    {saving
-                      ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Saving…</>
-                      : 'Update App'}
+                    {saving ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Saving…</> : 'Update App'}
                   </button>
                 </div>
               </>
@@ -1008,156 +1100,167 @@ const BioEngineAppManager = React.forwardRef<
     );
   };
 
-  // ─── Create dialog ────────────────────────────────────────────────────────
+  // ─── Create App dialog ────────────────────────────────────────────────────
 
-  const renderCreateDialog = () => (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="bg-white rounded-2xl shadow-lg w-full max-w-6xl mx-4 h-5/6 flex flex-col border border-gray-200">
-        <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-3">
-          <div className="w-9 h-9 bg-gradient-to-r from-blue-500 to-blue-600 rounded-xl flex items-center justify-center flex-shrink-0">
-            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-          </div>
-          <h3 className="text-base font-semibold text-gray-900 flex-1">Create New App</h3>
-          <button onClick={handleCloseDialog} className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        {error && (
-          <div className="px-6 py-3 bg-red-50 border-b border-red-200 text-sm text-red-700">
-            <div className="flex items-start gap-2">
-              <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+  const renderCreateDialog = () => {
+    return (
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+        <div className="bg-white rounded-2xl shadow-lg w-full max-w-6xl mx-4 h-5/6 flex flex-col border border-gray-200">
+          <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-3">
+            <div className="w-9 h-9 bg-gradient-to-r from-blue-500 to-blue-600 rounded-xl flex items-center justify-center flex-shrink-0">
+              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
               </svg>
-              <pre className="flex-1 whitespace-pre-wrap break-all font-sans max-h-40 overflow-y-auto">{error}</pre>
-              <button onClick={() => setError(null)} className="flex-shrink-0 text-red-500 hover:text-red-700">
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
             </div>
+            <h3 className="text-base font-semibold text-gray-900 flex-1">Create New App</h3>
+            <span className="text-xs text-gray-500">Will be created in workspace <code className="bg-gray-100 px-1 rounded">{getWorkerWorkspace()}</code></span>
+            <button onClick={handleCloseDialog} className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
           </div>
-        )}
 
-        <div className="flex-1 flex min-h-0">
-          <div className="w-48 flex-shrink-0 border-r border-gray-200 flex flex-col bg-gray-50">
-            <div className="px-3 py-2 border-b border-gray-200 text-xs font-medium text-gray-500">Files</div>
-            <div className="flex-1 overflow-y-auto py-1">
-              {Object.keys(createFiles).map(fname => (
-                <button
-                  key={fname}
-                  onClick={() => setCreateSelectedFile(fname)}
-                  className={`w-full text-left flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-gray-100 ${createSelectedFile === fname ? 'bg-blue-50 text-blue-700' : 'text-gray-700'}`}
-                >
-                  <svg className="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                  <span className="truncate flex-1">{fname}</span>
-                  {fname !== 'manifest.yaml' && (
-                    <button
-                      onClick={e => {
-                        e.stopPropagation();
-                        setCreateFiles(prev => { const next = { ...prev }; delete next[fname]; return next; });
-                        if (createSelectedFile === fname) setCreateSelectedFile('manifest.yaml');
-                      }}
-                      className="hover:text-red-500 text-gray-400"
-                    >
-                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  )}
-                </button>
-              ))}
-            </div>
-            <div className="border-t border-gray-200 p-2">
-              <div className="flex gap-1">
-                <input
-                  value={newEntryName}
-                  onChange={e => setNewEntryName(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && newEntryName.trim()) {
-                      const name = newEntryName.trim();
-                      if (!createFiles[name]) { setCreateFiles(prev => ({ ...prev, [name]: '' })); setCreateSelectedFile(name); }
-                      setNewEntryName('');
-                    }
-                  }}
-                  placeholder="new-file.py"
-                  className="flex-1 px-2 py-1 text-xs border border-gray-300 rounded"
-                />
-                <button
-                  onClick={() => {
-                    const name = newEntryName.trim();
-                    if (name && !createFiles[name]) { setCreateFiles(prev => ({ ...prev, [name]: '' })); setCreateSelectedFile(name); setNewEntryName(''); }
-                  }}
-                  disabled={!newEntryName.trim()}
-                  className="px-2 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 disabled:opacity-40"
-                >+</button>
+          {error && (
+            <div className="px-6 py-3 bg-red-50 border-b border-red-200 text-sm text-red-700">
+              <div className="flex items-start gap-2">
+                <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <pre className="flex-1 whitespace-pre-wrap break-all font-sans max-h-40 overflow-y-auto">{error}</pre>
+                <button onClick={() => setError(null)} className="flex-shrink-0"><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
               </div>
             </div>
+          )}
+
+          <div className="flex-1 flex min-h-0">
+            {/* File tabs sidebar */}
+            <div className="w-48 flex-shrink-0 border-r border-gray-200 flex flex-col bg-gray-50">
+              <div className="px-3 py-2 border-b border-gray-200 text-xs font-medium text-gray-500">Files</div>
+              <div className="flex-1 overflow-y-auto py-1">
+                {Object.keys(createFiles).map(fname => (
+                  <button
+                    key={fname}
+                    onClick={() => setCreateSelectedFile(fname)}
+                    className={`w-full text-left flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-gray-100 ${createSelectedFile === fname ? 'bg-blue-50 text-blue-700' : 'text-gray-700'}`}
+                  >
+                    <svg className="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    <span className="truncate flex-1">{fname}</span>
+                    {fname !== 'manifest.yaml' && (
+                      <button
+                        onClick={e => {
+                          e.stopPropagation();
+                          setCreateFiles(prev => {
+                            const next = { ...prev };
+                            delete next[fname];
+                            return next;
+                          });
+                          if (createSelectedFile === fname) setCreateSelectedFile('manifest.yaml');
+                        }}
+                        className="hover:text-red-500 text-gray-400"
+                      >
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                      </button>
+                    )}
+                  </button>
+                ))}
+              </div>
+              <div className="border-t border-gray-200 p-2">
+                <div className="flex gap-1">
+                  <input
+                    value={newEntryName}
+                    onChange={e => setNewEntryName(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && newEntryName.trim()) {
+                        const name = newEntryName.trim();
+                        if (!createFiles[name]) {
+                          setCreateFiles(prev => ({ ...prev, [name]: '' }));
+                          setCreateSelectedFile(name);
+                        }
+                        setNewEntryName('');
+                      }
+                    }}
+                    placeholder="new-file.py"
+                    className="flex-1 px-2 py-1 text-xs border border-gray-300 rounded"
+                  />
+                  <button
+                    onClick={() => {
+                      const name = newEntryName.trim();
+                      if (name && !createFiles[name]) {
+                        setCreateFiles(prev => ({ ...prev, [name]: '' }));
+                        setCreateSelectedFile(name);
+                        setNewEntryName('');
+                      }
+                    }}
+                    disabled={!newEntryName.trim()}
+                    className="px-2 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 disabled:opacity-40"
+                  >+</button>
+                </div>
+              </div>
+            </div>
+
+            {/* Editor */}
+            <div className="flex-1">
+              <Editor
+                height="100%"
+                language={getFileLanguage(createSelectedFile)}
+                value={createFiles[createSelectedFile] ?? ''}
+                onChange={v => setCreateFiles(prev => ({ ...prev, [createSelectedFile]: v ?? '' }))}
+                options={{ minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13, lineNumbers: 'on', wordWrap: 'on', automaticLayout: true, tabSize: 2 }}
+                theme="light"
+              />
+            </div>
           </div>
 
-          <div className="flex-1">
-            <Editor
-              height="100%"
-              language={getFileLanguage(createSelectedFile)}
-              value={createFiles[createSelectedFile] ?? ''}
-              onChange={v => setCreateFiles(prev => ({ ...prev, [createSelectedFile]: v ?? '' }))}
-              options={{ minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13, lineNumbers: 'on', wordWrap: 'on', automaticLayout: true, tabSize: 2 }}
-              theme="light"
-            />
+          <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex justify-end gap-3">
+            <button onClick={handleCloseDialog} className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
+            <button
+              onClick={handleCreateApp}
+              disabled={createChecking || !createWorkspace.trim()}
+              className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+            >
+              {createChecking ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Creating…</> : 'Create App'}
+            </button>
           </div>
-        </div>
-
-        <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 flex justify-end gap-3">
-          <button onClick={handleCloseDialog} className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
-          <button
-            onClick={handleCreateApp}
-            disabled={createChecking}
-            className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
-          >
-            {createChecking
-              ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Creating…</>
-              : 'Create App'}
-          </button>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
-  // ─── Copy dialog ──────────────────────────────────────────────────────────
+  // ─── Create Copy dialog ───────────────────────────────────────────────────
 
   const renderCopyDialog = () => {
-    const wsOptions = [...new Set([userWs, getWorkerWorkspace(), ...availableWorkspaces])].filter(Boolean);
+    const wsOptions = [...new Set([
+      userWs,
+      getWorkerWorkspace(),
+      ...availableWorkspaces,
+    ])].filter(Boolean);
+
     return (
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
         <div className="bg-white rounded-xl shadow-lg w-full max-w-md mx-4 p-6">
-          <h3 className="text-base font-semibold text-gray-900 mb-3">Save as Copy</h3>
+          <h3 className="text-base font-semibold text-gray-900 mb-4">Create Copy</h3>
           <p className="text-sm text-gray-600 mb-4">
-            Copies all files from{' '}
-            <span className="font-mono text-xs bg-gray-100 px-1 rounded">{artifact?.id}</span>{' '}
-            into the target workspace. The <code>id</code> field in <code>manifest.yaml</code> will have the workspace prefix stripped.
+            Copies all files from <span className="font-mono text-xs bg-gray-100 px-1 rounded">{artifact?.id}</span> into the target workspace. The artifact <code>id</code> in <code>manifest.yaml</code> determines the new artifact name.
           </p>
+
           <label className="block text-sm font-medium text-gray-700 mb-1">Target Workspace</label>
           <input
-            list="copy-ws-options"
+            list="copy-ws-list"
             value={copyWorkspace}
             onChange={e => setCopyWorkspace(e.target.value)}
-            placeholder={userWs || 'workspace-name'}
-            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 mb-4"
+            placeholder="workspace name (leave blank for worker workspace)"
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 mb-1"
           />
-          <datalist id="copy-ws-options">
-            {wsOptions.map(ws => <option key={ws} value={ws} />)}
+          <datalist id="copy-ws-list">
+            {wsOptions.map(w => <option key={w} value={w} />)}
           </datalist>
-          {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 max-h-40 overflow-y-auto">
-              <pre className="whitespace-pre-wrap break-all font-sans">{error}</pre>
-            </div>
-          )}
+          <p className="text-xs text-gray-500 mb-4">Leave blank to copy into the worker's workspace. You must be a member of any other workspace.</p>
+
+          {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 max-h-40 overflow-y-auto"><pre className="whitespace-pre-wrap break-all font-sans">{error}</pre></div>}
+
           <div className="flex justify-end gap-3">
             <button onClick={() => { setMode('edit'); setError(null); }} className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
             <button
@@ -1165,9 +1268,7 @@ const BioEngineAppManager = React.forwardRef<
               disabled={copySaving}
               className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2"
             >
-              {copySaving
-                ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Creating…</>
-                : 'Create Copy'}
+              {copySaving ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Creating…</> : 'Create Copy'}
             </button>
           </div>
         </div>
@@ -1196,11 +1297,7 @@ const BioEngineAppManager = React.forwardRef<
           placeholder="Enter artifact ID"
           className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 mb-4"
         />
-        {error && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 max-h-40 overflow-y-auto">
-            <pre className="whitespace-pre-wrap break-all font-sans">{error}</pre>
-          </div>
-        )}
+        {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 max-h-40 overflow-y-auto"><pre className="whitespace-pre-wrap break-all font-sans">{error}</pre></div>}
         <div className="flex justify-end gap-3">
           <button onClick={() => { setDeleteOpen(false); setDeleteText(''); }} className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
           <button
@@ -1208,9 +1305,7 @@ const BioEngineAppManager = React.forwardRef<
             disabled={deleteLoading || deleteText !== artifact?.id}
             className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center gap-2"
           >
-            {deleteLoading
-              ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Deleting…</>
-              : 'Delete App'}
+            {deleteLoading ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />Deleting…</> : 'Delete App'}
           </button>
         </div>
       </div>

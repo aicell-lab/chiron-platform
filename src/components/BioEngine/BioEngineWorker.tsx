@@ -1,9 +1,34 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useHyphaStore } from '../../store/hyphaStore';
 import BioEngineClusterResources from './BioEngineClusterResources';
 import BioEngineApps from './BioEngineApps';
 import DeploymentConfigModal from './DeploymentConfigModal';
+import AppDiskCache from './AppDiskCache';
+import ErrorDialog from './ErrorDialog';
+
+// Returns true when `actual` is >= `required` under loose semver-by-parts
+// comparison. Handles pre-release suffixes by stripping anything past the
+// first non-numeric character in each component. Falls back to false for
+// missing or unparseable inputs so unknown / pre-0.11.6 workers stay gated.
+const meetsVersion = (actual: string | undefined, required: string): boolean => {
+  if (!actual) return false;
+  const parse = (v: string): number[] =>
+    v
+      .split('.')
+      .map(part => parseInt(part.replace(/[^0-9].*$/, ''), 10))
+      .map(n => (Number.isFinite(n) ? n : 0));
+  const a = parse(actual);
+  const r = parse(required);
+  const len = Math.max(a.length, r.length);
+  for (let i = 0; i < len; i += 1) {
+    const av = a[i] ?? 0;
+    const rv = r[i] ?? 0;
+    if (av > rv) return true;
+    if (av < rv) return false;
+  }
+  return true;
+};
 
 
 // Add custom animations
@@ -77,6 +102,14 @@ type ServiceStatus = {
     head_address?: string;
     start_time?: number | "N/A";
     mode?: string;  // Legacy, now use worker_mode at top level
+    geo_location?: {
+      region?: string;
+      country_name?: string;
+      country_code?: string;
+      latitude?: number;
+      longitude?: number;
+      timezone?: string;
+    };
     cluster?: {
       total_gpu?: number;
       available_gpu?: number;
@@ -165,8 +198,15 @@ const BioEngineWorker: React.FC = () => {
   // Deployment state
   const [deployingArtifactId, setDeployingArtifactId] = useState<string | null>(null);
   const [undeployingArtifactId, setUndeployingArtifactId] = useState<string | null>(null);
-  const [deploymentError, setDeploymentError] = useState<string | null>(null);
-  const [undeploymentError, setUndeploymentError] = useState<string | null>(null);
+  // Bioengine worker / app errors get rendered in ErrorDialog (a scrollable
+  // modal) instead of an inline red panel — backend stack traces can run
+  // dozens of lines and were getting truncated / pushing other UI around.
+  // The downstream "setDeploymentError" / "setUndeploymentError" string
+  // props that BioEngineApps and its children still accept are stubs that
+  // wrap the message into the new dialog state for backwards compatibility.
+  type WorkerErrorState = { title: string; subtitle?: string; message: string } | null;
+  const [deploymentError, setDeploymentError] = useState<WorkerErrorState>(null);
+  const [undeploymentError, setUndeploymentError] = useState<WorkerErrorState>(null);
   const [artifactModes, setArtifactModes] = useState<Record<string, string>>({});
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
   const [refreshInterval, setRefreshInterval] = useState<NodeJS.Timeout | null>(null);
@@ -175,7 +215,9 @@ const BioEngineWorker: React.FC = () => {
 
   const [loginErrorTimeout, setLoginErrorTimeout] = useState<NodeJS.Timeout | null>(null);
   const [currentTime, setCurrentTime] = useState(Date.now());
-  const [workerMcpCopied, setWorkerMcpCopied] = useState(false);
+  const [agentPromptCopied, setAgentPromptCopied] = useState(false);
+  const [isGeneratingAgentPrompt, setIsGeneratingAgentPrompt] = useState(false);
+  const [agentPromptError, setAgentPromptError] = useState<string | null>(null);
   const [showDeployConfig, setShowDeployConfig] = useState(false);
   const [pendingDeployment, setPendingDeployment] = useState<{artifactId: string, mode: string | null, applicationId?: string, manifest?: any} | null>(null);
 
@@ -241,7 +283,7 @@ const BioEngineWorker: React.FC = () => {
       }
     } else {
       // If no service ID, redirect to home
-      navigate('/worker');
+      navigate('/bioengine');
     }
   }, [serviceId, server, isLoggedIn, autoRefreshEnabled]);
 
@@ -324,24 +366,45 @@ const BioEngineWorker: React.FC = () => {
               const app = appData as any;
               console.log(`App ${appId} service_ids:`, app.service_ids);
 
-              // service_ids is an array, get the first element
-              const serviceIds = Array.isArray(app.service_ids) && app.service_ids.length > 0
-                ? app.service_ids[0]
-                : app.service_ids || {};
+              // BioEngine 0.10.0+: service_ids is a single {websocket_service_id,
+              // webrtc_service_id} dict (ProxyDeployment is fixed at one replica
+              // per app, so no per-replica list any more). Fall back to {} if
+              // the worker hasn't returned anything yet.
+              const serviceIds = app.service_ids || {};
+
+              // Aggregate replica_states + replicas across all deployments
+              // (neither is a top-level field — both live on each deployment).
+              // bioengine 0.10.12+ ships replicas[*] with node_id /
+              // node_instance_id so the dashboard can place apps on nodes.
+              const aggregatedReplicaStates: Record<string, number> = {};
+              const aggregatedReplicas: Array<any> = [];
+              if (app.deployments && typeof app.deployments === 'object') {
+                for (const deployment of Object.values(app.deployments) as any[]) {
+                  if (deployment?.replica_states) {
+                    for (const [state, count] of Object.entries(deployment.replica_states)) {
+                      aggregatedReplicaStates[state] = (aggregatedReplicaStates[state] || 0) + (count as number);
+                    }
+                  }
+                  if (Array.isArray(deployment?.replicas)) {
+                    aggregatedReplicas.push(...deployment.replicas);
+                  }
+                }
+              }
 
               statusData.bioengine_apps[appId] = {
                 ...app,
                 application_id: appId,
                 artifact_id: app.artifact_id || appId,
-                deployment_name: app.deployment_name || appId,
+                deployment_name: appId,
                 status: app.status || 'UNKNOWN',
                 start_time: app.start_time,
                 last_updated_at: app.last_updated_at,
                 service_ids: serviceIds,
                 available_methods: app.available_methods || app.methods,
-                replica_states: app.replica_states,
+                replica_states: Object.keys(aggregatedReplicaStates).length > 0 ? aggregatedReplicaStates : undefined,
+                replicas: aggregatedReplicas.length > 0 ? aggregatedReplicas : undefined,
                 static_site_url: app.static_site_url,
-                resources: app.resources
+                resources: app.application_resources,
               };
             }
           }
@@ -450,7 +513,7 @@ const BioEngineWorker: React.FC = () => {
       
       if (isServiceUnavailable) {
         console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
-        navigate('/worker');
+        navigate('/bioengine');
         return;
       }
       
@@ -497,11 +560,15 @@ const BioEngineWorker: React.FC = () => {
 
       if (isServiceUnavailable) {
         console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
-        navigate('/worker');
+        navigate('/bioengine');
         return;
       }
 
-      setDeploymentError(`Failed to deploy ${artifactId}: ${errorMessage}`);
+      setDeploymentError({
+        title: 'Deployment failed',
+        subtitle: artifactId,
+        message: errorMessage,
+      });
       setDeployingArtifactId(null);
     }
   };
@@ -615,11 +682,15 @@ const BioEngineWorker: React.FC = () => {
 
       if (isServiceUnavailable) {
         console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
-        navigate('/worker');
+        navigate('/bioengine');
         return;
       }
 
-      setUndeploymentError(`Failed to stop application ${applicationId}: ${errorMessage}`);
+      setUndeploymentError({
+        title: 'Stop application failed',
+        subtitle: applicationId,
+        message: errorMessage,
+      });
       setUndeployingArtifactId(null);
     }
   };
@@ -801,6 +872,30 @@ const BioEngineWorker: React.FC = () => {
     fetchStatus(false);
   };
 
+  // Submit a scaling-only update for a running app. Calls deploy_app with
+  // just the {application_id, artifact_id, scaling} triple — every other
+  // deploy parameter (token, env vars, kwargs, GPU mode...) is preserved by
+  // the worker's is_update branch when the application_id already exists
+  // (bioengine/apps/manager.py:1910-1941). Ray Serve handles the new
+  // replica counts as a rolling reconfigure.
+  const updateAppScaling = async (params: {
+    application_id: string;
+    artifact_id: string;
+    scaling: Record<string, any>;
+  }) => {
+    if (!serviceId || !isLoggedIn) {
+      throw new Error('Service unavailable or user not logged in');
+    }
+    const bioengineWorker = await server.getService(serviceId);
+    await bioengineWorker.deploy_app({
+      application_id: params.application_id,
+      artifact_id: params.artifact_id,
+      scaling: params.scaling,
+      _rkwargs: true,
+    });
+    await fetchStatus(false);
+  };
+
   const fetchApplicationStatus = async (params: {
     application_ids?: string[];
     logs_tail?: number;
@@ -816,15 +911,11 @@ const BioEngineWorker: React.FC = () => {
       _rkwargs: true,
     });
 
+    // Worker always returns a dict keyed by application_id. Unwrap for single-app requests
+    // so callers receive the status object directly (not {appId: {...}}).
     if (params.application_ids && params.application_ids.length === 1) {
-      return result;
-    }
-
-    if (result && typeof result === 'object' && params.application_ids && params.application_ids.length > 0) {
-      const firstId = params.application_ids[0];
-      if (firstId && result[firstId]) {
-        return result[firstId];
-      }
+      const id = params.application_ids[0];
+      return (result && typeof result === 'object' && result[id]) ? result[id] : result;
     }
 
     return result;
@@ -848,34 +939,84 @@ const BioEngineWorker: React.FC = () => {
     return null;
   };
 
-  // Helper function to get worker MCP URL
-  const getWorkerMcpUrl = (): string | null => {
-    if (!serviceId) return null;
+  // A short, deterministic signature of the currently deployed app set.
+  // AppDiskCache refetches whenever this string changes (deploy / undeploy /
+  // status flip), which is the only event that affects the "Status" column —
+  // we deliberately don't run another auto-poll loop in the cache component.
+  const cacheRefreshKey = useMemo(() => {
+    const apps = status?.bioengine_apps;
+    if (!apps) return '';
+    return Object.entries(apps)
+      .filter(([key, value]) => key !== 'service_id' && key !== 'note' && typeof value === 'object' && value !== null)
+      .map(([key, value]: any) => `${key}:${value?.status ?? ''}`)
+      .sort()
+      .join('|');
+  }, [status]);
 
-    const baseUrl = server.config.publicBaseUrl;
-
-    // Parse the service ID to get workspace and service identifier
-    // Format: "workspace/client_id:service_name"
-    const slashIndex = serviceId.indexOf('/');
-    if (slashIndex !== -1) {
-      const workspace = serviceId.substring(0, slashIndex);
-      const serviceIdentifier = serviceId.substring(slashIndex + 1); // client_id:service_name
-      return `${baseUrl}/${workspace}/mcp/${serviceIdentifier}/mcp`;
+  // Build the same {node_id -> "Head Node (...)"|"Worker Node N (...)"} map
+  // DeployedBioEngineApps builds for the placement badges. Used by
+  // AppDiskCache's Node column on per-node FS topologies — keeping the
+  // numbering consistent across the dashboard.
+  const cacheNodeLabels = useMemo(() => {
+    const out: Record<string, string> = {};
+    const rayNodes = status?.ray_cluster?.nodes;
+    if (!rayNodes || typeof rayNodes !== 'object') return out;
+    const entries = Object.entries(rayNodes as Record<string, any>).sort(([, a], [, b]) => {
+      if ((a?.head ?? false) === (b?.head ?? false)) return 0;
+      return a?.head ? -1 : 1;
+    });
+    let workerNumber = 0;
+    for (const [nodeId, node] of entries) {
+      const role = node?.head ? 'Head Node' : `Worker Node ${++workerNumber}`;
+      out[nodeId] = `${role} (${nodeId.slice(0, 8)})`;
     }
+    return out;
+  }, [status]);
 
-    return null;
-  };
+  // Worker admin membership: only admins can deploy/undeploy apps, read logs,
+  // or stop the worker. Non-admins can still call get_status, list datasets,
+  // list deployed apps, and any deployed app service that includes them in
+  // its authorized_users. The prompt scope below branches on this.
+  // The worker stores both user_id and user_email in admin_users (worker.py
+  // 596-597); '*' means everyone.
+  const isWorkerAdmin = (() => {
+    const admins = status?.admin_users ?? [];
+    if (admins.includes('*')) return true;
+    const identifiers = [user?.id, user?.email].filter(Boolean) as string[];
+    return identifiers.some(id => admins.includes(id));
+  })();
 
-  const handleCopyWorkerMcpUrl = async () => {
-    const mcpUrl = getWorkerMcpUrl();
-    if (mcpUrl) {
-      try {
-        await navigator.clipboard.writeText(mcpUrl);
-        setWorkerMcpCopied(true);
-        setTimeout(() => setWorkerMcpCopied(false), 2000);
-      } catch (err) {
-        console.error('Failed to copy MCP URL:', err);
-      }
+  // Build a one-shot AI-agent setup prompt that loads the BioEngine skill,
+  // pins the agent to this worker's service id, and (when logged in) embeds a
+  // freshly generated 30-day read+write workspace token so the agent can act
+  // without an extra auth round-trip. The prompt's scope adapts to whether
+  // the current user has admin rights on this worker.
+  const handleCopyAgentSetupPrompt = async () => {
+    if (!serviceId) return;
+    if (!isLoggedIn || !server) {
+      setAgentPromptError('Log in to generate a workspace token for the prompt.');
+      return;
+    }
+    setIsGeneratingAgentPrompt(true);
+    setAgentPromptError(null);
+    try {
+      const thirtyDays = 30 * 24 * 3600;
+      const token = await server.generateToken({ permission: 'read_write', expires_in: thirtyDays });
+      const skillUrl = 'https://chiron.aicell.io/skills/chiron-platform/SKILL.md';
+      const scope = isWorkerAdmin
+        ? `Connect to my BioEngine worker at service id \`${serviceId}\`. You can inspect the cluster, manage deployed apps, and call services on those apps.`
+        : `Connect to the BioEngine worker at service id \`${serviceId}\` to discover the apps and datasets it hosts, and call services on those apps.`;
+      const prompt = `Read ${skillUrl} to learn how to use the BioEngine API. ${scope}
+
+Use this Hypha read+write token for my workspace (expires in 30 days):
+${token}`;
+      await navigator.clipboard.writeText(prompt);
+      setAgentPromptCopied(true);
+      setTimeout(() => setAgentPromptCopied(false), 2000);
+    } catch (err) {
+      setAgentPromptError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsGeneratingAgentPrompt(false);
     }
   };
 
@@ -945,7 +1086,7 @@ const BioEngineWorker: React.FC = () => {
           <div>
             <div className="flex items-center mb-2">
               <button
-                onClick={() => navigate('/worker')}
+                onClick={() => navigate('/bioengine')}
                 className="flex items-center text-blue-600 hover:text-blue-800 transition-colors duration-200 mr-4"
                 title="Back to BioEngine Home"
               >
@@ -954,7 +1095,7 @@ const BioEngineWorker: React.FC = () => {
                 </svg>
                 <span className="text-sm font-medium">Back</span>
               </button>
-              <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent cursor-pointer" onClick={() => navigate('/worker')}>
+              <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent cursor-pointer" onClick={() => navigate('/bioengine')}>
                 BioEngine Worker Dashboard
               </h1>
             </div>
@@ -1037,15 +1178,44 @@ const BioEngineWorker: React.FC = () => {
                     );
                   })()}
 
-                  {status?.geo_location && (
-                    <div>
-                      <span className="text-xs font-medium text-gray-500 block">Location</span>
-                      <span className="text-sm font-semibold text-gray-900">
-                        {[status.geo_location.region, status.geo_location.country_name]
-                          .filter(Boolean).join(', ')}
-                      </span>
-                    </div>
-                  )}
+                  {(() => {
+                    const workerGeo = status?.geo_location;
+                    const clusterGeo = status?.ray_cluster?.geo_location;
+                    const formatGeo = (g?: typeof workerGeo) =>
+                      g ? [g.region, g.country_name].filter(Boolean).join(', ') : '';
+
+                    // External-cluster mode can have the worker pod and the Ray
+                    // head node in different sites — show both rows only when
+                    // both geos are resolved and the countries actually differ.
+                    const showSplit =
+                      status?.worker_mode === 'external-cluster' &&
+                      !!clusterGeo?.country_code &&
+                      !!workerGeo?.country_code &&
+                      clusterGeo.country_code !== workerGeo.country_code;
+
+                    if (showSplit) {
+                      return (
+                        <>
+                          <div>
+                            <span className="text-xs font-medium text-gray-500 block">Worker Location</span>
+                            <span className="text-sm font-semibold text-gray-900">{formatGeo(workerGeo)}</span>
+                          </div>
+                          <div>
+                            <span className="text-xs font-medium text-gray-500 block">Ray Cluster Location</span>
+                            <span className="text-sm font-semibold text-gray-900">{formatGeo(clusterGeo)}</span>
+                          </div>
+                        </>
+                      );
+                    }
+
+                    if (!workerGeo) return null;
+                    return (
+                      <div>
+                        <span className="text-xs font-medium text-gray-500 block">Location</span>
+                        <span className="text-sm font-semibold text-gray-900">{formatGeo(workerGeo)}</span>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 <div className="space-y-4">
@@ -1098,9 +1268,9 @@ const BioEngineWorker: React.FC = () => {
                     </div>
                   </div>
                 )}
-                {/* Service Info and Copy Worker MCP URL buttons */}
-                {(getWorkerServiceInfoUrl() || getWorkerMcpUrl()) && (
-                  <div className="md:col-span-2 pt-3 border-t border-gray-100 flex flex-wrap gap-2">
+                {/* Service Info + Copy AI Agent Setup Prompt */}
+                {(getWorkerServiceInfoUrl() || serviceId) && (
+                  <div className="md:col-span-2 pt-3 border-t border-gray-100 flex flex-wrap gap-2 items-center">
                     {getWorkerServiceInfoUrl() && (
                       <a
                         href={getWorkerServiceInfoUrl()!}
@@ -1118,32 +1288,52 @@ const BioEngineWorker: React.FC = () => {
                         </svg>
                       </a>
                     )}
-                    {getWorkerMcpUrl() && (
+                    {serviceId && (
                       <button
-                        onClick={handleCopyWorkerMcpUrl}
+                        onClick={handleCopyAgentSetupPrompt}
+                        disabled={!isLoggedIn || isGeneratingAgentPrompt}
                         className={`inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-lg border transition-all duration-200 ${
-                          workerMcpCopied
+                          agentPromptCopied
                             ? 'bg-green-50 text-green-700 border-green-200'
-                            : 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100 hover:border-purple-300'
+                            : isLoggedIn
+                              ? 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100 hover:border-purple-300'
+                              : 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed'
                         }`}
-                        title="Copy MCP Server URL for this worker"
+                        title={
+                          isLoggedIn
+                            ? 'Copy a one-shot AI agent prompt that loads the BioEngine skill, pins the agent to this worker, and embeds a fresh 30-day read+write workspace token.'
+                            : 'Log in to generate a workspace token for the prompt.'
+                        }
                       >
-                        {workerMcpCopied ? (
+                        {agentPromptCopied ? (
                           <>
                             <svg className="w-3.5 h-3.5 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                             </svg>
-                            Copied!
+                            Copied to clipboard
+                          </>
+                        ) : isGeneratingAgentPrompt ? (
+                          <>
+                            <svg className="w-3.5 h-3.5 mr-1.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                            </svg>
+                            Generating token...
                           </>
                         ) : (
                           <>
                             <svg className="w-3.5 h-3.5 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
                             </svg>
-                            Copy Worker MCP URL
+                            Copy AI Agent Prompt
                           </>
                         )}
                       </button>
+                    )}
+                    {agentPromptError && (
+                      <span className="text-xs text-red-600 ml-1" role="alert">
+                        {agentPromptError}
+                      </span>
                     )}
                   </div>
                 )}
@@ -1159,15 +1349,16 @@ const BioEngineWorker: React.FC = () => {
             workerMode={status.worker_mode}
             currentTime={currentTime}
             formatTimeInfo={formatTimeInfo}
+            bioengineApps={status?.bioengine_apps}
           />
         )}
 
         {/* BioEngine Apps Section - handles both deployed and available apps */}
         <BioEngineApps
           serviceId={serviceId}
-          adminUsers={status?.admin_users || []}
-          currentUserEmail={user?.email}
           onArtifactUpdated={handleArtifactUpdated}
+          adminUsers={status?.admin_users}
+          currentUserEmail={user?.email || user?.id}
           // Pass deployment-related props and handlers
           deployingArtifactId={deployingArtifactId}
           undeployingArtifactId={undeployingArtifactId}
@@ -1181,15 +1372,29 @@ const BioEngineWorker: React.FC = () => {
           getDeploymentStatus={getDeploymentStatus}
           isDeployButtonDisabled={isDeployButtonDisabled}
           getDeployButtonText={getDeployButtonText}
-          // Pass error states and utility functions
-          deploymentError={deploymentError}
-          undeploymentError={undeploymentError}
-          setDeploymentError={setDeploymentError}
-          setUndeploymentError={setUndeploymentError}
+          // Deployment / undeployment errors are now surfaced at the
+          // worker level via ErrorDialog (see below); the inline red
+          // panels in Available / Deployed are gone, so the children
+          // don't need the error props any more.
           formatTimeInfo={formatTimeInfo}
           server={server}
           fetchApplicationStatus={fetchApplicationStatus}
+          updateAppScaling={updateAppScaling}
+          bioengineVersion={status?.bioengine_version}
         />
+
+        {/* App Disk Cache — admin-only API, gated on bioengine 0.11.6+ which
+            ships the enriched list_app_directories / clear_app_directory
+            surface used here. Older workers silently omit this section. */}
+        {isWorkerAdmin && meetsVersion(status?.bioengine_version, '0.11.6') && (
+          <AppDiskCache
+            serviceId={serviceId}
+            server={server}
+            isLoggedIn={isLoggedIn}
+            refreshKey={cacheRefreshKey}
+            nodeLabels={cacheNodeLabels}
+          />
+        )}
 
         {pendingDeployment && (
           <DeploymentConfigModal
@@ -1206,6 +1411,26 @@ const BioEngineWorker: React.FC = () => {
             manifest={pendingDeployment.manifest}
           />
         )}
+
+        {/* Worker-level error dialog. Renders for deployment failures and
+            for stop-application failures alike — both are bioengine worker
+            errors with the same scrollable-stack-trace shape. Only one
+            shows at a time (deployment > undeployment) since the two
+            workflows can't physically overlap. */}
+        <ErrorDialog
+          open={!!deploymentError}
+          title={deploymentError?.title ?? ''}
+          subtitle={deploymentError?.subtitle}
+          message={deploymentError?.message ?? ''}
+          onClose={() => setDeploymentError(null)}
+        />
+        <ErrorDialog
+          open={!!undeploymentError && !deploymentError}
+          title={undeploymentError?.title ?? ''}
+          subtitle={undeploymentError?.subtitle}
+          message={undeploymentError?.message ?? ''}
+          onClose={() => setUndeploymentError(null)}
+        />
       </div>
     </div>
   );

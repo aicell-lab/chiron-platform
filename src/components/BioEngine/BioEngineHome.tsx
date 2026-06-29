@@ -17,7 +17,14 @@ type BioEngineService = {
   id: string;
   name: string;
   description: string;
+  // Worker-process geo (always set when status resolves; same as the cluster
+  // geo in single-machine / SLURM mode, can differ in external-cluster mode
+  // where the worker pod and the Ray head node are in different sites).
   geo_location?: GeoLocation;
+  // Ray cluster head node geo. Prefer this over `geo_location` on the card
+  // — the user cares about where the compute actually lives.
+  cluster_geo_location?: GeoLocation;
+  bioengine_version?: string;
   connectionStatus?: 'ok' | 'error';
 };
 
@@ -76,18 +83,31 @@ const ServiceCard: React.FC<{
           </div>
         </div>
 
-        <p className="text-gray-600 mb-4 leading-relaxed">{service.description || 'No description available'}</p>
+        {(() => {
+          // Prefer the Ray cluster head node location (where compute actually runs).
+          // Worker geo is the fallback for single-machine / SLURM (where the two
+          // are the same) and for older workers that don't expose ray_cluster.geo_location.
+          const geo = service.cluster_geo_location ?? service.geo_location;
+          if (!geo) return null;
+          const where = [geo.region, geo.country_name].filter(Boolean).join(', ');
+          if (!where) return null;
+          return (
+            <div className="mb-3 flex items-center gap-1.5 text-sm text-gray-500">
+              <svg className="w-4 h-4 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+              <span>{where}</span>
+            </div>
+          );
+        })()}
 
-        {service.geo_location && (
+        {service.bioengine_version && (
           <div className="mb-3 flex items-center gap-1.5 text-sm text-gray-500">
             <svg className="w-4 h-4 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
             </svg>
-            <span>
-              {[service.geo_location.region, service.geo_location.country_name, service.geo_location.continent_code]
-                .filter(Boolean).join(', ')}
-            </span>
+            <span>BioEngine {service.bioengine_version}</span>
           </div>
         )}
 
@@ -227,16 +247,25 @@ const BioEngineHome: React.FC = () => {
         }
       }
 
-      // Enrich each service with geo_location from get_status()
+      // Enrich each service with status fields used by the card:
+      // worker + cluster geo, and BioEngine version. Retry transient failures
+      // up to five times; a "Service not found" terminates the retry loop
+      // and the entry is dropped (the worker is gone from the registry).
+      // Other failures mark the card with connectionStatus='error' so it
+      // greys out instead of disappearing.
       if (services.length > 0) {
-        const geoResults = await Promise.allSettled(
+        const statusResults = await Promise.allSettled(
           services.map(async (svc) => {
             let lastErr = null;
             for (let attempt = 0; attempt < 5; attempt++) {
               try {
                 const worker = await server.getService(svc.id, { mode: 'random' });
                 const st = await worker.get_status();
-                return st?.geo_location ?? null;
+                return {
+                  geo_location: st?.geo_location ?? null,
+                  cluster_geo_location: st?.ray_cluster?.geo_location ?? null,
+                  bioengine_version: st?.bioengine_version ?? null,
+                };
               } catch (err) {
                 lastErr = err;
                 if (String(err).includes('Service not found')) {
@@ -249,13 +278,19 @@ const BioEngineHome: React.FC = () => {
           })
         );
         services = services.map((svc, i) => {
-          if (geoResults[i].status === 'rejected' && String(geoResults[i].reason).includes('Service not found')) {
+          const res = statusResults[i];
+          if (res.status === 'rejected' && String(res.reason).includes('Service not found')) {
             return null; // Will be filtered out
+          }
+          if (res.status !== 'fulfilled' || !res.value) {
+            return { ...svc, connectionStatus: 'error' as const };
           }
           return {
             ...svc,
-            geo_location: geoResults[i].status === 'fulfilled' ? geoResults[i].value ?? undefined : undefined,
-            connectionStatus: geoResults[i].status === 'rejected' ? 'error' : 'ok',
+            geo_location: res.value.geo_location ?? undefined,
+            cluster_geo_location: res.value.cluster_geo_location ?? undefined,
+            bioengine_version: res.value.bioengine_version ?? undefined,
+            connectionStatus: 'ok' as const,
           };
         }).filter(Boolean) as BioEngineService[];
       }

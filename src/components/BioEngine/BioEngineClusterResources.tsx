@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 
 interface ClusterData {
   head_address?: string;
@@ -44,6 +44,24 @@ interface ClusterData {
     accelerator_type?: string | null;
     slurm_job_id?: string | null;
   }>;
+  slurm_jobs?: {
+    queued?: Array<{
+      job_id: string;
+      state?: string;
+      submit_time?: number;
+      pending_seconds?: number;
+      reason?: string;
+    }>;
+    running?: Array<{
+      job_id: string;
+      state?: string;
+      node?: string;
+      start_time?: number;
+      time_limit_seconds?: number;
+      elapsed_seconds?: number;
+      remaining_seconds?: number;
+    }>;
+  };
 }
 
 interface BioEngineClusterResourcesProps {
@@ -51,11 +69,92 @@ interface BioEngineClusterResourcesProps {
   workerMode?: string;
   currentTime: number;
   formatTimeInfo: (timestamp: number) => { formattedTime: string, uptime: string };
+  // Map of application_id -> app status. The parent component aggregates
+  // `deployments[*].replicas[]` from worker.get_app_status (bioengine 0.10.12+)
+  // into a flat `replicas` array on each app. Empty / missing while an app
+  // is DEPLOYING or DEPLOY_FAILED, or while a worker on an older bioengine
+  // version hasn't shipped the field yet — in either case the badge silently
+  // skips that node.
+  bioengineApps?: Record<string, {
+    application_id?: string;
+    status?: string;
+    replicas?: Array<{
+      replica_id?: string;
+      node_id?: string;
+      node_ip?: string;
+      node_instance_id?: string;
+      state?: string;
+      pid?: number;
+      start_time_s?: number;
+    }>;
+  }>;
 }
 
-const BioEngineClusterResources: React.FC<BioEngineClusterResourcesProps> = ({ rayCluster, workerMode, currentTime, formatTimeInfo }) => {
+const BioEngineClusterResources: React.FC<BioEngineClusterResourcesProps> = ({ rayCluster, workerMode, currentTime, formatTimeInfo, bioengineApps }) => {
   const [nodesExpanded, setNodesExpanded] = useState(false);
   const [pendingExpanded, setPendingExpanded] = useState(false);
+  const [slurmJobsExpanded, setSlurmJobsExpanded] = useState(false);
+
+  // Build a {node_id -> [{appId, state}, ...]} index by inverting the per-app
+  // replica placements. All replica states contribute so STARTING /
+  // DEPLOY_FAILED apps still surface on the node where they're placed,
+  // which is what an operator needs when debugging a stuck deployment.
+  // When an app has replicas in multiple states on the same node, the
+  // worst non-healthy state wins so the tint is honest about trouble:
+  // failure beats in-flight beats running.
+  const STATE_RANK: Record<string, number> = {
+    DEPLOY_FAILED: 3,
+    FAILED: 3,
+    STARTING: 2,
+    UPDATING: 2,
+    PENDING_ALLOCATION: 2,
+    RECOVERING: 2,
+    RUNNING: 1,
+    STOPPING: 0,
+    STOPPED: 0,
+  };
+  const nodeApps = useMemo(() => {
+    const out: Record<string, Array<{ appId: string; state?: string }>> = {};
+    for (const [appId, app] of Object.entries(bioengineApps ?? {})) {
+      const perNode: Record<string, string | undefined> = {};
+      for (const r of app?.replicas ?? []) {
+        if (!r?.node_id) continue;
+        const prev = perNode[r.node_id];
+        if (prev === undefined || (STATE_RANK[r.state ?? ''] ?? -1) > (STATE_RANK[prev ?? ''] ?? -1)) {
+          perNode[r.node_id] = r.state;
+        }
+      }
+      Object.entries(perNode).forEach(([nodeId, state]) => {
+        if (!out[nodeId]) out[nodeId] = [];
+        if (!out[nodeId].some(x => x.appId === appId)) {
+          out[nodeId].push({ appId, state });
+        }
+      });
+    }
+    Object.keys(out).forEach(n => out[n].sort((a, b) => a.appId.localeCompare(b.appId)));
+    return out;
+  }, [bioengineApps]);
+
+  // Match the dialog's tint scheme so the two views read the same.
+  const nodeAppStateClasses = (state?: string): string => {
+    switch (state) {
+      case 'RUNNING':
+        return 'bg-purple-50 text-purple-700 border-purple-200';
+      case 'STARTING':
+      case 'UPDATING':
+      case 'PENDING_ALLOCATION':
+      case 'RECOVERING':
+        return 'bg-amber-50 text-amber-700 border-amber-200';
+      case 'DEPLOY_FAILED':
+      case 'FAILED':
+        return 'bg-red-50 text-red-700 border-red-200';
+      case 'STOPPING':
+      case 'STOPPED':
+        return 'bg-gray-100 text-gray-600 border-gray-300';
+      default:
+        return 'bg-gray-50 text-gray-600 border-gray-200';
+    }
+  };
 
   if (!rayCluster?.cluster && !rayCluster?.nodes) return null;
 
@@ -186,131 +285,49 @@ const BioEngineClusterResources: React.FC<BioEngineClusterResourcesProps> = ({ r
           )}
         </div>
 
-        {(() => {
-          // Bioengine's cluster summary currently only carries CPU/GPU; memory
-          // lives per-node. Sum the nodes as a fallback so the Memory and
-          // Object Store cards aren't stuck at "0 / 0 GB".
-          const sumNodes = (field: 'total_memory' | 'used_memory' | 'total_object_store_memory' | 'used_object_store_memory'): number => {
-            const nodes = rayCluster.nodes;
-            if (!nodes) return 0;
-            let total = 0;
-            for (const n of Object.values(nodes)) {
-              const v = (n as any)?.[field];
-              if (typeof v === 'number' && isFinite(v)) total += v;
-            }
-            return total;
-          };
-          const memTotal = rayCluster.cluster?.total_memory || sumNodes('total_memory');
-          const memUsed = rayCluster.cluster?.used_memory ?? sumNodes('used_memory');
-          const memAvail = rayCluster.cluster?.available_memory;
-          const osTotal = rayCluster.cluster?.total_object_store_memory || sumNodes('total_object_store_memory');
-          const osUsed = rayCluster.cluster?.used_object_store_memory ?? sumNodes('used_object_store_memory');
-          const osAvail = rayCluster.cluster?.available_object_store_memory;
-          return (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
-              {/* CPU Usage */}
-              <ResourceCard
-                title="CPU Cores"
-                available={rayCluster.cluster?.available_cpu}
-                used={rayCluster.cluster?.used_cpu}
-                total={rayCluster.cluster?.total_cpu || 0}
-                color="bg-blue-600"
-                bgColor="bg-gradient-to-br from-blue-50 to-blue-100"
-              />
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+          {/* CPU Usage */}
+          <ResourceCard
+            title="CPU Cores"
+            available={rayCluster.cluster?.available_cpu}
+            used={rayCluster.cluster?.used_cpu}
+            total={rayCluster.cluster?.total_cpu || 0}
+            color="bg-blue-600"
+            bgColor="bg-gradient-to-br from-blue-50 to-blue-100"
+          />
 
-              {/* GPU Usage */}
-              <ResourceCard
-                title="GPU Cards"
-                available={rayCluster.cluster?.available_gpu}
-                used={rayCluster.cluster?.used_gpu}
-                total={rayCluster.cluster?.total_gpu || 0}
-                color="bg-purple-600"
-                bgColor="bg-gradient-to-br from-purple-50 to-purple-100"
-              />
+          {/* GPU Usage */}
+          <ResourceCard
+            title="GPU Cards"
+            available={rayCluster.cluster?.available_gpu}
+            used={rayCluster.cluster?.used_gpu}
+            total={rayCluster.cluster?.total_gpu || 0}
+            color="bg-purple-600"
+            bgColor="bg-gradient-to-br from-purple-50 to-purple-100"
+          />
 
-              {/* Memory Usage */}
-              <ResourceCard
-                title="Memory"
-                available={memAvail}
-                used={memUsed}
-                total={memTotal}
-                color="bg-orange-600"
-                bgColor="bg-gradient-to-br from-orange-50 to-orange-100"
-                unit="GB"
-              />
+          {/* Memory Usage */}
+          <ResourceCard
+            title="Memory"
+            available={rayCluster.cluster?.available_memory}
+            used={rayCluster.cluster?.used_memory}
+            total={rayCluster.cluster?.total_memory || 0}
+            color="bg-orange-600"
+            bgColor="bg-gradient-to-br from-orange-50 to-orange-100"
+            unit="GB"
+          />
 
-              {/* Object Store Memory Usage */}
-              <ResourceCard
-                title="Object Store"
-                available={osAvail}
-                used={osUsed}
-                total={osTotal}
-                color="bg-teal-600"
-                bgColor="bg-gradient-to-br from-teal-50 to-teal-100"
-                unit="GB"
-              />
-            </div>
-          );
-        })()}
-
-        {/* Expandable Pending Resources Section */}
-        {rayCluster.cluster?.pending_resources && (
-          <div className="border-t border-gray-200 pt-6 mb-6">
-            <button
-              onClick={() => setPendingExpanded(!pendingExpanded)}
-              className="flex items-center justify-between w-full text-left p-3 bg-yellow-50 rounded-xl hover:bg-yellow-100 transition-colors duration-200"
-            >
-              <div className="flex items-center">
-                <svg className="w-5 h-5 text-yellow-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <span className="font-medium text-yellow-800">
-                  Pending Resources (Total: {rayCluster.cluster.pending_resources.total})
-                </span>
-              </div>
-              <svg
-                className={`w-5 h-5 text-yellow-600 transition-transform duration-200 ${pendingExpanded ? 'rotate-180' : ''}`}
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
-            </button>
-
-            {pendingExpanded && (
-              <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4 animate-slideUp">
-                <div className="bg-white border border-yellow-200 rounded-xl p-4">
-                  <div className="flex items-center mb-2">
-                    <div className="w-3 h-3 bg-yellow-500 rounded-full mr-2"></div>
-                    <span className="font-medium text-gray-800">Actors</span>
-                  </div>
-                  <div className="text-lg font-bold text-yellow-700">
-                    {rayCluster.cluster.pending_resources.actors.length}
-                  </div>
-                </div>
-                <div className="bg-white border border-yellow-200 rounded-xl p-4">
-                  <div className="flex items-center mb-2">
-                    <div className="w-3 h-3 bg-yellow-500 rounded-full mr-2"></div>
-                    <span className="font-medium text-gray-800">Jobs</span>
-                  </div>
-                  <div className="text-lg font-bold text-yellow-700">
-                    {rayCluster.cluster.pending_resources.jobs.length}
-                  </div>
-                </div>
-                <div className="bg-white border border-yellow-200 rounded-xl p-4">
-                  <div className="flex items-center mb-2">
-                    <div className="w-3 h-3 bg-yellow-500 rounded-full mr-2"></div>
-                    <span className="font-medium text-gray-800">Tasks</span>
-                  </div>
-                  <div className="text-lg font-bold text-yellow-700">
-                    {rayCluster.cluster.pending_resources.tasks.length}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
+          {/* Object Store Memory Usage */}
+          <ResourceCard
+            title="Object Store"
+            available={rayCluster.cluster?.available_object_store_memory}
+            used={rayCluster.cluster?.used_object_store_memory}
+            total={rayCluster.cluster?.total_object_store_memory || 0}
+            color="bg-teal-600"
+            bgColor="bg-gradient-to-br from-teal-50 to-teal-100"
+            unit="GB"
+          />
+        </div>
 
         {/* Expandable Nodes Section */}
         {rayCluster.nodes && Object.keys(rayCluster.nodes).length > 0 && (
@@ -378,6 +395,22 @@ const BioEngineClusterResources: React.FC<BioEngineClusterResourcesProps> = ({ r
                             <div className="flex justify-between">
                               <span className="text-gray-600">Accelerator Type:</span>
                               <span className="text-gray-900 font-semibold">{node.accelerator_type}</span>
+                            </div>
+                          )}
+                          {nodeApps[nodeId] && nodeApps[nodeId].length > 0 && (
+                            <div className="flex flex-col">
+                              <span className="text-gray-600">Apps placed here:</span>
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {nodeApps[nodeId].map(({ appId, state }) => (
+                                  <span
+                                    key={appId}
+                                    className={`inline-block px-2 py-0.5 text-xs font-medium rounded font-mono break-all border ${nodeAppStateClasses(state)}`}
+                                    title={state ? `${appId} — ${state}` : appId}
+                                  >
+                                    {appId}{state && state !== 'RUNNING' ? ` (${state})` : ''}
+                                  </span>
+                                ))}
+                              </div>
                             </div>
                           )}
                           {node.slurm_job_id && (
@@ -462,6 +495,198 @@ const BioEngineClusterResources: React.FC<BioEngineClusterResourcesProps> = ({ r
             })()}
           </div>
         )}
+
+        {/* Expandable Pending Resources Section — yellow when total > 0, grey when empty */}
+        {rayCluster.cluster?.pending_resources && (() => {
+          const pending = rayCluster.cluster.pending_resources;
+          const total = pending.total || 0;
+          const isActive = total > 0;
+          const btnBg = isActive ? 'bg-yellow-50 hover:bg-yellow-100' : 'bg-gray-50 hover:bg-gray-100';
+          const iconColor = isActive ? 'text-yellow-600' : 'text-gray-500';
+          const textColor = isActive ? 'text-yellow-800' : 'text-gray-700';
+          const chevronColor = isActive ? 'text-yellow-600' : 'text-gray-500';
+          const innerBorder = isActive ? 'border-yellow-200' : 'border-gray-200';
+          const innerDot = isActive ? 'bg-yellow-500' : 'bg-gray-400';
+          const countColor = isActive ? 'text-yellow-700' : 'text-gray-600';
+          return (
+            <div className="border-t border-gray-200 pt-6 mt-6">
+              <button
+                onClick={() => setPendingExpanded(!pendingExpanded)}
+                className={`flex items-center justify-between w-full text-left p-3 rounded-xl transition-colors duration-200 ${btnBg}`}
+              >
+                <div className="flex items-center">
+                  <svg className={`w-5 h-5 mr-2 ${iconColor}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <span className={`font-medium ${textColor}`}>
+                    Pending Resources (Total: {total})
+                  </span>
+                </div>
+                <svg
+                  className={`w-5 h-5 transition-transform duration-200 ${chevronColor} ${pendingExpanded ? 'rotate-180' : ''}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              {pendingExpanded && (
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4 animate-slideUp">
+                  {[
+                    { name: 'Actors', count: pending.actors.length },
+                    { name: 'Jobs', count: pending.jobs.length },
+                    { name: 'Tasks', count: pending.tasks.length },
+                  ].map(({ name, count }) => (
+                    <div key={name} className={`bg-white border rounded-xl p-4 ${innerBorder}`}>
+                      <div className="flex items-center mb-2">
+                        <div className={`w-3 h-3 rounded-full mr-2 ${innerDot}`}></div>
+                        <span className="font-medium text-gray-800">{name}</span>
+                      </div>
+                      <div className={`text-lg font-bold ${countColor}`}>{count}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* Expandable SLURM Jobs Section — only when there are queued/running jobs */}
+        {(() => {
+          const queuedRaw = rayCluster.slurm_jobs?.queued || [];
+          const runningRaw = rayCluster.slurm_jobs?.running || [];
+          if (queuedRaw.length + runningRaw.length === 0) return null;
+
+          // Most recently submitted on top within each group
+          const queued = [...queuedRaw].sort((a, b) => (b.submit_time || 0) - (a.submit_time || 0));
+          const running = [...runningRaw].sort((a, b) => (b.start_time || 0) - (a.start_time || 0));
+
+          const formatMinutes = (seconds?: number): string => {
+            const m = Math.max(0, Math.round((seconds || 0) / 60));
+            return `${m}m`;
+          };
+
+          // Yellow when there are pending resources, grey otherwise
+          const pendingTotal = rayCluster.cluster?.pending_resources?.total || 0;
+          const isActive = pendingTotal > 0;
+          const btnBg = isActive ? 'bg-yellow-50 hover:bg-yellow-100' : 'bg-gray-50 hover:bg-gray-100';
+          const iconColor = isActive ? 'text-yellow-600' : 'text-gray-600';
+          const textColor = isActive ? 'text-yellow-800' : 'text-gray-700';
+          const chevronColor = isActive ? 'text-yellow-600' : 'text-gray-500';
+
+          return (
+            <div className="border-t border-gray-200 pt-6 mt-6">
+              <button
+                onClick={() => setSlurmJobsExpanded(!slurmJobsExpanded)}
+                className={`flex items-center justify-between w-full text-left p-3 rounded-xl transition-colors duration-200 ${btnBg}`}
+              >
+                <div className="flex items-center">
+                  <svg className={`w-5 h-5 mr-2 ${iconColor}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                  </svg>
+                  <span className={`font-medium ${textColor}`}>
+                    SLURM Jobs ({queued.length} queued, {running.length} running)
+                  </span>
+                </div>
+                <svg
+                  className={`w-5 h-5 transition-transform duration-200 ${chevronColor} ${slurmJobsExpanded ? 'rotate-180' : ''}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              {slurmJobsExpanded && (
+                <div className="mt-4 space-y-3 animate-slideUp">
+                  {queued.map((job) => (
+                    <div key={`q-${job.job_id}`} className="bg-white border border-gray-200 rounded-xl p-4">
+                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="lg:col-span-1">
+                          <div className="flex items-center mb-3">
+                            <div className="w-2 h-2 bg-yellow-500 rounded-full mr-2"></div>
+                            <span className="font-medium text-gray-800">Job #{job.job_id}</span>
+                          </div>
+                          <div className="space-y-2 text-sm">
+                            {job.state && (
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">State:</span>
+                                <span className="text-gray-900 font-semibold">{job.state}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="lg:col-span-2">
+                          <h4 className="font-medium text-gray-700 mb-3">Timing</h4>
+                          <div className="space-y-2 text-sm">
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Waiting:</span>
+                              <span className="text-gray-900">{formatMinutes(job.pending_seconds)}</span>
+                            </div>
+                            {job.reason && (
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">Reason:</span>
+                                <span className="text-gray-900 font-mono">{job.reason}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {running.map((job) => (
+                    <div key={`r-${job.job_id}`} className="bg-white border border-gray-200 rounded-xl p-4">
+                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="lg:col-span-1">
+                          <div className="flex items-center mb-3">
+                            <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
+                            <span className="font-medium text-gray-800">Job #{job.job_id}</span>
+                          </div>
+                          <div className="space-y-2 text-sm">
+                            {job.state && (
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">State:</span>
+                                <span className="text-gray-900 font-semibold">{job.state}</span>
+                              </div>
+                            )}
+                            {job.node && (
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">Node:</span>
+                                <span className="text-gray-900 font-mono">{job.node}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="lg:col-span-2">
+                          <h4 className="font-medium text-gray-700 mb-3">Timing</h4>
+                          <div className="space-y-2 text-sm">
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Started:</span>
+                              <span className="text-gray-900">{formatMinutes(job.elapsed_seconds)} ago</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Remaining:</span>
+                              <span className="text-gray-900">{formatMinutes(job.remaining_seconds)}</span>
+                            </div>
+                            {job.time_limit_seconds !== undefined && (
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">Time limit:</span>
+                                <span className="text-gray-900">{formatMinutes(job.time_limit_seconds)}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

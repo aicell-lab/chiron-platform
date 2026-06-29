@@ -2,6 +2,8 @@ import React, { useEffect, useState, useCallback } from 'react';
 import ArtifactCard from './ArtifactCard';
 import BioEngineAppManager from './BioEngineAppManager';
 
+const BIOENGINE_SKILL_URL = 'https://bioimage.io/skills/bioengine/SKILL.md';
+
 type ArtifactType = {
   id: string;
   name: string;
@@ -40,8 +42,7 @@ interface AvailableBioEngineAppsProps {
   deployingArtifactId?: string | null;
   pendingDeploymentArtifactId?: string | null;
   artifactModes?: Record<string, string>;
-  deploymentError?: string | null;
-  setDeploymentError?: (error: string | null) => void;
+  // Deployment errors are surfaced via the worker-level ErrorDialog.
   // Deployment handlers
   onDeployArtifact?: (artifactId: string, mode?: string | null) => void;
   onUndeployArtifact?: (artifactId: string) => void;
@@ -63,8 +64,6 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
   deployingArtifactId,
   pendingDeploymentArtifactId,
   artifactModes = {},
-  deploymentError,
-  setDeploymentError,
   onDeployArtifact,
   onUndeployArtifact,
   onModeChange,
@@ -94,6 +93,7 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [artifactManager, setArtifactManager] = useState<any>(null);
+  const [skillCopied, setSkillCopied] = useState(false);
 
   const appManagerRef = React.useRef<{
     openCreateDialog: () => void;
@@ -104,6 +104,8 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
   const fetchIdRef = React.useRef(0);
 
   // Keep pinned workspaces present in selectedWorkspaces whenever they change.
+  // Only update state when the resulting array is actually different to avoid
+  // triggering a spurious re-fetch.
   useEffect(() => {
     setSelectedWorkspaces(prev => {
       const merged = [...pinnedWorkspaces, ...prev.filter(w => !pinnedWorkspaces.includes(w))];
@@ -120,10 +122,9 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
       .catch((err: any) => setError(`Failed to initialize artifact manager: ${err}`));
   }, [server, isLoggedIn]);
 
-  // Full reload on initial connect.
+  // Full reload only on initial connect — workspace add/remove is handled separately.
   useEffect(() => {
     if (isLoggedIn && artifactManager && serviceId) fetchAvailableArtifacts();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [artifactManager, isLoggedIn, serviceId]);
 
   const determineArtifactSupportedModes = (artifact: any) => {
@@ -143,6 +144,7 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
     return { supportedModes, defaultMode };
   };
 
+  /** Enrich a single artifact in-place (manifest, last-modified, modes). */
   const enrichArtifact = useCallback(async (art: ArtifactType): Promise<ArtifactType> => {
     try {
       const data = await artifactManager.read(art.id);
@@ -175,7 +177,8 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
     setError(null);
     setAvailableArtifacts([]);
 
-    // Process workspaces in a stable order: worker's workspace first, then user's, then extras.
+    // Process workspaces in a stable order: worker's workspace first, then the
+    // user's personal workspace, then any additional workspaces.
     const orderedWorkspaces = [
       ...(workerWorkspace && selectedWorkspaces.includes(workerWorkspace) ? [workerWorkspace] : []),
       ...(userWorkspace && selectedWorkspaces.includes(userWorkspace) && userWorkspace !== workerWorkspace ? [userWorkspace] : []),
@@ -197,12 +200,18 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
           continue; // workspace may not have an applications collection
         }
 
+        // Deduplicate across workspaces
         const fresh = wsArtifacts.filter(a => { if (seen.has(a.id)) return false; seen.add(a.id); return true; });
         if (fresh.length === 0) continue;
 
+        // Enrich each artifact and append it to the list as soon as it's ready
         for (const art of fresh) {
           const enriched = await enrichArtifact(art);
+
+          // Discard if a newer fetch has started in the meantime
           if (fetchId !== fetchIdRef.current) return;
+
+          // Append immediately so the card appears as soon as it's enriched
           setAvailableArtifacts(prev => [...prev, enriched]);
           if (onSetArtifactMode && enriched.supportedModes?.cpu && enriched.supportedModes?.gpu && !artifactModes[enriched.id]) {
             onSetArtifactMode(enriched.id, 'cpu');
@@ -216,6 +225,7 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
     }
   }, [artifactManager, serviceId, selectedWorkspaces, workerWorkspace, userWorkspace, enrichArtifact, onSetArtifactMode, artifactModes]);
 
+  /** Fetch and append artifacts for a single workspace without touching others. */
   const fetchWorkspaceArtifacts = useCallback(async (ws: string) => {
     if (!artifactManager) return;
     const fetchId = ++fetchIdRef.current;
@@ -228,11 +238,12 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
 
       for (const art of wsArtifacts) {
         if (fetchId !== fetchIdRef.current) return;
+        // Skip if already in the list
         const isDupe = await new Promise<boolean>(resolve =>
           setAvailableArtifacts(prev => {
             const dup = prev.some(a => a.id === art.id);
             resolve(dup);
-            return prev;
+            return prev; // no state change — just reading
           })
         );
         if (isDupe || fetchId !== fetchIdRef.current) continue;
@@ -245,7 +256,7 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
         }
       }
     } catch {
-      // workspace may not have an applications collection; ignore silently
+      // workspace may not have an applications collection — ignore silently
     }
   }, [artifactManager, enrichArtifact, onSetArtifactMode, artifactModes]);
 
@@ -259,9 +270,28 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
   };
 
   const removeWorkspace = (ws: string) => {
-    if (pinnedWorkspaces.includes(ws)) return;
+    if (pinnedWorkspaces.includes(ws)) return; // pinned — cannot be removed
     setSelectedWorkspaces(prev => prev.filter(w => w !== ws));
+    // Drop all artifacts that belong to this workspace
     setAvailableArtifacts(prev => prev.filter(a => !a.id.startsWith(`${ws}/`)));
+  };
+
+  const handleCopySkill = async () => {
+    try {
+      await navigator.clipboard.writeText(BIOENGINE_SKILL_URL);
+      setSkillCopied(true);
+      setTimeout(() => setSkillCopied(false), 2500);
+    } catch {
+      // Fallback
+      const ta = document.createElement('textarea');
+      ta.value = BIOENGINE_SKILL_URL;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setSkillCopied(true);
+      setTimeout(() => setSkillCopied(false), 2500);
+    }
   };
 
   const allWorkspaces = [...new Set([...pinnedWorkspaces, ...selectedWorkspaces])].filter(Boolean);
@@ -269,7 +299,7 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
   return (
     <div className="space-y-5">
       {/* Header */}
-      <div className="flex flex-wrap justify-between items-center gap-3">
+      <div className="flex flex-wrap justify-between items-start gap-3">
         <div className="flex items-center">
           <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center mr-3 p-1">
             <img src="/bioengine-icon.svg" alt="BioEngine" className="w-8 h-8" />
@@ -277,6 +307,33 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
           <h3 className="text-lg font-semibold text-gray-800">Available BioEngine Apps</h3>
         </div>
         <div className="flex flex-wrap gap-2 items-center">
+          {/* BioEngine AI Skill copy button */}
+          <button
+            onClick={handleCopySkill}
+            title="Copy the BioEngine AI coding skill URL to clipboard — paste it into an AI agent (Claude Code, etc.) to get guided app creation"
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-xl border transition-all duration-200 shadow-sm ${
+              skillCopied
+                ? 'bg-green-50 border-green-300 text-green-700'
+                : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50 hover:border-gray-300 hover:shadow-md'
+            }`}
+          >
+            {skillCopied ? (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                Skill URL Copied!
+              </>
+            ) : (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23-.693L5 14.5m14.8.8l1.402 1.402c1 1 .03 2.7-1.388 2.7H4.186c-1.418 0-2.389-1.7-1.388-2.7L4.2 15.3" />
+                </svg>
+                Copy AI Coding Skill
+              </>
+            )}
+          </button>
+
           <button
             onClick={() => appManagerRef.current?.openCreateDialog()}
             disabled={loading}
@@ -311,7 +368,7 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
                   ? 'bg-blue-50 border-blue-300 text-blue-700'
                   : 'bg-white border-gray-300 text-gray-700'
               }`}
-              title={isPinned ? `${ws === workerWorkspace ? "Worker's" : "Your"} workspace: cannot be removed` : ws}
+              title={isPinned ? `${ws === workerWorkspace ? "Worker's" : "Your"} workspace — cannot be removed` : ws}
             >
               {ws}
               {!isPinned && (
@@ -344,23 +401,10 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
         </div>
       </div>
 
-      {/* Deployment error */}
-      {deploymentError && setDeploymentError && (
-        <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex justify-between items-start">
-          <div className="flex gap-2">
-            <svg className="w-5 h-5 text-red-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <div>
-              <h4 className="text-sm font-medium text-red-800">Deployment Error</h4>
-              <p className="text-sm text-red-700 mt-1">{deploymentError}</p>
-            </div>
-          </div>
-          <button onClick={() => setDeploymentError(null)} className="text-red-400 hover:text-red-600">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-          </button>
-        </div>
-      )}
+      {/* Deployment errors are now rendered by the worker-level
+          ErrorDialog (BioEngineWorker.tsx) so multi-line stack traces
+          stay readable. The internal "error" state below is for the
+          artifact-list fetch itself, which is a different code path. */}
 
       {/* Error */}
       {error && (
@@ -420,9 +464,11 @@ const AvailableBioEngineApps: React.FC<AvailableBioEngineAppsProps> = ({
         availableWorkspaces={allWorkspaces}
         onArtifactUpdated={(workspace?: string) => {
           if (workspace && selectedWorkspaces.includes(workspace)) {
+            // Remove existing entries for this workspace and re-fetch only it
             setAvailableArtifacts(prev => prev.filter(a => !a.id.startsWith(`${workspace}/`)));
             fetchWorkspaceArtifacts(workspace);
           } else if (workspace && !selectedWorkspaces.includes(workspace)) {
+            // Newly created in a workspace not yet observed — add it
             setSelectedWorkspaces(prev => [...prev, workspace]);
             fetchWorkspaceArtifacts(workspace);
           } else {

@@ -53,14 +53,14 @@ const DeploymentConfigModal: React.FC<DeploymentConfigModalProps> = ({
   const appData = applicationId && bioengineApps ? bioengineApps[applicationId] : null;
   const showRecoveredAppWarning = applicationId && (testMode || appData?.recovered_app === true);
 
-  // Deployment class names from manifest (for hints)
-  const deploymentClassNames = getDeploymentClassNames(manifest);
-
   const applicationIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
   const hasApplicationId = applicationId.trim().length > 0;
   const isApplicationIdValid = !hasApplicationId || applicationIdPattern.test(applicationId);
   const selectedApp = hasApplicationId && bioengineApps ? bioengineApps[applicationId.trim()] : null;
   const isUpdateTarget = Boolean(selectedApp && typeof selectedApp === 'object' && ['RUNNING', 'HEALTHY'].includes(selectedApp.status));
+
+  // Deployment class names from manifest (for hints)
+  const deploymentClassNames = getDeploymentClassNames(manifest);
 
   useEffect(() => {
     if (isOpen) {
@@ -361,7 +361,7 @@ const DeploymentConfigModal: React.FC<DeploymentConfigModalProps> = ({
                     placeholder="None"
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    Sets <code className="bg-gray-100 px-0.5 rounded">HYPHA_TOKEN</code> for all deployments in this app. To use different tokens per deployment, set <code className="bg-gray-100 px-0.5 rounded">_HYPHA_TOKEN</code> in the Environment Variables field above instead; the leading underscore keeps the value secret.
+                    Sets <code className="bg-gray-100 px-0.5 rounded">HYPHA_TOKEN</code> for all deployments in this app. To use different tokens per deployment, set <code className="bg-gray-100 px-0.5 rounded">_HYPHA_TOKEN</code> in the Environment Variables field above instead — the leading underscore keeps the value secret.
                   </p>
                 </div>
 
@@ -374,7 +374,7 @@ const DeploymentConfigModal: React.FC<DeploymentConfigModalProps> = ({
                     onChange={(e) => setMaxOngoingRequests(e.target.value === '' ? '' : parseInt(e.target.value))}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-gray-900"
                   />
-                  <p className="text-xs text-gray-500 mt-1">Maximum number of requests the Hypha service wrapper handles concurrently. This does not change the concurrency settings of individual deployments inside the app; a deployment such as a training job may still only process one request at a time regardless of this value.</p>
+                  <p className="text-xs text-gray-500 mt-1">Maximum number of requests the Hypha service wrapper handles concurrently. This does not change the concurrency settings of individual deployments inside the app — a deployment such as a training job may still only process one request at a time regardless of this value.</p>
                 </div>
 
                 <div className="md:col-span-2 space-y-3 pt-1">
@@ -413,7 +413,7 @@ const DeploymentConfigModal: React.FC<DeploymentConfigModalProps> = ({
                     />
                     <span>
                       <span className="text-sm font-medium text-gray-700 block">Debug Mode</span>
-                      <span className="text-xs text-gray-500">Enable verbose logging for all deployments in this app. Increases log output; use only for troubleshooting.</span>
+                      <span className="text-xs text-gray-500">Enable verbose logging for all deployments in this app. Increases log output — use only for troubleshooting.</span>
                     </span>
                   </label>
                 </div>
