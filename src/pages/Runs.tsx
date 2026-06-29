@@ -414,7 +414,7 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
 };
 
 const Runs: React.FC = () => {
-  const { server, artifactManager, isLoggedIn } = useHyphaStore();
+  const { server, artifactManager, isLoggedIn, user } = useHyphaStore();
   const [runs, setRuns] = useState<RunArtifact[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -440,15 +440,34 @@ const Runs: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const workspace = server.config?.workspace || 'chiron-platform';
+      // The orchestrator runs as the chiron-platform workspace service account
+      // (the UI-issued application token is scoped to the worker's workspace,
+      // not the user's personal one — see Training.tsx createOrchestrator),
+      // so every UI-started run lands in chiron-platform/chiron-training-runs.
+      // We list from there and filter by manifest.owner_id / owner_email so
+      // each user sees only their own runs.
       const items = await artifactManager.list({
-        parent_id: `${workspace}/chiron-training-runs`,
+        parent_id: 'chiron-platform/chiron-training-runs',
         stage: 'all',
         _rkwargs: true,
       });
 
+      const userId = (user as any)?.id as string | undefined;
+      const userEmail = (user as any)?.email as string | undefined;
+      const mine = (items || []).filter((it: any) => {
+        const m = it?.manifest ?? {};
+        const oid = m.owner_id as string | undefined;
+        const oem = m.owner_email as string | undefined;
+        // Show legacy runs that have no owner tags so existing artifacts
+        // do not vanish from the page after this filter ships.
+        if (!oid && !oem) return true;
+        if (userId && oid && oid === userId) return true;
+        if (userEmail && oem && oem === userEmail) return true;
+        return false;
+      });
+
       // Sort newest first
-      const sorted: RunArtifact[] = [...(items || [])].sort((a: any, b: any) => {
+      const sorted: RunArtifact[] = [...mine].sort((a: any, b: any) => {
         const ta = a.manifest?.started_at ?? '';
         const tb = b.manifest?.started_at ?? '';
         return tb.localeCompare(ta);
@@ -489,7 +508,7 @@ const Runs: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [artifactManager, server]);
+  }, [artifactManager, server, user]);
 
   useEffect(() => { fetchRuns(); }, [fetchRuns]);
 
