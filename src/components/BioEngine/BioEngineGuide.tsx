@@ -107,7 +107,7 @@ const TagInput: React.FC<{
   );
 };
 
-const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.6.0';
+const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.6.1';
 
 const BioEngineGuide: React.FC = () => {
   const { client, server, connect, isConnected, isLoggedIn, user } = useHyphaStore();
