@@ -366,7 +366,7 @@ The manager mounts the trainer container, calls `register_to_orchestrator` (if `
 
 When porting another foundation model, plan for these differences:
 
-- **Dataset-server contract.** Tabula's data server pre-cuts every zarr to `(n_qc_cells, 1200)` and exposes `layers/tabula_binned`. If your model expects a different cell representation (raw counts, log1p, scGPT-style ranked sequences, Geneformer-style ranked tokens), either consume the zarr directly via raw `X` or rerun preprocessing inside your trainer. Avoid both at once.
+- **Dataset-server contract.** Tabula's data server pre-cuts every zarr to `(n_cells, 1200)` and exposes `layers/tabula_binned`. If your model expects a different cell representation (raw counts, log1p, scGPT-style ranked sequences, Geneformer-style ranked tokens), either consume the zarr directly via raw `X` or rerun preprocessing inside your trainer. Avoid both at once.
 - **What counts as "shared transformer weights" for FedAvg.** Tabula federates only the `transformer.*` keys, keeping the embedder and projection heads local. Your model must have a clear shared-vs-local key split, expressed through `get_transformer_keys()`. If your model has no local components (single global model), return every key.
 - **`in_feature` / sequence length.** Tabula's data server reads `in_feature=1200` from `tabula/framework.yaml`. If your model has a different sequence length, either ship a model-specific data server alongside your trainer or document an alternative dataset-server contract.
 - **Federated objectives.** The Tabula objective is `contrastive_scale * L_contrast + reconstruction_scale * L_recon`. Your `fit_config` schema can expose entirely different hyperparameters; the orchestrator passes through whatever you declare.

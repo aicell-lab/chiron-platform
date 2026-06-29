@@ -44,13 +44,9 @@ Per-dataset details enriched with the data server's zarr-level metadata. The ret
     "name": "<name>.zarr",
     "n_samples": int,                # total cells in X
     "n_vars": int,                   # total genes in X
-    # QC pipeline outputs (only present once the data server has scanned the file):
-    "qc_n_cells_kept": int,
-    "qc_n_genes_kept": int,
-    "n_cells_dropped": int,          # n_samples - qc_n_cells_kept
-    "n_genes_dropped": int,
+    # Pipeline outputs (only present once the data server has scanned the file):
     "hvg_in_feature": int,           # 1200 by default
-    "hvg_n_selected": int,           # min(in_feature, qc_n_genes_kept)
+    "hvg_n_selected": int,           # min(in_feature, n_vars)
     "hvg_histogram_counts": list[int],            # 20-bin log-spaced histogram
     "hvg_histogram_edges_log10": list[float],
     "binning_n_cells": int,

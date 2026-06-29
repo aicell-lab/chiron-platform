@@ -47,11 +47,26 @@ See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
 
 ## 2. Set up a Chiron worker
 
-You need three things, in order.
+Before generating any launch command, gather the environment yourself rather than asking the user to guess.
 
-1. **Install and run a BioEngine Worker.** Follow the bioengine skill at [bioimage.io/public/skills/bioengine/SKILL.md](https://bioimage.io/public/skills/bioengine/SKILL.md) §1 (Set up a BioEngine worker). For Chiron specifically: launch the worker with `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}'` so the Chiron Manager comes up on startup. Easiest is the browser wizard at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker), which writes a one-line launch command for Docker, Podman, Singularity or Apptainer based on a short form.
-2. **Prepare and register your datasets.** Follow the data-prep sub-skill at [references/data-prep.md](references/data-prep.md). It explains the per-dataset folder layout, the `manifest.yaml` schema, the expected AnnData keys (`adata.X` raw counts, `adata.var["gene_id"]` gene tokens), and the per-dataset QC pipeline the data server applies on first read.
-3. **Confirm the worker is online.** Once the BioEngine worker is up, the Chiron interface at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker) will show its name, its registered datasets, and its hardware. You can also query [apps/chiron-manager.md](apps/chiron-manager.md) `get_worker_info()` and `get_datasets_info()` directly via Hypha RPC.
+**Detect the host environment.** Run these checks and only ask the user when a check fails or is ambiguous:
+
+- **Operating system**: `uname -srm` (Linux/macOS) or `systeminfo` (Windows). Linux is the supported target; macOS and Windows work through Docker Desktop but cannot pass `--gpus all`.
+- **Container runtime**: probe `docker --version`, `podman --version`, `singularity --version`, `apptainer --version` in that order and pick the first that responds. If more than one is installed, ask the user which to use. Docker is the default in the browser wizard.
+- **GPU and CUDA**: `nvidia-smi --query-gpu=name,memory.total --format=csv` lists the GPUs and their memory. No NVIDIA driver means CPU-only mode (training will be unusably slow but the worker still boots).
+- **Compute headroom**: `nproc` for CPU cores and `free -h` (Linux) or equivalent for RAM. The defaults from the wizard (3 CPU, 30 GB RAM, 1 GPU) are a safe starting point.
+
+**Ask the user for what you cannot detect:**
+
+- **Training data location**: either a directory of `.h5ad` files or a list of specific files. If the user has no data ready yet, the worker can still be launched in orchestrator-only mode (skip the data-server, omit the data volume mount).
+- **Worker name** (optional): displayed in the Chiron UI; defaults to `Chiron Worker` if not provided.
+- **Hypha admin token**: only needed if the user has not pasted one into the prompt themselves. Direct them to log in at [chiron.aicell.io](https://chiron.aicell.io) and use the "AI Agent" tab of the worker setup wizard to inject the token, or generate one manually at [hypha.aicell.io](https://hypha.aicell.io).
+
+**Prepare and register datasets.** Follow the data-prep sub-skill at [references/data-prep.md](references/data-prep.md). It explains the per-dataset folder layout, the `manifest.yaml` schema, the expected AnnData keys (`adata.X` raw counts, `adata.var["gene_id"]` gene tokens), and the per-dataset HVG ranking, value binning, and UMAP the data server computes on first read. Inspect each `.h5ad` against this contract, fix anything that needs adjustment, and gather the prepared datasets into a new data directory laid out as one subfolder per dataset with a `manifest.yaml` each.
+
+**Launch the worker.** Follow the bioengine skill at [bioimage.io/public/skills/bioengine/SKILL.md](https://bioimage.io/public/skills/bioengine/SKILL.md) §1 (Set up a BioEngine worker) for the per-runtime command. For Chiron specifically: launch with `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}'` so the Chiron Manager comes up on startup. Easiest is the browser wizard at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker), which writes a one-line launch command for Docker, Podman, Singularity or Apptainer based on the form values.
+
+**Confirm the worker is online.** Once the worker is up, the Chiron interface at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker) will show its name, its registered datasets, and its hardware. The data server rescans the data directory every 30 seconds. You can also query [apps/chiron-manager.md](apps/chiron-manager.md) `get_worker_info()` and `get_datasets_info()` directly via Hypha RPC.
 
 ## 3. Run federated training
 
