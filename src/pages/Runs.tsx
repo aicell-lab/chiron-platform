@@ -21,6 +21,10 @@ interface RoundMeta {
     evaluate: boolean;
     train_loss: number | null;
     val_loss: number | null;
+    // Added in chiron-orchestrator 0.3.8 — worker hosting this trainer at the
+    // time the round ran. Lets the per-round badges show the worker's friendly
+    // name instead of a UUID-shaped client_name when the trainer is offline.
+    worker_name?: string;
   }>;
 }
 
@@ -39,7 +43,22 @@ interface RunArtifact {
     // though the orchestrator service is still alive.
     run_id?: string;
     config: Record<string, any>;
-    trainers: Record<string, { client_name: string; datasets: Array<{ id: string; name: string }>; train_samples: number }>;
+    trainers: Record<string, {
+      client_name: string;
+      datasets: Array<{ id: string; name: string }>;
+      train_samples: number;
+      // Added in chiron-orchestrator 0.3.8 — worker the trainer is hosted on,
+      // captured at add_trainer time. Lets the Runs page render the trainer's
+      // origin even after the worker has been torn down. Older runs have
+      // these absent; the UI falls back to a live workspace lookup then.
+      worker_name?: string;
+      worker_service_id?: string;
+      geo_location?: { region?: string; country_name?: string; country_code?: string };
+    }>;
+    // Same provenance fields for the orchestrator itself — captured into
+    // _run_base_manifest by chiron-orchestrator 0.3.8 at _create_run_artifact.
+    orchestrator_worker_name?: string;
+    orchestrator_geo_location?: { region?: string; country_name?: string; country_code?: string };
     rounds: RoundMeta[];
     history?: {
       training_losses: [number, number][];
@@ -133,26 +152,30 @@ const LossSparkline: React.FC<{ losses: [number, number][]; stroke: string }> = 
   );
 };
 
-// Renders worker name + flag + region, country. Falls back gracefully while
-// the lookup is in flight or has failed.
-const WorkerBadge: React.FC<{ info?: WorkerInfo; fallback?: string }> = ({ info, fallback }) => {
-  if (!info || info.loading) {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-gray-400 text-xs">
-        <BiLoaderAlt className="animate-spin" size={12} />
-        Resolving…
-      </span>
-    );
-  }
-  const name = info.name || fallback || 'Unknown worker';
-  const hasGeo = info.region || info.country_name;
+// Renders worker name + flag + region, country. Always shows the manifest
+// fallback (client name, dataset list, etc.) immediately so a slow or
+// permanently-broken live-worker lookup never leaves the badge stuck on a
+// spinner. Live worker info supplements the static manifest data once
+// available — but a deleted worker is still rendered with its manifest-side
+// identity intact.
+const WorkerBadge: React.FC<{ info?: WorkerInfo; fallback?: string; manifestGeo?: { region?: string; country_name?: string; country_code?: string } }> = ({ info, fallback, manifestGeo }) => {
+  const name = info?.name || fallback || 'Unknown worker';
+  const geo = (info?.region || info?.country_name) ? {
+    region: info?.region,
+    country_name: info?.country_name,
+    country_code: info?.country_code,
+  } : manifestGeo;
+  const hasGeo = !!(geo?.region || geo?.country_name);
   return (
     <div className="flex flex-col min-w-0">
-      <p className="text-sm font-medium text-gray-800 truncate" title={name}>{name}</p>
+      <p className="text-sm font-medium text-gray-800 truncate flex items-center gap-1.5" title={name}>
+        <span className="truncate">{name}</span>
+        {info?.loading && <BiLoaderAlt className="animate-spin text-gray-300 flex-shrink-0" size={11} />}
+      </p>
       {hasGeo ? (
         <p className="text-xs text-gray-500 flex items-center gap-1.5 mt-0.5 truncate">
-          <CountryFlag code={info.country_code} />
-          <span className="truncate">{[info.region, info.country_name].filter(Boolean).join(', ')}</span>
+          <CountryFlag code={geo?.country_code} />
+          <span className="truncate">{[geo?.region, geo?.country_name].filter(Boolean).join(', ')}</span>
         </p>
       ) : (
         <p className="text-xs text-gray-400 mt-0.5">Location unavailable</p>
@@ -332,7 +355,11 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
           <div>
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Orchestrator</p>
             <div className="bg-gray-50/60 border border-gray-100 rounded-xl px-4 py-3">
-              <WorkerBadge info={orchWorkerInfo} fallback="Orchestrator worker" />
+              <WorkerBadge
+                info={orchWorkerInfo}
+                fallback={m.orchestrator_worker_name || 'Orchestrator worker'}
+                manifestGeo={m.orchestrator_geo_location}
+              />
             </div>
           </div>
 
@@ -352,7 +379,11 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
                       className="flex items-start gap-4 bg-gray-50/60 border border-gray-100 rounded-xl px-4 py-3"
                     >
                       <div className="flex-1 min-w-0">
-                        <WorkerBadge info={workerInfo} fallback={t?.client_name || 'Trainer worker'} />
+                        <WorkerBadge
+                          info={workerInfo}
+                          fallback={t?.worker_name || t?.client_name || 'Trainer worker'}
+                          manifestGeo={t?.geo_location}
+                        />
                       </div>
                       {datasets.length > 0 && (
                         <div className="flex flex-wrap justify-end gap-1.5 max-w-[60%]">
@@ -402,7 +433,20 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
                               {(r.trainers ?? []).map(t => {
                                 const workerSvcId = parseWorkerServiceId(t.service_id);
                                 const wi = workerSvcId ? workerInfoMap[workerSvcId] : undefined;
-                                const label = wi?.name || t.client_name;
+                                // Prefer the manifest's worker_name (captured at
+                                // add_trainer time by chiron-orchestrator 0.3.8)
+                                // over the live workspace lookup, then the live
+                                // name, then the trainer's manifest-side
+                                // client_name from the run's trainers map (which
+                                // is friendlier than the per-round client_name
+                                // when the latter defaulted to a UUID). Last
+                                // resort: the per-round client_name itself.
+                                const runTrainer = m.trainers?.[t.service_id];
+                                const label = t.worker_name
+                                  || wi?.name
+                                  || runTrainer?.worker_name
+                                  || runTrainer?.client_name
+                                  || t.client_name;
                                 return (
                                   <span
                                     key={t.service_id}
