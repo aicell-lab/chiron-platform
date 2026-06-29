@@ -736,14 +736,28 @@ const Training: React.FC = () => {
   const [participatedTrainerIds, setParticipatedTrainerIds] = useState<Set<string>>(new Set());
 
   // Cache of display metadata for each trainer websocket service ID.
-  // Populated whenever a trainer is visible; survives trainer going offline so Save Weights
-  // can still show name/geo/datasets for disconnected participants.
+  // Populated whenever a trainer is visible; survives trainer going offline so
+  // Save Weights can still show name/geo/datasets for disconnected
+  // participants. Persisted to localStorage so a full page reload after the
+  // trainer has been torn down (typical post-demo cleanup) doesn't blank the
+  // panel.
+  const TRAINER_META_CACHE_KEY = 'chiron.trainerMetaCache.v1';
   const [trainerMetaCache, setTrainerMetaCache] = useState<Record<string, {
     workerName: string;
     geoDisplay: string;
     datasets: string[];
     managerId: string;
-  }>>({});
+  }>>(() => {
+    try {
+      const raw = localStorage.getItem(TRAINER_META_CACHE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(TRAINER_META_CACHE_KEY, JSON.stringify(trainerMetaCache));
+    } catch { /* quota or private-mode — best-effort */ }
+  }, [trainerMetaCache]);
 
   // Save model weights
   // Save Weights state — keyed by 'global', 'publish-{svcId}', 'local-{svcId}'
@@ -774,6 +788,12 @@ const Training: React.FC = () => {
   const [trainerCheckpoints, setTrainerCheckpoints] = useState<Record<string, TrainerSession[]>>({});
   // keyed by trainer service ID → { session_id, round }
   const [selectedTrainerCkpt, setSelectedTrainerCkpt] = useState<Record<string, { session_id: string; round: number } | null>>({});
+  // Per-trainer counterpart of globalRoundManuallySetRef — tracks which trainer
+  // pickers the user has explicitly clicked a round in. Until clicked, the
+  // selected round tracks whatever the trainer reports as its newest checkpoint
+  // of the current session, so the picker keeps pointing at "latest" as new
+  // rounds arrive instead of being stuck on the first auto-default.
+  const trainerCkptManuallySetRef = React.useRef<Record<string, boolean>>({});
 
   const [trainerParams, setTrainerParams] = useState<any>(null);
   const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
@@ -1702,22 +1722,17 @@ const Training: React.FC = () => {
       return;
     }
 
-    const orchestratorId = `${managerId}::${orchestrator.appId}`;
-    const isSelected = orchestratorId === selectedOrchestrator;
-    if (isSelected && trainingHistory && ((trainingHistory.training_losses?.length > 0) || (trainingHistory.validation_losses?.length > 0))) {
-      // Show the modal in loading state immediately so the user gets feedback
-      // while we check whether the latest global weights have been published
-      // (in which case they can continue from that checkpoint later) or not
-      // (in which case all training progress is gone for good).
-      const latestRound = Math.max(
-        ...(trainingHistory.training_losses?.map(([r]) => r) ?? [0]),
-        ...(trainingHistory.validation_losses?.map(([r]) => r) ?? [0]),
-        0,
-      );
-      const orchSvcId = orchestrator.serviceIds[0]?.websocket_service_id;
-      setConfirmModalTitle('Delete Orchestrator with History');
+    const orchSvcId = orchestrator.serviceIds[0]?.websocket_service_id;
+    // Always probe the orchestrator for its own training history before
+    // deleting — the previous gate on `isSelected` skipped the warning
+    // whenever the user deleted an orchestrator from another worker's row,
+    // silently throwing away training progress. We surface the modal in a
+    // loading state immediately so the user sees something is happening
+    // while the RPC resolves.
+    if (orchestrator.status === 'RUNNING' && orchSvcId) {
+      setConfirmModalTitle('Delete Orchestrator');
       setConfirmModalMessage('');
-      setConfirmModalLoadingMessage('Checking whether the latest global weights have been published…');
+      setConfirmModalLoadingMessage('Checking whether this orchestrator has training history…');
       setConfirmModalLoading(true);
       setConfirmModalDanger(true);
       setConfirmModalConfirmLabel('Delete');
@@ -1725,12 +1740,33 @@ const Training: React.FC = () => {
       setShowConfirmModal(true);
 
       (async () => {
+        let history: any = null;
+        try {
+          history = await callHyphaService(orchSvcId, 'get_training_history', {}, { timeoutMs: 15000 });
+        } catch {
+          // No history endpoint or the call failed — fall through to the
+          // generic confirm body below.
+        }
+        const trainingLosses = history?.training_losses ?? [];
+        const validationLosses = history?.validation_losses ?? [];
+        const hasHistory = trainingLosses.length > 0 || validationLosses.length > 0;
+        if (!hasHistory) {
+          setConfirmModalMessage('Are you sure you want to delete this orchestrator?');
+          setConfirmModalDanger(false);
+          setConfirmModalLoading(false);
+          return;
+        }
+        const latestRound = Math.max(
+          ...trainingLosses.map(([r]: [number, number]) => r),
+          ...validationLosses.map(([r]: [number, number]) => r),
+          0,
+        );
+        setConfirmModalTitle('Delete Orchestrator with History');
+        setConfirmModalLoadingMessage('Checking whether the latest global weights have been published…');
         let published: Array<{ artifact_id: string; round: number; description?: string; published_at: string }> = [];
         try {
-          if (orchSvcId) {
-            published = await callHyphaService(orchSvcId, 'get_published_global_weights', {}, { timeoutMs: 15000 }) || [];
-          }
-        } catch (e) {
+          published = await callHyphaService(orchSvcId, 'get_published_global_weights', {}, { timeoutMs: 15000 }) || [];
+        } catch {
           // get_published_global_weights is unavailable on orchestrators
           // older than 0.2.4. Fall back to the historical warning so we
           // don't silently mislead the operator on legacy deployments.
@@ -1743,14 +1779,15 @@ const Training: React.FC = () => {
           : null;
         let body: string;
         if (newest && newest.round >= latestRound) {
-          // Published checkpoint is up to date with the in-memory state.
           body = `The current global weights are already published at round ${newest.round} as:\n\n${newest.artifact_id}\n\nYou can later continue a training session from this checkpoint. Deleting this orchestrator clears its in-memory state but the published checkpoint is preserved.`;
+          // Downgrade from "danger" (red) to "warning" (orange) — nothing
+          // actually gets lost here, the user just needs to acknowledge
+          // they're tearing down the in-memory session.
+          setConfirmModalDanger(false);
         } else if (newest) {
-          // Some rounds beyond the published checkpoint will be lost.
           const lostRounds = latestRound - newest.round;
           body = `The latest published global weights are at round ${newest.round} (artifact ${newest.artifact_id}). The in-memory state is at round ${latestRound}, so deleting now loses ${lostRounds} round${lostRounds === 1 ? '' : 's'} of training that haven't been published. Publish the current global weights from the Train tab first if you want to keep them.`;
         } else {
-          // Nothing has been published yet.
           body = `No global weights have been published from this orchestrator yet. All ${latestRound} round${latestRound === 1 ? '' : 's'} of training progress will be permanently lost. Publish the current global weights from the Train tab first if you want to keep them.`;
         }
         setConfirmModalMessage(body);
@@ -1834,6 +1871,90 @@ const Training: React.FC = () => {
         true,
         'Delete'
       );
+      return;
+    }
+    const trainerSvcId = trainer?.serviceIds?.[0]?.websocket_service_id;
+    if (trainer?.status === 'RUNNING' && trainerSvcId) {
+      // Probe the trainer for on-disk session checkpoints and local-model
+      // saves before deleting — a trainer that contributed rounds to a
+      // recent run still holds its per-round .pth files under
+      // ./trained_weights/<session>/round_*.pth that are lost on delete
+      // unless the user has either Saved to worker (list_local_model_weights)
+      // or Uploaded the model (separate Hypha artifact).
+      setConfirmModalTitle('Delete Trainer');
+      setConfirmModalMessage('');
+      setConfirmModalLoadingMessage('Checking whether this trainer has unsaved training weights…');
+      setConfirmModalLoading(true);
+      setConfirmModalDanger(true);
+      setConfirmModalConfirmLabel('Delete');
+      setConfirmModalAction(() => async () => { await performRemoveTrainer(managerId, appId, false); });
+      setShowConfirmModal(true);
+
+      (async () => {
+        let sessions: TrainerSession[] = [];
+        let saved: Array<{ client_name?: string; num_rounds?: number; saved_at?: string }> = [];
+        let properties: Record<string, any> | null = null;
+        try {
+          [sessions, saved, properties] = await Promise.all([
+            callHyphaService<TrainerSession[]>(trainerSvcId, 'list_weight_checkpoints', {}, { timeoutMs: 15000 }).catch(() => []),
+            callHyphaService<any[]>(trainerSvcId, 'list_local_model_weights', {}, { timeoutMs: 15000 }).catch(() => []),
+            callHyphaService<Record<string, any>>(trainerSvcId, 'get_properties', {}, { timeoutMs: 15000 }).catch(() => null),
+          ]);
+        } catch {
+          // Any RPC unavailable — fall through to generic confirm.
+        }
+        sessions = sessions || [];
+        saved = saved || [];
+        // Pick the current session's highest round; fall back to the newest
+        // session if none are flagged is_current (the trainer was restarted
+        // after the session it participated in).
+        const currentOrNewest = sessions.find(s => s.is_current) ?? sessions[0];
+        const latestRound = currentOrNewest?.checkpoints?.length
+          ? Math.max(...currentOrNewest.checkpoints.map(c => c.round))
+          : 0;
+        // Look for already-uploaded chiron-models artifacts whose manifest.client_id
+        // matches THIS trainer's client_id. Without this, Upload Model would
+        // never disarm the warning (only Save to worker did), even though an
+        // uploaded artifact is at least as durable as a local-worker save.
+        let maxUploadedRounds = 0;
+        try {
+          const clientId = properties?.client_id;
+          if (clientId && artifactManager) {
+            const artifacts = await artifactManager.list({ parent_id: 'chiron-platform/chiron-models', limit: 200, _rkwargs: true });
+            for (const a of artifacts || []) {
+              if (a?.manifest?.client_id === clientId) {
+                const n = Number(a.manifest.num_rounds || 0);
+                if (n > maxUploadedRounds) maxUploadedRounds = n;
+              }
+            }
+          }
+        } catch { /* artifact lookup is best-effort */ }
+        const maxSavedRounds = saved.length > 0
+          ? Math.max(...saved.map(s => s.num_rounds || 0))
+          : 0;
+        const maxPersisted = Math.max(maxSavedRounds, maxUploadedRounds);
+        if (latestRound === 0) {
+          setConfirmModalMessage('Are you sure you want to delete this trainer?');
+          setConfirmModalDanger(false);
+          setConfirmModalLoading(false);
+          return;
+        }
+        let body: string;
+        if (maxPersisted >= latestRound) {
+          const sources: string[] = [];
+          if (maxUploadedRounds >= latestRound) sources.push('uploaded to Chiron Models');
+          if (maxSavedRounds >= latestRound) sources.push('saved to the worker');
+          body = `This trainer has session weights from ${latestRound} round${latestRound === 1 ? '' : 's'} of training, and the latest checkpoint has already been ${sources.join(' and ')}. Deleting the trainer clears its in-memory state but the persisted checkpoint is preserved.`;
+          setConfirmModalDanger(false);
+        } else if (maxPersisted > 0) {
+          const lostRounds = latestRound - maxPersisted;
+          body = `This trainer has session weights through round ${latestRound}, but the most recent persisted checkpoint only covers round ${maxPersisted}. Deleting it will lose ${lostRounds} round${lostRounds === 1 ? '' : 's'} of local training. Use "Save to worker" or "Upload Model" on the Train tab first if you want to keep them.`;
+        } else {
+          body = `This trainer has session weights from ${latestRound} round${latestRound === 1 ? '' : 's'} of training, but nothing has been saved to the worker or uploaded. Deleting it will lose all of that local training. Use "Save to worker" or "Upload Model" on the Train tab first if you want to keep them.`;
+        }
+        setConfirmModalMessage(body);
+        setConfirmModalLoading(false);
+      })();
       return;
     }
     showConfirmDialog(
@@ -2814,7 +2935,10 @@ const Training: React.FC = () => {
         })));
         setTrainerCheckpoints(prev => ({ ...prev, [svcId]: sessions || [] }));
         setSelectedTrainerCkpt(prev => {
-          if (prev[svcId] != null) return prev;
+          // Auto-track the trainer's latest current-session round unless the
+          // user has clicked a specific one (trainerCkptManuallySetRef). Same
+          // shape as the global picker — see commit 370baed.
+          if (trainerCkptManuallySetRef.current[svcId]) return prev;
           const currentOrFirst = sessions?.find(s => s.is_current) ?? sessions?.[0];
           if (!currentOrFirst?.checkpoints || currentOrFirst.checkpoints.length === 0) return prev;
           const maxRound = Math.max(...currentOrFirst.checkpoints.map(c => c.round));
@@ -3798,7 +3922,7 @@ const Training: React.FC = () => {
                                             const isSelected = selCkpt?.session_id === sess.session_id && selCkpt?.round === ck.round;
                                             return (
                                               <button key={ck.round}
-                                                onClick={() => setSelectedTrainerCkpt(p => ({ ...p, [svcId]: { session_id: sess.session_id, round: ck.round } }))}
+                                                onClick={() => { trainerCkptManuallySetRef.current[svcId] = true; setSelectedTrainerCkpt(p => ({ ...p, [svcId]: { session_id: sess.session_id, round: ck.round } })); }}
                                                 className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-colors ${isSelected ? 'bg-violet-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
                                                 Round {ck.round}
                                               </button>
