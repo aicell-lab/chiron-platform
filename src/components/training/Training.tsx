@@ -1562,12 +1562,24 @@ const Training: React.FC = () => {
         setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
         setShowErrorPopup(true);
       } finally {
-        setCreatingOrchestratorMgrs(prev => { const n = { ...prev }; delete n[managerId]; return n; });
+        // Hold the loading-spinner state on the Start Orchestrator button
+        // for an extra 10 s after the deploy resolves. The manager's
+        // _idempotent_deploy treats a repeat create_orchestrator call with
+        // identical kwargs inside _CREATE_DEDUPE_WINDOW_S (10 s) as a
+        // duplicate of the first and returns the original application_id
+        // — without this UI cooldown a user clicking Deploy a second time
+        // inside that window would silently land back on the previous app
+        // (or, post-teardown, a dead app_id). Keeping the button disabled
+        // matches the backend window and makes the wait visible.
+        setTimeout(() => {
+          setCreatingOrchestratorMgrs(prev => { const n = { ...prev }; delete n[managerId]; return n; });
+        }, 10_000);
       }
-      // Keep the lock held through the post-deploy refresh — otherwise the
-      // user could reopen the dialog and re-click in the brief window
-      // between deploy success and the worker reporting the new app, and
-      // the placeholder-check above wouldn't yet see the real row.
+      // Keep the re-entrant lock held through the post-deploy refresh —
+      // otherwise the user could reopen the dialog and re-click in the
+      // brief window between deploy success and the worker reporting the
+      // new app, and the placeholder-check above wouldn't yet see the
+      // real row.
       try { await refreshWorkerInfo(managerId); } catch { /* refresh is best-effort */ }
       mutatingManagersRef.current.delete(managerId);
       scheduleWorkerRefresh(managerId);
@@ -1643,11 +1655,16 @@ const Training: React.FC = () => {
         setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
         setShowErrorPopup(true);
       } finally {
-        setCreatingTrainerMgrs(prev => { const n = { ...prev }; delete n[managerId]; return n; });
+        // Hold the Start Trainer button's spinner state for 10 s after the
+        // deploy resolves, matching the manager's _CREATE_DEDUPE_WINDOW_S.
+        // See the equivalent comment in createOrchestrator.
+        setTimeout(() => {
+          setCreatingTrainerMgrs(prev => { const n = { ...prev }; delete n[managerId]; return n; });
+        }, 10_000);
       }
-      // Hold the lock through the post-deploy refresh — see the matching
-      // change in createOrchestrator. Otherwise a re-click in the gap
-      // between deploy success and the worker reporting the new app
+      // Hold the re-entrant lock through the post-deploy refresh — see the
+      // matching change in createOrchestrator. Otherwise a re-click in the
+      // gap between deploy success and the worker reporting the new app
       // would slip past both the lock and the placeholder check.
       try { await refreshWorkerInfo(managerId); } catch { /* refresh is best-effort */ }
       mutatingManagersRef.current.delete(managerId);
