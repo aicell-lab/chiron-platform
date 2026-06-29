@@ -336,7 +336,8 @@ async def watch_training(
             continue
         cur_state = (st.get("stage"), st.get("current_training_round"), st.get("is_running"))
         if cur_state != last_state:
-            log(f"   stage={st.get('stage'):<10} round={st.get('current_training_round')} running={st.get('is_running')}")
+            stage_str = str(st.get("stage") or "<none>")
+            log(f"   stage={stage_str:<10} round={st.get('current_training_round')} running={st.get('is_running')}")
             last_state = cur_state
         # Mid-round hook: fire when current_training_round == r and stage == 'fit'.
         for r, fn in hook_mid_round.items():
