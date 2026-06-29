@@ -107,10 +107,33 @@ const TagInput: React.FC<{
   );
 };
 
-const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.3.3';
+const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.6.0';
 
 const BioEngineGuide: React.FC = () => {
-  const { server, isLoggedIn, user } = useHyphaStore();
+  const { client, server, connect, isConnected, isLoggedIn, user } = useHyphaStore();
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  const handleLogin = useCallback(async () => {
+    if (isConnected && server) return;
+    setIsLoggingIn(true);
+    try {
+      const serverUrl = 'https://hypha.aicell.io';
+      const loginToken = await client.login({
+        server_url: serverUrl,
+        login_callback: (ctx: { login_url: string }) => window.open(ctx.login_url),
+      });
+      if (!loginToken) throw new Error('Failed to obtain token');
+      localStorage.setItem('token', loginToken);
+      localStorage.setItem('tokenExpiry', new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString());
+      await connect({ server_url: serverUrl, token: loginToken, method_timeout: 300 });
+    } catch (err) {
+      console.error('Login failed:', err);
+      localStorage.removeItem('token');
+      localStorage.removeItem('tokenExpiry');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  }, [client, connect, isConnected, server]);
 
   const [os, setOS] = useState<OSType>('linux');
   const [containerRuntime, setContainerRuntime] = useState<ContainerRuntimeType>('docker');
@@ -126,10 +149,16 @@ const BioEngineGuide: React.FC = () => {
   const [copiedStep3, setCopiedStep3] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showTroubleshooting, setShowTroubleshooting] = useState(false);
   const [showDataExample, setShowDataExample] = useState(false);
   const [showAnnDataKeys, setShowAnnDataKeys] = useState(false);
-  const [promptCopied, setPromptCopied] = useState(false);
+  // Human / AI Agent toggle at the top of the wizard. Default to Human (the
+  // full manual configurator). Agent mode hands the entire setup over to an
+  // AI agent through a copyable prompt that points the agent at Chiron's
+  // skill, asks for the training data directory or specific files to prep,
+  // and walks the user through the docker compose launch.
+  const [audience, setAudience] = useState<'human' | 'agent'>('human');
+  const [agentPromptCopied, setAgentPromptCopied] = useState(false);
+  const [includeAgentToken, setIncludeAgentToken] = useState(false);
 
   // Manifest builder (Training Data Directory panel)
   const [showManifestForm, setShowManifestForm] = useState(false);
@@ -140,7 +169,6 @@ const BioEngineGuide: React.FC = () => {
   const [manifestTags, setManifestTags] = useState<string[]>([]);
   const [manifestLicense, setManifestLicense] = useState('CC-BY-4.0');
   const [manifestDownloaded, setManifestDownloaded] = useState(false);
-  const [dataPrepPromptCopied, setDataPrepPromptCopied] = useState(false);
   const [timezone, setTimezone] = useState('');
 
   const [token, setToken] = useState('');
@@ -160,16 +188,6 @@ const BioEngineGuide: React.FC = () => {
   const [gpuIndices, setGpuIndices] = useState('');
   const [customImage, setCustomImage] = useState('');
   const [platformOverride, setPlatformOverride] = useState('');
-
-  const troubleshootingDialogRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (showTroubleshooting && troubleshootingDialogRef.current) {
-      setTimeout(() => {
-        troubleshootingDialogRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, 100);
-    }
-  }, [showTroubleshooting]);
 
   useEffect(() => {
     try {
@@ -245,7 +263,7 @@ const BioEngineGuide: React.FC = () => {
   const getSifFilename = () => {
     const img = customImage || DEFAULT_IMAGE;
     const parts = img.split('/');
-    const nameTag = parts[parts.length - 1]; // e.g. "tabula:0.3.3"
+    const nameTag = parts[parts.length - 1]; // e.g. "tabula:0.6.0"
     return nameTag.replace(':', '_') + '.sif'; // "tabula_0.3.3.sif"
   };
 
@@ -462,62 +480,6 @@ ${bin} exec ${gpuFlag}\\
     URL.revokeObjectURL(url);
   };
 
-  const getTroubleshootingPrompt = () => {
-    const runtimeName = containerRuntime.charAt(0).toUpperCase() + containerRuntime.slice(1);
-    const step1Content = isComposeRuntime()
-      ? getDockerComposeContent().replace(token, '<my-token>')
-      : getPullCommand();
-
-    return `# BioEngine Worker Troubleshooting (Chiron Platform)
-
-I'm trying to set up a **BioEngine Worker** for the Chiron federated learning platform for single-cell analysis.
-
-Source code: https://github.com/aicell-lab/bioengine-worker
-
-## My Setup
-
-- **Operating System**: ${os === 'macos' ? 'macOS' : os === 'linux' ? 'Linux' : 'Windows'}
-- **Container Runtime**: ${runtimeName}
-- **CPUs**: ${cpus}
-- **GPUs**: ${gpus}${gpus > 0 && gpuIndices ? ` (indices: ${gpuIndices})` : ''}
-- **Memory**: ${memory} GB${isComposeRuntime() ? `\n- **Shared Memory**: ${shmSize}` : ''}
-${adminUsers.length > 0 ? `- **Admin Users**: ${adminUsers.join(', ')}` : '- **Admin Users**: Default (logged-in user)'}
-${dataDir ? `- **Data Directory**: ${dataDir}` : '- **Data Directory**: Not set (Orchestrator-only)'}
-${customImage ? `- **Custom Image**: ${customImage}` : ''}
-
-## Step 1: ${isComposeRuntime() ? 'docker-compose.yaml' : 'Pull command'}
-
-\`\`\`${isComposeRuntime() ? 'yaml' : 'bash'}
-${step1Content}
-\`\`\`
-
-## Step 2: Environment variables
-
-\`\`\`bash
-${getEnvSetupCommands()}
-\`\`\`
-
-## Step 3: Run command
-
-\`\`\`bash
-${getRunCommand()}
-\`\`\`
-
-## My Issue
-
-[Paste your error message or describe your problem here]`;
-  };
-
-  const copyTroubleshootingPrompt = async () => {
-    try {
-      await navigator.clipboard.writeText(getTroubleshootingPrompt());
-      setPromptCopied(true);
-      setTimeout(() => setPromptCopied(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy prompt:', err);
-    }
-  };
-
   const runtimeSubtitle = () => {
     if (containerRuntime === 'docker') return 'Docker Compose: desktop, workstation, or server';
     if (containerRuntime === 'podman') return 'Podman Compose: rootless alternative to Docker';
@@ -568,31 +530,6 @@ ${getRunCommand()}
     URL.revokeObjectURL(url);
     setManifestDownloaded(true);
     setTimeout(() => setManifestDownloaded(false), 2000);
-  };
-
-  // AI-agent prompt that mirrors the bioimage.io "agent install" pattern:
-  // the prompt points the agent at the static SKILL.md. Per the no-local-
-  // paths rule, we DO NOT bake the user's DATA_DIR or dataset id into the
-  // prompt — the agent asks the user on their machine instead.
-  const getDataPrepPrompt = (): string => {
-    return `Read https://chiron.aicell.io/skills/chiron-platform/references/data-prep.md and help me prepare my single-cell data for Tabula federated training on this Chiron worker.
-
-I have one or more .h5ad or .zarr files I'd like to ingest. Please ask me for:
-  - the path to my worker's data directory
-  - the dataset id (snake_case)
-  - any biological context that should go in the manifest
-
-Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron data-server has picked it up on its next 30-second rescan.`;
-  };
-
-  const copyDataPrepPrompt = async () => {
-    try {
-      await navigator.clipboard.writeText(getDataPrepPrompt());
-      setDataPrepPromptCopied(true);
-      setTimeout(() => setDataPrepPromptCopied(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy prompt:', err);
-    }
   };
 
   const CopyButton: React.FC<{ getText: () => string; copied: boolean; onCopied: () => void }> = ({ getText, copied: isCopied, onCopied }) => (
@@ -652,6 +589,99 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
       {isExpanded && (
         <div className="mt-4 space-y-6">
 
+          {/* ── Audience toggle: Human (full manual configurator) vs AI Agent
+                (single copyable prompt that drives the whole setup via an
+                external AI agent). Default to Human. ── */}
+          <div className="flex justify-center -mb-2">
+            <div className="inline-flex items-center bg-gray-100 rounded-lg p-1" role="tablist" aria-label="Audience">
+              {(['human', 'agent'] as const).map(value => {
+                const selected = audience === value;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    role="tab"
+                    aria-selected={selected}
+                    onClick={() => setAudience(value)}
+                    className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                      selected
+                        ? 'bg-white text-gray-900 shadow-sm'
+                        : 'text-gray-600 hover:text-gray-900'
+                    }`}
+                  >
+                    {value === 'human' ? 'Human' : 'AI Agent'}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* ── AI Agent mode: blue intro + grey copyable prompt with optional
+                admin-token injection. The prompt points the agent at Chiron's
+                SKILL.md and asks it to set up the worker AND prepare any raw
+                .h5ad files the user has, gathering them into a new data
+                directory laid out as one subfolder per dataset. ── */}
+          {audience === 'agent' && (() => {
+            const skillUrl = 'https://chiron.aicell.io/skills/chiron-platform/SKILL.md';
+            const basePrompt =
+              `Read ${skillUrl} and help me set up a Chiron worker on this machine.`;
+            const promptText = (includeAgentToken && token)
+              ? `${basePrompt}\n\nUse this Hypha admin token for my workspace:\n${token}`
+              : basePrompt;
+            return (
+              <div className="space-y-4">
+                <div className="p-5 bg-blue-50 rounded-xl border border-blue-200">
+                  <h4 className="text-base font-semibold text-blue-900 mb-2">Set up your worker with an AI agent</h4>
+                  <p className="text-sm text-blue-800">
+                    Copy the prompt below into your AI agent (Claude Code, Codex, Gemini CLI, and so on). It loads the Chiron skill, which tells the agent to detect your OS, container runtime, and GPU, ask for your training data, prepare any files that need adjustment, and walk you through the worker launch.
+                  </p>
+                </div>
+
+                <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <h5 className="text-sm font-semibold text-gray-800">Set up Chiron Worker</h5>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(promptText);
+                          setAgentPromptCopied(true);
+                          setTimeout(() => setAgentPromptCopied(false), 2000);
+                        } catch (_) { /* ignore */ }
+                      }}
+                      className="flex items-center px-2 py-1 text-xs text-gray-600 bg-white border border-gray-200 rounded hover:bg-gray-100 transition-colors"
+                    >
+                      {agentPromptCopied ? (
+                        <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
+                      ) : (
+                        <><svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy</>
+                      )}
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-700 mb-3">Paste this into your AI agent.</p>
+                  <pre className="bg-white border border-gray-200 rounded p-3 text-xs font-mono text-gray-800 whitespace-pre-wrap break-words">{promptText}</pre>
+                  <label className={`flex items-start mt-3 ${isLoggedIn ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
+                    <input
+                      type="checkbox"
+                      disabled={!isLoggedIn}
+                      checked={includeAgentToken && isLoggedIn}
+                      onChange={(e) => setIncludeAgentToken(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 text-blue-600 border-gray-300 rounded"
+                    />
+                    <span className="ml-2 text-sm text-gray-700">
+                      Include an admin Hypha token for my workspace in the prompt
+                      {!isLoggedIn && <span className="text-gray-500"> (log in to enable)</span>}
+                      {isLoggedIn && isGeneratingToken && <span className="text-gray-500"> (generating token...)</span>}
+                    </span>
+                  </label>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ── Human mode: full manual configurator (Chiron-specific). ── */}
+          {audience === 'human' && (<>
+
           {/* Container runtime required */}
           <div className="p-4 bg-orange-50 rounded-xl border border-orange-200">
             <p className="text-sm font-semibold text-orange-800 mb-1">Container runtime required</p>
@@ -683,7 +713,7 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
               <div className="text-sm text-blue-800 flex-1">
                 <span className="font-medium">Training Data Directory</span>
                 <span className="text-blue-700 text-xs block mt-1">
-                  A <strong>Tabula Trainer</strong> reads single-cell datasets from a directory on the host that the worker mounts. Nothing is copied or imported. Each dataset lives in its own subfolder with one or more <code className="bg-blue-100 px-1 rounded">.h5ad</code> files and a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>. The data&#8209;server auto&#8209;converts <code className="bg-blue-100 px-1 rounded">.h5ad</code> &rarr; <code className="bg-blue-100 px-1 rounded">.zarr</code> on first read, applies the manuscript's QC pipeline (drops cells &lt;&nbsp;250 detected genes and genes detected in &lt;&nbsp;250 cells), discretises every cell into 50 quantile bins, ranks genes by variability, and pre-cuts a trainer-ready <code className="bg-blue-100 px-1 rounded">tabula_binned</code> layer of shape <code className="bg-blue-100 px-1 rounded">(n_qc_cells, 1200)</code>. It rescans every 30&nbsp;seconds.
+                  A <strong>Tabula Trainer</strong> reads single-cell datasets from a directory on the host that the worker mounts. Nothing is copied or imported. Each dataset lives in its own subfolder with one or more <code className="bg-blue-100 px-1 rounded">.h5ad</code> files and a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>. The data&#8209;server auto&#8209;converts <code className="bg-blue-100 px-1 rounded">.h5ad</code> &rarr; <code className="bg-blue-100 px-1 rounded">.zarr</code> on first read, ranks genes by per-dataset over-dispersion to pick the 1,200 most variable as the trainer-ready input, discretises every cell into 50 quantile bins, and pre-cuts a <code className="bg-blue-100 px-1 rounded">tabula_binned</code> layer of shape <code className="bg-blue-100 px-1 rounded">(n_cells, 1200)</code>. It rescans every 30&nbsp;seconds. Cell- and gene-level quality control is left to whatever you applied upstream.
                   <br /><br />
                   An <strong>Orchestrator</strong> needs no data &mdash; leave the field empty and the data&#8209;server is omitted entirely.
                 </span>
@@ -694,7 +724,7 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z" />
                   </svg>
                   <div className="text-xs text-amber-800 leading-snug">
-                    <strong>Heads up:</strong> the data&#8209;server writes QC masks, HVG rank, the value&#8209;binned layer, and a UMAP into every <code className="bg-amber-100 px-1 rounded">.zarr/</code> it discovers. To keep your original file unchanged, ship the <code className="bg-amber-100 px-1 rounded">.h5ad</code>. The <code className="bg-amber-100 px-1 rounded">.h5ad</code> is opened read&#8209;only and the data&#8209;server only ever mutates the sibling <code className="bg-amber-100 px-1 rounded">.zarr/</code> it creates. If you point the worker at a <code className="bg-amber-100 px-1 rounded">.zarr/</code> you consider canonical, back it up first.
+                    <strong>Heads up:</strong> the data&#8209;server writes the HVG rank, the value&#8209;binned layer, and a UMAP into every <code className="bg-amber-100 px-1 rounded">.zarr/</code> it discovers. To keep your original file unchanged, ship the <code className="bg-amber-100 px-1 rounded">.h5ad</code>. The <code className="bg-amber-100 px-1 rounded">.h5ad</code> is opened read&#8209;only and the data&#8209;server only ever mutates the sibling <code className="bg-amber-100 px-1 rounded">.zarr/</code> it creates. If you point the worker at a <code className="bg-amber-100 px-1 rounded">.zarr/</code> you consider canonical, back it up first.
                   </div>
                 </div>
 
@@ -749,7 +779,7 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
                       <tbody className="text-blue-900">
                         <tr className="border-t border-blue-100">
                           <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.X</code></td>
-                          <td className="py-1">Raw integer count matrix <code className="bg-blue-50 px-1 rounded">(n_cells, n_vars)</code>. Source for QC, HVG, binning, UMAP.</td>
+                          <td className="py-1">Raw integer count matrix <code className="bg-blue-50 px-1 rounded">(n_cells, n_vars)</code>. Source for HVG ranking, binning, and UMAP.</td>
                           <td className="py-1 font-medium">Yes</td>
                         </tr>
                         <tr className="border-t border-blue-100">
@@ -759,7 +789,7 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
                         </tr>
                         <tr className="border-t border-blue-100">
                           <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.obs</code>, <code className="bg-blue-50 px-1 rounded">adata.var</code></td>
-                          <td className="py-1">Preserved verbatim. QC and HVG arrays are written alongside.</td>
+                          <td className="py-1">Preserved verbatim. HVG rank and selection arrays are written alongside.</td>
                           <td className="py-1">Optional</td>
                         </tr>
                       </tbody>
@@ -801,10 +831,10 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
                           type="text"
                           value={manifestName}
                           onChange={(e) => setManifestName(e.target.value)}
-                          placeholder="Blood Perturb RNA"
+                          placeholder="Blood-Perturb"
                           className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
-                        <p className="text-[10px] text-gray-500 mt-1">Shown in the Chiron UI.</p>
+                        <p className="text-[10px] text-gray-500 mt-1">Short, Title-cased label shown in the Chiron UI. Use a tissue or one-word descriptor, hyphenate a sub-descriptor when needed (e.g. <code className="bg-gray-100 px-1 rounded">Thymus</code>, <code className="bg-gray-100 px-1 rounded">Blood-Perturb</code>, <code className="bg-gray-100 px-1 rounded">Skin Aging - BLSA</code>).</p>
                       </div>
                     </div>
 
@@ -883,41 +913,6 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
                   </div>
                 )}
 
-                {/* AI-agent affordance — bioimage.io copy-prompt pattern */}
-                <div className="mt-4 p-3 rounded-lg border border-indigo-200 bg-indigo-50/70">
-                  <div className="flex items-start gap-2">
-                    <svg className="w-4 h-4 text-indigo-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                    </svg>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-semibold text-indigo-900">Or hand the data prep to an AI agent</p>
-                      <p className="text-[11px] text-indigo-800 mt-0.5">
-                        Works with Claude Code, Gemini CLI, or any agent that can read a URL. Includes <code className="bg-indigo-100 px-1 rounded">pip</code> requirements and a worked example.
-                      </p>
-                      <div className="mt-2 flex items-stretch gap-2">
-                        <code className="flex-1 min-w-0 px-2 py-1.5 text-[11px] font-mono text-gray-700 bg-white border border-indigo-200 rounded overflow-x-auto whitespace-nowrap">
-                          Read https://chiron.aicell.io/skills/chiron-platform/references/data-prep.md…
-                        </code>
-                        <button
-                          onClick={copyDataPrepPrompt}
-                          className="flex items-center justify-center gap-1 px-2.5 py-1.5 text-[11px] font-medium text-indigo-700 bg-white hover:bg-indigo-100 border border-indigo-200 rounded transition-[transform,background-color] duration-150 ease-out active:scale-[0.97]"
-                        >
-                          {dataPrepPromptCopied ? (
-                            <>
-                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                              Copied
-                            </>
-                          ) : (
-                            <>
-                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                              Copy
-                            </>
-                          )}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
               </div>
             </div>
           </div>
@@ -952,12 +947,33 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
                       <p>Generating your authentication token… or set one manually in <strong>Advanced Options → Authentication Token</strong>.</p>
                     ) : (
                       <>
-                        <p>An authentication token is required to connect the worker to Hypha. Either:</p>
-                        <ol className="list-decimal list-inside space-y-1 ml-2 text-xs">
-                          <li><strong>Log in</strong> to auto-generate a 30-day admin token, or</li>
-                          <li>Set a token manually in <strong>Advanced Options → Authentication Token</strong></li>
-                        </ol>
-                        <p className="text-xs italic mt-1">Manually provided tokens must have <strong>Permission Level: Admin</strong>.</p>
+                        <p>An authentication token is required to connect the worker to Hypha. Either log in to auto-generate a 30-day admin token, or set one manually in <strong>Advanced Options → Authentication Token</strong>.</p>
+                        <div className="mt-3">
+                          <button
+                            type="button"
+                            onClick={handleLogin}
+                            disabled={isLoggingIn}
+                            className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-amber-600 rounded-md hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-1 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                          >
+                            {isLoggingIn ? (
+                              <>
+                                <svg className="animate-spin -ml-0.5 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                                </svg>
+                                Logging in…
+                              </>
+                            ) : (
+                              <>
+                                <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
+                                </svg>
+                                Log in
+                              </>
+                            )}
+                          </button>
+                        </div>
+                        <p className="text-xs italic mt-2">Manually provided tokens must have <strong>Permission Level: Admin</strong>.</p>
                       </>
                     )}
                   </div>
@@ -1333,93 +1349,24 @@ Then help me lay out the folder, write the manifest.yaml, and confirm the Chiron
 
           </div>
 
-          {/* Troubleshooting */}
+          </>)}
+          {/* end human mode */}
+
+          {/* ── GitHub link (visible in both Human and AI Agent modes) ── */}
           <div className="flex justify-center pt-4 border-t border-gray-200">
-            <button
-              onClick={() => setShowTroubleshooting(true)}
-              className="flex items-center px-4 py-2 text-sm text-orange-600 bg-orange-50 border border-orange-200 rounded-lg hover:bg-orange-100 hover:border-orange-300 transition-colors"
+            <a
+              href="https://github.com/aicell-lab/bioengine"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 transition-colors"
             >
-              <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.4 3-.405 1.02.005 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
               </svg>
-              Need Help? Get AI Troubleshooting Prompt
-            </button>
+              <span>aicell-lab/bioengine on GitHub</span>
+            </a>
           </div>
 
-        </div>
-      )}
-
-      {/* Troubleshooting Dialog */}
-      {showTroubleshooting && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div ref={troubleshootingDialogRef} className="bg-white rounded-2xl shadow-lg max-w-4xl w-full max-h-[90vh] flex flex-col">
-            <div className="p-6 border-b border-gray-200 flex justify-between items-center">
-              <div className="flex items-center">
-                <div className="w-10 h-10 bg-gradient-to-r from-orange-500 to-red-500 rounded-xl flex items-center justify-center mr-3">
-                  <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </div>
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-800">AI Troubleshooting Assistant</h3>
-                  <p className="text-sm text-gray-600">Copy this prompt to ChatGPT, Claude, Gemini, or your preferred LLM</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowTroubleshooting(false)}
-                className="text-gray-400 hover:text-gray-600 p-2 rounded-xl hover:bg-gray-100 transition-all"
-                aria-label="Close dialog"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-
-            <div className="flex-1 p-6 overflow-hidden flex flex-col">
-              <div className="mb-4">
-                <div className="flex justify-between items-center mb-2">
-                  <h4 className="text-sm font-medium text-gray-700">Troubleshooting Prompt</h4>
-                  <button
-                    onClick={copyTroubleshootingPrompt}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors flex items-center"
-                  >
-                    {promptCopied ? (
-                      <><svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Copied!</>
-                    ) : (
-                      <><svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>Copy Prompt</>
-                    )}
-                  </button>
-                </div>
-                <p className="text-xs text-gray-500 mb-4">
-                  This prompt includes your current configuration. Add your specific error message or question at the end.
-                </p>
-              </div>
-
-              <div className="flex-1 overflow-auto">
-                <pre className="text-xs text-gray-700 bg-gray-50 p-4 rounded-lg border whitespace-pre-wrap font-mono leading-relaxed">
-                  {getTroubleshootingPrompt()}
-                </pre>
-              </div>
-
-              <div className="p-6 border-t border-gray-200 bg-gray-50 flex justify-between items-center">
-                <div className="text-sm text-gray-600">
-                  <p className="font-medium mb-1">How to use:</p>
-                  <ol className="list-decimal list-inside space-y-1 text-xs">
-                    <li>Copy the prompt above</li>
-                    <li>Paste it into ChatGPT, Claude, or your preferred AI assistant</li>
-                    <li>Add your specific question or error message at the end</li>
-                  </ol>
-                </div>
-                <button
-                  onClick={() => setShowTroubleshooting(false)}
-                  className="px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
         </div>
       )}
     </div>
