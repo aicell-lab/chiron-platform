@@ -281,7 +281,7 @@ const BioEngineGuide: React.FC = () => {
         const authPart = managerAuthorizedUsers.length > 0
           ? `, \\"authorized_users\\": [${managerAuthorizedUsers.map(u => `\\"${u}\\"`).join(', ')}]`
           : '';
-        return `--startup-applications "{\\"artifact_id\\": \\"chiron-platform/chiron-manager\\", \\"application_id\\": \\"chiron-manager\\"${authPart}}"`;
+        return `--startup-applications "{\\"artifact_id\\": \\"chiron-platform/chiron-manager\\", \\"application_id\\": \\"chiron-manager\\", \\"auto_redeploy\\": true${authPart}}"`;
       })(),
       adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
       workspace ? `--workspace "${workspace}"` : '',
@@ -435,7 +435,7 @@ ${bin} pull ${sif} ${image}`;
         const authPart = managerAuthorizedUsers.length > 0
           ? `,"authorized_users":[${managerAuthorizedUsers.map(u => `"${u}"`).join(',')}]`
           : '';
-        return `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"${authPart}}'`;
+        return `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager","auto_redeploy":true${authPart}}'`;
       })(),
       adminUsersStr ? `--admin-users ${adminUsersStr}` : '',
       workspace ? `--workspace "${workspace}"` : '',
