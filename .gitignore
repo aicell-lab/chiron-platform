@@ -2,6 +2,7 @@
 .env
 .svamp
 /resources
+/outputs
 
 # dependencies
 /node_modules
