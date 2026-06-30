@@ -21,6 +21,13 @@ const PublishedBadge: React.FC = () => (
   </span>
 );
 
+const PendingDeletionBadge: React.FC = () => (
+  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">
+    <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+    Pending deletion
+  </span>
+);
+
 interface ModelRowProps {
   artifact: ArtifactRef;
 }
@@ -33,11 +40,15 @@ const ModelRow: React.FC<ModelRowProps> = ({ artifact }) => {
   const alias = artifact.alias || artifact.id.split('/').pop();
   // Status semantics live on `manifest.status` (single source of truth across
   // the Trainer/Orchestrator save_*_weights writers and the ModelDetail
-  // Publish button). Missing status = legacy artifact = treat as published.
+  // Publish/Discard buttons). Missing status = legacy artifact = treat as
+  // published. `request_deletion` = user-side discard request awaiting a
+  // workspace-admin sweep; we still surface it here (greyed out + a Pending
+  // Deletion badge) so the owner can click in and undo it.
   const isInReview = manifest.status === 'in_review';
+  const isPendingDeletion = manifest.status === 'request_deletion';
 
   const card = (
-    <div className="flex items-stretch gap-4 bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden hover:shadow-md hover:border-blue-200 transition-all">
+    <div className={`flex items-stretch gap-4 bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden hover:shadow-md hover:border-blue-200 transition-all ${isPendingDeletion ? 'opacity-70' : ''}`}>
       <div className="w-32 sm:w-44 flex-shrink-0 bg-gray-50 flex items-center justify-center">
         {cover ? (
           <img src={cover} alt={name} className="object-contain w-full h-full p-2" loading="lazy" />
@@ -52,7 +63,7 @@ const ModelRow: React.FC<ModelRowProps> = ({ artifact }) => {
             <p className="text-xs text-gray-400 font-mono truncate" title={artifact.id}>{artifact.id}</p>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
-            {isInReview ? <InReviewBadge /> : <PublishedBadge />}
+            {isPendingDeletion ? <PendingDeletionBadge /> : isInReview ? <InReviewBadge /> : <PublishedBadge />}
           </div>
         </div>
         {description && (
@@ -61,6 +72,11 @@ const ModelRow: React.FC<ModelRowProps> = ({ artifact }) => {
         {isInReview && (
           <div className="mt-auto pt-2">
             <span className="text-xs text-gray-500">Open the model to review and publish it.</span>
+          </div>
+        )}
+        {isPendingDeletion && (
+          <div className="mt-auto pt-2">
+            <span className="text-xs text-gray-500">Awaiting workspace admin removal. Open the model to undo this request.</span>
           </div>
         )}
       </div>
@@ -96,22 +112,24 @@ const MyModels: React.FC = () => {
       });
       const myId = user.id;
       const myEmail = (user as any)?.email as string | undefined;
+      // Include `request_deletion` artifacts so the owner can open them
+      // and undo the request — the chiron-models collection grants `rw+`
+      // (no delete), so a discard click can only edit the manifest, not
+      // remove the artifact, and the user needs a way back from that.
       const items = allItems.filter(a => {
         const m = (a.manifest || {}) as any;
-        // Artifacts the user has discarded are still in the collection
-        // (chiron-models grants `rw+` to all but not `delete`) — hide them
-        // from My Models so a discard click immediately removes the row.
-        if (m.status === 'request_deletion') return false;
         if (m.uploaded_by_user_id && m.uploaded_by_user_id === myId) return true;
         if (myEmail && m.uploaded_by_user_email && m.uploaded_by_user_email === myEmail) return true;
         return false;
       });
-      // Sort: in-review first (so the review action is one click away),
-      // then by name.
+      // Sort: in-review first (one-click review/publish), then published,
+      // then pending-deletion at the bottom (they're awaiting cleanup, not
+      // actionable in the normal flow).
       const sorted = [...items].sort((a, b) => {
-        const aReview = a.manifest?.status === 'in_review';
-        const bReview = b.manifest?.status === 'in_review';
-        if (aReview !== bReview) return aReview ? -1 : 1;
+        const rank = (s?: string) => s === 'in_review' ? 0 : s === 'request_deletion' ? 2 : 1;
+        const ra = rank(a.manifest?.status as string | undefined);
+        const rb = rank(b.manifest?.status as string | undefined);
+        if (ra !== rb) return ra - rb;
         const an = (a.manifest?.name || a.alias || '').toLowerCase();
         const bn = (b.manifest?.name || b.alias || '').toLowerCase();
         return an.localeCompare(bn);

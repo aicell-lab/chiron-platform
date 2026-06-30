@@ -130,13 +130,20 @@ const ModelDetail: React.FC = () => {
     : undefined;
   const isGlobalTransformer = manifest.global_transformer === true;
   // Publish state lives on `manifest.status`:
-  //   • "in_review"  — uploaded from the trainer/orchestrator, hidden
-  //                    from the public Model Hub, awaiting owner review.
-  //   • "published"  — owner clicked Publish; visible on the Hub.
-  //   • undefined    — legacy artifact (predates the field). Treated as
-  //                    published so curated tabula-* models keep showing.
+  //   • "in_review"        — uploaded from the trainer/orchestrator, hidden
+  //                          from the public Model Hub, awaiting owner review.
+  //   • "published"        — owner clicked Publish; visible on the Hub.
+  //   • "request_deletion" — owner clicked Discard. chiron-models grants
+  //                          users rw+ (no delete), so the artifact stays
+  //                          in the collection until a workspace admin
+  //                          sweeps it; meanwhile both the Hub grid and
+  //                          MyModels hide / annotate it.
+  //   • undefined          — legacy artifact (predates the field). Treated
+  //                          as published so curated tabula-* models keep
+  //                          showing.
   const status = (manifest.status as string | undefined) || 'published';
   const isInReview = status === 'in_review';
+  const isPendingDeletion = status === 'request_deletion';
   const userEmail = (user as any)?.email as string | undefined;
   const ownsArtifact = (
     (manifest.uploaded_by_user_id && manifest.uploaded_by_user_id === user?.id) ||
@@ -182,12 +189,18 @@ const ModelDetail: React.FC = () => {
       // The chiron-models collection grants users `rw+` (read + write +
       // create), but NOT `delete` — only the workspace admin can actually
       // remove an artifact + its files. So instead of `artifact_manager.delete`,
-      // flip the manifest status to `request_deletion`. The MyModels and
-      // public Model Hub listings filter these out (same way they filter
-      // `in_review`), so it disappears from the user's view immediately,
-      // and a workspace admin can later sweep up artifacts in that status
-      // with a privileged delete.
-      const newManifest = { ...manifest, status: 'request_deletion' };
+      // flip the manifest status to `request_deletion`. The public Model Hub
+      // grid filters these out; MyModels shows them greyed out with an
+      // "Undo deletion request" affordance so the user can recover.
+      //
+      // Stash the current status under `previous_status` so Undo can put
+      // the artifact back where it came from (in_review vs. published)
+      // instead of guessing.
+      const newManifest = {
+        ...manifest,
+        status: 'request_deletion',
+        previous_status: status,
+      };
       await artifactManager.edit({
         artifact_id: artifactId,
         manifest: newManifest,
@@ -199,6 +212,34 @@ const ModelDetail: React.FC = () => {
       navigate('/my-models');
     } catch (e: any) {
       setDiscardError(e?.message || 'Failed to discard');
+    } finally {
+      setDiscarding(false);
+    }
+  };
+
+  const handleUndoDiscard = async () => {
+    if (!artifactManager || !artifactId) return;
+    setDiscardError(null);
+    setDiscarding(true);
+    try {
+      // Restore the status the artifact had before the discard request.
+      // Falls back to "published" so artifacts whose previous_status was
+      // never recorded (manually flipped, or pre-undo flow) still come
+      // back somewhere sensible. We strip previous_status from the
+      // manifest so a future Discard captures a fresh snapshot.
+      const restored = (manifest.previous_status as string | undefined) || 'published';
+      const { previous_status: _drop, ...rest } = manifest;
+      const newManifest = { ...rest, status: restored };
+      await artifactManager.edit({
+        artifact_id: artifactId,
+        manifest: newManifest,
+        stage: true,
+        _rkwargs: true,
+      });
+      await artifactManager.commit({ artifact_id: artifactId, _rkwargs: true });
+      setArtifact(prev => prev ? ({ ...prev, manifest: newManifest } as ArtifactRef) : prev);
+    } catch (e: any) {
+      setDiscardError(e?.message || 'Failed to undo deletion request');
     } finally {
       setDiscarding(false);
     }
@@ -226,7 +267,12 @@ const ModelDetail: React.FC = () => {
           <div className="flex items-start justify-between gap-4 flex-wrap">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 flex-wrap mb-1">
-                {isInReview ? (
+                {isPendingDeletion ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                    Pending deletion
+                  </span>
+                ) : isInReview ? (
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
                     In review
@@ -240,24 +286,39 @@ const ModelDetail: React.FC = () => {
               </div>
               <h1 className="text-2xl font-semibold text-gray-900">{name}</h1>
             </div>
-            {isInReview && ownsArtifact && (
+            {ownsArtifact && (
               <div className="flex flex-col gap-2 flex-shrink-0">
-                <button
-                  type="button"
-                  onClick={handlePublish}
-                  disabled={publishing || discarding}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.97]"
-                >
-                  {publishing ? <><BiLoaderAlt className="animate-spin" size={14} /> Publishing…</> : 'Publish to Model Hub'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setDiscardError(null); setShowDiscardConfirm(true); }}
-                  disabled={publishing || discarding}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-white border border-red-200 text-red-700 hover:bg-red-50 text-sm font-semibold rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.97]"
-                >
-                  Discard Model
-                </button>
+                {isPendingDeletion ? (
+                  <button
+                    type="button"
+                    onClick={handleUndoDiscard}
+                    disabled={discarding}
+                    className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.97]"
+                  >
+                    {discarding ? <><BiLoaderAlt className="animate-spin" size={14} /> Restoring…</> : 'Undo deletion request'}
+                  </button>
+                ) : (
+                  <>
+                    {isInReview && (
+                      <button
+                        type="button"
+                        onClick={handlePublish}
+                        disabled={publishing || discarding}
+                        className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.97]"
+                      >
+                        {publishing ? <><BiLoaderAlt className="animate-spin" size={14} /> Publishing…</> : 'Publish to Model Hub'}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => { setDiscardError(null); setShowDiscardConfirm(true); }}
+                      disabled={publishing || discarding}
+                      className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-white border border-red-200 text-red-700 hover:bg-red-50 text-sm font-semibold rounded-xl transition-colors disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.97]"
+                    >
+                      Discard Model
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -267,6 +328,11 @@ const ModelDetail: React.FC = () => {
           {isInReview && ownsArtifact && (
             <p className="mt-2 text-xs text-gray-500">
               This model is in review and only visible to you on My Models. Publish it to make it appear in the public Model Hub.
+            </p>
+          )}
+          {isPendingDeletion && ownsArtifact && (
+            <p className="mt-2 text-xs text-gray-500">
+              You requested this model be deleted. It's hidden from the public Model Hub until a workspace admin removes it. Click <span className="font-medium">Undo deletion request</span> to bring it back.
             </p>
           )}
           {publishError && (
@@ -400,8 +466,13 @@ const ModelDetail: React.FC = () => {
               <p>
                 This will mark{' '}
                 <span className="font-mono text-gray-900">{artifactId}</span>{' '}
-                for deletion and remove it from My Models. A workspace admin
-                will permanently delete the artifact and its files later.
+                for deletion. {!isInReview && (
+                  <span className="font-medium text-red-700">
+                    The model is currently published — it will disappear from the public Model Hub immediately.
+                  </span>
+                )} A workspace admin will permanently delete the artifact and
+                its files later; you can undo the request from My Models until
+                then.
               </p>
               <p className="mt-2">Are you sure?</p>
             </div>
