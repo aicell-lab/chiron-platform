@@ -179,28 +179,22 @@ const ModelDetail: React.FC = () => {
     setDiscardError(null);
     setDiscarding(true);
     try {
-      // The orchestrator/trainer write the artifact with create(stage=True)
-      // and the staging flag often resolves immediately on Hypha — so
-      // version="stage" can already be invalid by the time the user clicks
-      // discard. Try the staged-version delete first; if that fails because
-      // there's no staged version, fall back to a recursive delete of the
-      // committed artifact.
-      try {
-        await artifactManager.delete({
-          artifact_id: artifactId,
-          version: 'stage',
-          delete_files: true,
-          recursive: true,
-          _rkwargs: true,
-        });
-      } catch (stageErr: any) {
-        await artifactManager.delete({
-          artifact_id: artifactId,
-          delete_files: true,
-          recursive: true,
-          _rkwargs: true,
-        });
-      }
+      // The chiron-models collection grants users `rw+` (read + write +
+      // create), but NOT `delete` — only the workspace admin can actually
+      // remove an artifact + its files. So instead of `artifact_manager.delete`,
+      // flip the manifest status to `request_deletion`. The MyModels and
+      // public Model Hub listings filter these out (same way they filter
+      // `in_review`), so it disappears from the user's view immediately,
+      // and a workspace admin can later sweep up artifacts in that status
+      // with a privileged delete.
+      const newManifest = { ...manifest, status: 'request_deletion' };
+      await artifactManager.edit({
+        artifact_id: artifactId,
+        manifest: newManifest,
+        stage: true,
+        _rkwargs: true,
+      });
+      await artifactManager.commit({ artifact_id: artifactId, _rkwargs: true });
       setShowDiscardConfirm(false);
       navigate('/my-models');
     } catch (e: any) {
@@ -404,9 +398,10 @@ const ModelDetail: React.FC = () => {
             </div>
             <div className="px-6 py-4 text-sm text-gray-700">
               <p>
-                This will permanently delete{' '}
+                This will mark{' '}
                 <span className="font-mono text-gray-900">{artifactId}</span>{' '}
-                and all of its files from Chiron Models. This cannot be undone.
+                for deletion and remove it from My Models. A workspace admin
+                will permanently delete the artifact and its files later.
               </p>
               <p className="mt-2">Are you sure?</p>
             </div>

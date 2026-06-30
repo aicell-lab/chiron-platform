@@ -98,6 +98,10 @@ const MyModels: React.FC = () => {
       const myEmail = (user as any)?.email as string | undefined;
       const items = allItems.filter(a => {
         const m = (a.manifest || {}) as any;
+        // Artifacts the user has discarded are still in the collection
+        // (chiron-models grants `rw+` to all but not `delete`) — hide them
+        // from My Models so a discard click immediately removes the row.
+        if (m.status === 'request_deletion') return false;
         if (m.uploaded_by_user_id && m.uploaded_by_user_id === myId) return true;
         if (myEmail && m.uploaded_by_user_email && m.uploaded_by_user_email === myEmail) return true;
         return false;

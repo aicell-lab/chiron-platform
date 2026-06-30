@@ -31,10 +31,16 @@ const ModelGrid: React.FC<ModelGridProps> = ({
         limit,
         token: hyphaToken || undefined,
       });
-      // Public Model Hub: hide anything still in the per-user review queue.
+      // Public Model Hub: hide anything still in the per-user review queue,
+      // and anything the uploader has discarded (chiron-models grants `rw+`
+      // not `delete`, so a user-side discard flips the manifest status
+      // instead of removing the artifact — workspace admin sweeps later).
       // Curated/legacy artifacts have no `status` field and are always
       // shown (so the original tabula-* pretrained models keep appearing).
-      const visible = items.filter(a => a.manifest?.status !== 'in_review');
+      const visible = items.filter(a => {
+        const s = a.manifest?.status;
+        return s !== 'in_review' && s !== 'request_deletion';
+      });
       const sorted = visible.sort((a, b) => {
         const an = (a.manifest?.name || a.alias || '').toLowerCase();
         const bn = (b.manifest?.name || b.alias || '').toLowerCase();
