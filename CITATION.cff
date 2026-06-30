@@ -1,0 +1,159 @@
+# Citation File Format — https://citation-file-format.github.io/
+# Schema v1.2.0. Validated against the GitHub CFF renderer.
+cff-version: 1.2.0
+message: >-
+  If you use the Chiron Platform in your research, please cite the
+  Chiron / Tabula paper using the metadata under "preferred-citation".
+title: Chiron Platform
+abstract: >-
+  Chiron Platform is a decentralized training and reuse platform for
+  privacy-preserving single-cell foundation models. It brings the full
+  federated training life cycle into a single browser interface so any
+  institution can join a federation without an infrastructure team.
+  The flagship model trained through Chiron is Tabula, a single-cell
+  foundation model combining tabular learning over genes with
+  federated learning across institutions. Raw single-cell data never
+  leaves the institution that owns it; only shared transformer weights
+  and scalar metrics cross the network.
+type: software
+license: MIT
+repository-code: "https://github.com/aicell-lab/chiron-platform"
+url: "https://chiron.aicell.io"
+keywords:
+  - single-cell
+  - foundation model
+  - federated learning
+  - privacy-preserving machine learning
+  - transcriptomics
+  - scRNA-seq
+# Software-level authors. These are the people who built and maintain
+# the code in this repository. The full Chiron / Tabula paper author
+# list lives under `preferred-citation.authors` below.
+authors:
+  - family-names: Mechtel
+    given-names: Nils
+    affiliation: >-
+      Department of Applied Physics, KTH Royal Institute of Technology,
+      Stockholm, Sweden; Science for Life Laboratory (SciLifeLab),
+      Stockholm, Sweden
+  - family-names: Ouyang
+    given-names: Wei
+    affiliation: >-
+      Department of Applied Physics, KTH Royal Institute of Technology,
+      Stockholm, Sweden; Science for Life Laboratory (SciLifeLab),
+      Stockholm, Sweden
+    email: weio@kth.se
+# Preferred citation — the Chiron / Tabula paper. GitHub's "Cite this
+# repository" button uses this block when present.
+preferred-citation:
+  type: article
+  title: >-
+    Predictive single cell foundation model for gene regulation and
+    aging with privacy-preserving tabular learning
+  year: 2025
+  journal: bioRxiv
+  doi: 10.1101/2025.01.06.631427
+  url: "https://www.biorxiv.org/content/10.1101/2025.01.06.631427v1"
+  notes: >-
+    Jiayuan Ding, Jianhui Lin, Ziyang Miao and Nils Mechtel contributed
+    equally. Corresponding authors: Jiayuan Ding, Min Li, Jiliang Tang,
+    Wei Ouyang, Yuancheng Ryan Lu, Xiaojie Qiu.
+  authors:
+    - family-names: Ding
+      given-names: Jiayuan
+      email: dingjia5@msu.edu
+      affiliation: >-
+        Department of Genetics, Stanford University, Stanford, CA, USA;
+        Department of Computer Science and Engineering, Michigan State
+        University, East Lansing, MI, USA
+    - family-names: Lin
+      given-names: Jianhui
+      affiliation: >-
+        School of Computer Science and Engineering, Central South
+        University, Changsha, China
+    - family-names: Miao
+      given-names: Ziyang
+      affiliation: >-
+        School of Computer Science and Engineering, Central South
+        University, Changsha, China
+    - family-names: Mechtel
+      given-names: Nils
+      affiliation: >-
+        Department of Applied Physics, KTH Royal Institute of Technology,
+        Stockholm, Sweden; Science for Life Laboratory (SciLifeLab),
+        Stockholm, Sweden
+    - family-names: Jiang
+      given-names: Shiyu
+      affiliation: >-
+        Department of Genetics, Stanford University, Stanford, CA, USA
+    - family-names: Wang
+      given-names: Yixin
+      affiliation: >-
+        Department of Bioengineering, Stanford University, Stanford,
+        CA, USA
+    - family-names: Fang
+      given-names: Zhaoyu
+      affiliation: >-
+        School of Computer Science and Engineering, Central South
+        University, Changsha, China
+    - family-names: Martin-Rufino
+      given-names: Jorge D.
+      affiliation: >-
+        Division of Hematology/Oncology, Boston Children's Hospital and
+        Department of Pediatric Oncology, Dana-Farber Cancer Institute,
+        Harvard Medical School, Boston, MA, USA; Broad Institute of MIT
+        and Harvard, Cambridge, MA, USA
+    - family-names: Weng
+      given-names: Chen
+      affiliation: >-
+        Whitehead Institute for Biomedical Research, Cambridge, MA, USA
+    - family-names: Saunders
+      given-names: Reuben
+      affiliation: >-
+        Whitehead Institute for Biomedical Research, Cambridge, MA, USA
+    - family-names: Xu
+      given-names: Weize
+      affiliation: >-
+        Department of Genetics, Stanford University, Stanford, CA, USA
+    - family-names: Weissman
+      given-names: Jonathan S.
+      affiliation: >-
+        Whitehead Institute for Biomedical Research, Cambridge, MA, USA;
+        Department of Biology and Howard Hughes Medical Institute,
+        Massachusetts Institute of Technology, Cambridge, MA, USA;
+        David H. Koch Institute for Integrative Cancer Research,
+        Massachusetts Institute of Technology, Cambridge, MA, USA
+    - family-names: Li
+      given-names: Min
+      email: limin@mail.csu.edu.cn
+      affiliation: >-
+        School of Computer Science and Engineering, Central South
+        University, Changsha, China
+    - family-names: Tang
+      given-names: Jiliang
+      email: tangjili@msu.edu
+      affiliation: >-
+        Department of Computer Science and Engineering, Michigan State
+        University, East Lansing, MI, USA
+    - family-names: Ouyang
+      given-names: Wei
+      email: weio@kth.se
+      affiliation: >-
+        Department of Applied Physics, KTH Royal Institute of Technology,
+        Stockholm, Sweden; Science for Life Laboratory (SciLifeLab),
+        Stockholm, Sweden
+    - family-names: Lu
+      given-names: Yuancheng Ryan
+      email: ylu@wi.mit.edu
+      affiliation: >-
+        Whitehead Institute for Biomedical Research, Cambridge, MA, USA
+    - family-names: Qiu
+      given-names: Xiaojie
+      email: xiaojie@stanford.edu
+      affiliation: >-
+        Department of Genetics, Stanford University, Stanford, CA, USA;
+        Basic Sciences and Engineering Initiative, Betty Irene Moore
+        Children's Heart Center, Lucile Packard Children's Hospital,
+        Stanford, CA, USA; Department of Computer Science, Stanford
+        University, Stanford, CA, USA; Stanford Cardiovascular Institute,
+        Stanford University, Stanford, CA, USA
