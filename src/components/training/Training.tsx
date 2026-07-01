@@ -2765,6 +2765,16 @@ const Training: React.FC = () => {
   const lastActiveAtRef = useRef<Map<string, number>>(new Map());
 
   const mapWorkersWithActive = useMemo<MapWorker[]>(() => {
+    if (currentStep === 1) {
+      // Setup Workers is a "who's out there" view. Even if a training run
+      // is still active in the background (isTraining might be true while
+      // the user has stepped back to discover more workers), don't decorate
+      // step-1 pins with the fit / evaluate / aggregation pulse — nothing
+      // on this screen frames those pins as participants in a session, and
+      // the animation only confuses new operators exploring the map.
+      lastActiveAtRef.current.clear();
+      return mapWorkers;
+    }
     if (!isTraining || !trainingStatus?.stage) {
       // Not in a training session — clear stale grace records so the next
       // session starts fresh.
@@ -2804,7 +2814,7 @@ const Training: React.FC = () => {
       }
     });
     return mapWorkers.map(w => activeIds.has(w.id) ? { ...w, active: true } : w);
-  }, [mapWorkers, isTraining, trainingStatus, selectedOrchestrator, orchestrators, serviceToManagerId]);
+  }, [mapWorkers, isTraining, trainingStatus, selectedOrchestrator, orchestrators, serviceToManagerId, currentStep]);
 
   // Connection lines: selected orchestrator ↔ registered trainers that have already participated.
   // Pending-add trainers (registered but not yet active) are shown on the map without a connection.
