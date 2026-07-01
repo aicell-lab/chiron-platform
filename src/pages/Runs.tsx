@@ -67,10 +67,19 @@ interface RunArtifact {
     published_global_weights: Array<{ artifact_id: string; round: number; description?: string; published_at: string }>;
     saved_trainer_models: Record<string, any>;
   };
-  // Single binary the UI cares about: 'continuable' (orchestrator alive AND
-  // its current run_id matches our manifest.run_id) or 'completed'
-  // (everything else — orch unreachable, reset, terminal status, etc).
-  liveStatus?: 'continuable' | 'completed';
+  // Three-way status the UI cares about:
+  //   'running'     — orchestrator alive, run_id matches, and its training
+  //                   loop is currently active. Renders a View button that
+  //                   deep-links to /training?step=train so the user can
+  //                   watch live progress on the Train tab.
+  //   'continuable' — orchestrator alive, run_id matches, but the training
+  //                   loop is idle. Renders a Continue button that deep-links
+  //                   to /training?step=apps so the user can adjust trainers
+  //                   before starting more rounds.
+  //   'completed'   — orchestrator unreachable, reset (run_id rotated), or
+  //                   otherwise no longer resumable. Renders the Completed
+  //                   badge and no navigation button.
+  liveStatus?: 'running' | 'continuable' | 'completed';
 }
 
 // Worker name + geo location, resolved on demand from the BioEngine worker
@@ -194,13 +203,14 @@ interface RunCardProps {
 const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInfoMap }) => {
   const [open, setOpen] = useState(defaultOpen ?? false);
   const m = run.manifest;
-  // 'continuable' = orchestrator alive AND its run_id matches our manifest.run_id
-  //                  (the user can resume from where this run left off — fresh
-  //                   training rounds will append into THIS run artifact).
-  // 'completed'   = orchestrator unreachable OR has been reset (run_id rotated)
-  //                  OR the artifact's own status was already terminal at list time.
+  // See RunArtifact.liveStatus for the tri-state semantics.
+  //   'running'     → View button, deep-links to /training?step=train.
+  //   'continuable' → Continue button, deep-links to /training?step=apps.
+  //   'completed'   → Completed badge, no navigation.
   const status = run.liveStatus || 'completed';
+  const running = status === 'running';
   const continuable = status === 'continuable';
+  const isCompleted = status === 'completed';
   const completedRounds = m.rounds?.length ?? 0;
   const trainerSvcIds = useMemo(() => Object.keys(m.trainers ?? {}), [m.trainers]);
   const numTrainers = trainerSvcIds.length;
@@ -241,7 +251,13 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <p className="text-sm font-semibold text-gray-900 truncate">{m.name}</p>
-            {!continuable && <CompletedBadge />}
+            {running && (
+              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+                Running
+              </span>
+            )}
+            {isCompleted && <CompletedBadge />}
           </div>
           <p className="text-xs text-gray-400 mt-0.5">
             {formatTs(m.started_at)} · {completedRounds} round{completedRounds !== 1 ? 's' : ''} completed · {numTrainers} trainer{numTrainers !== 1 ? 's' : ''}
@@ -261,21 +277,22 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
           {trainLosses.length > 0 && <LossSparkline losses={trainLosses} stroke="#3b82f6" />}
           {valLosses.length > 0 && <LossSparkline losses={valLosses} stroke="#10b981" />}
         </div>
-        {continuable && (() => {
-          // Continue button: deep-link to /#/training with the orchestrator
-          // pre-selected and the wizard jumped to step 2 ("Select Apps") so
-          // the user can adjust trainers and start more rounds. Without these
-          // params the page lands on step 1 and the operator has to click
-          // through to find their own session again.
+        {(running || continuable) && (() => {
+          // Deep-link to /#/training with the orchestrator pre-selected.
+          //   running     → step=train so the user watches live loss curves.
+          //   continuable → step=apps so the user can adjust trainers first
+          //                 before hitting Start Training for another round.
           const orchSvcId = m.orchestrator_service_id;
-          const to = `/training?orchestrator_id=${encodeURIComponent(orchSvcId)}&step=apps`;
+          const stepParam = running ? 'train' : 'apps';
+          const to = `/training?orchestrator_id=${encodeURIComponent(orchSvcId)}&step=${stepParam}`;
+          const label = running ? 'View' : 'Continue';
           return (
             <Link
               to={to}
               onClick={e => e.stopPropagation()}
               className="flex items-center gap-1 px-3 py-1.5 text-white text-xs font-semibold rounded-lg transition-colors flex-shrink-0 active:scale-[0.97] bg-blue-600 hover:bg-blue-700"
             >
-              <FaExternalLinkAlt size={10} /> Continue
+              <FaExternalLinkAlt size={10} /> {label}
             </Link>
           );
         })()}
@@ -537,12 +554,13 @@ const Runs: React.FC = () => {
         return tb.localeCompare(ta);
       });
 
-      // For every run, ping its orchestrator to decide whether it's still
-      // continuable (orchestrator service reachable AND its current run_id
-      // matches the manifest.run_id of THIS run) or terminally done. We do
-      // not differentiate "completed" / "stopped" / "failed" / "running" —
-      // the only distinction the UI surfaces is whether the user can hit
-      // Continue to start more rounds on the same run artifact.
+      // For every run, ping its orchestrator to decide which of the three
+      // liveStatus states applies:
+      //   - orch unreachable OR run_id mismatch      → 'completed'
+      //   - run_id matches AND status.is_running     → 'running'
+      //   - run_id matches AND !status.is_running    → 'continuable'
+      // The three states pick the header affordance: Completed badge, View
+      // button (→ step=train), Continue button (→ step=apps) respectively.
       const resolved = await Promise.all(sorted.map(async (run: any): Promise<RunArtifact> => {
         const m = run.manifest ?? {};
         if (!m.orchestrator_service_id) {
@@ -557,7 +575,7 @@ const Runs: React.FC = () => {
           if (!m.run_id || !orchRunId || m.run_id !== orchRunId) {
             return { ...run, liveStatus: 'completed' };
           }
-          return { ...run, liveStatus: 'continuable' };
+          return { ...run, liveStatus: status?.is_running ? 'running' : 'continuable' };
         } catch {
           // Orchestrator service unreachable — treat as completed (the user
           // would need to redeploy the orchestrator to continue, and that
@@ -602,7 +620,7 @@ const Runs: React.FC = () => {
           if (!m.run_id || !orchRunId || m.run_id !== orchRunId) {
             return { id: run.id, liveStatus: 'completed' as const };
           }
-          return { id: run.id, liveStatus: 'continuable' as const };
+          return { id: run.id, liveStatus: (status?.is_running ? 'running' : 'continuable') as 'running' | 'continuable' };
         } catch {
           return { id: run.id, liveStatus: 'completed' as const };
         }

@@ -48,17 +48,13 @@ pip install "scanpy>=1.10"
 ## What lives on disk
 
 ```
-<DATA_DIR>/                 ← the path the worker mounts as /data
-├── blood/                  ← one folder per dataset / tissue / cohort
-│   ├── manifest.yaml       ← required
-│   ├── healthy_donors.h5ad ← user-provided
-│   └── disease_cohort.h5ad ← optional, multiple .h5ads in one folder are OK
-├── liver/
-│   ├── manifest.yaml
-│   └── liver_atlas.h5ad
-└── thymus/
-    ├── manifest.yaml
-    └── thymus_atlas.zarr/  ← already-converted zarr also works
+/path/to/data/
+├── thymus/
+│   ├── thymus_atlas.h5ad   ← .h5ad auto converts to .zarr
+│   └── manifest.yaml       ← describes the thymus dataset
+└── blood/
+    ├── pbmc_10k.zarr/      ← already-converted zarr is fine too
+    └── manifest.yaml       ← describes the blood dataset
 ```
 
 A folder is "discovered" by the data-server only if it contains a `manifest.yaml`. The data-server runs `python -m tabula.datasets --data-dir /data` and rescans every 30 seconds.

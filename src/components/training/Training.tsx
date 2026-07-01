@@ -1760,13 +1760,14 @@ const Training: React.FC = () => {
     if (!orchestrator) return;
 
     if (orchestrator.isBusy) {
-      showConfirmDialog(
-        'Delete Busy Orchestrator',
-        'This orchestrator is currently running a training session.\n\nDeleting it will abort the session and may leave trainers in an inconsistent state. Are you sure?',
-        async () => { await performRemoveOrchestrator(managerId, appId, true); },
-        true,
-        'Delete'
-      );
+      // Match the busy-trainer branch below — outright refuse instead of
+      // asking for confirmation. A running orchestrator holds partial round
+      // state that only stop_training / request_stop_after_current_round
+      // can clean up cleanly; a forced delete leaves the paired trainers
+      // in an inconsistent state and the run artifact orphaned.
+      setErrorPopupMessage('Cannot Delete Orchestrator');
+      setErrorPopupDetails('Stop training first.');
+      setShowErrorPopup(true);
       return;
     }
 
