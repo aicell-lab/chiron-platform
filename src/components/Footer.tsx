@@ -4,19 +4,19 @@ import { BiCube } from 'react-icons/bi';
 const footerLinks = [
   {
     label: "View source code on GitHub",
-    href: "https://github.com/aicell-io/chiron-platform",
+    href: "https://github.com/aicell-lab/chiron-platform",
     icon: "/img/github.png",
     caption: "Source Code"
   },
   {
     label: "Contact the development team",
-    href: "mailto:wei.ouyang@scilifelab.se",
+    href: "mailto:nils.mechtel@scilifelab.se",
     icon: "/img/contact.png",
     caption: "Contact Us"
   },
   {
     label: "Report issues or request features",
-    href: "https://github.com/aicell-io/chiron-platform/issues",
+    href: "https://github.com/aicell-lab/chiron-platform/issues",
     icon: "/img/feedback-icon.png",
     caption: "Feedback"
   }
