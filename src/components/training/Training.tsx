@@ -834,15 +834,16 @@ const Training: React.FC = () => {
 
   // Step navigation
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
-  useEffect(() => { window.scrollTo({ top: 0, behavior: 'smooth' }); }, [currentStep]);
   // Keep the URL's `?step=` param in sync with `currentStep` so each tab has
   // its own shareable URL. Uses replace (not push) so tab-switching does not
   // pollute the browser history — Back should return to the previous page.
   // Skipped on the initial mount by the mount-time snapshot below.
 
-  // Scroll target used by Start Training. When the user launches a run we
-  // want to hide the "Federated Training" title + subtitle + 3-step navigator
-  // and land the top of the flex container (Federation Map + Training Running
+  // Scroll target used by Start Training AND every time the user lands on
+  // the Train step. When the run starts (or a Runs-page View deep-link
+  // opens step=train, or the user clicks step 3 in the wizard) we want to
+  // hide the "Federated Training" title + subtitle + 3-step navigator and
+  // land the top of the flex container (Federation Map + Training Running
   // box) just below the sticky navbar (h-16 = 64 px).
   const mainContentRef = useRef<HTMLDivElement>(null);
   const scrollMainContentToTop = useCallback(() => {
@@ -853,6 +854,25 @@ const Training: React.FC = () => {
     const y = el.getBoundingClientRect().top + window.scrollY - NAVBAR_HEIGHT - BREATHING;
     window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
   }, []);
+
+  // Scroll behaviour when the step changes:
+  //   Train step (3) → targeted scroll to mainContentRef so the tabs +
+  //     headline + 3-step navigator disappear off-screen and the map +
+  //     Training Running / Start Training header land right under the
+  //     navbar. Covers both wizard navigation (Select Apps → Train) and
+  //     Runs-page deep-links (`?step=train` from a View button).
+  //   Setup Workers (1) / Select Apps (2) → keep the historical "scroll
+  //     to the very top" so the "Federated Training" headline stays
+  //     visible as a landing cue.
+  // Deferred with requestAnimationFrame so the ref's rect reflects the
+  // freshly-mounted step-3 content before we compute the scroll offset.
+  useEffect(() => {
+    if (currentStep === 3) {
+      requestAnimationFrame(() => scrollMainContentToTop());
+    } else {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [currentStep, scrollMainContentToTop]);
 
   // ── URL state: ?orchestrator_id=<websocket-service-id> ────────────────────
   // Lets the user share / bookmark a training session and survive page
