@@ -835,6 +835,24 @@ const Training: React.FC = () => {
   // Step navigation
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
   useEffect(() => { window.scrollTo({ top: 0, behavior: 'smooth' }); }, [currentStep]);
+  // Keep the URL's `?step=` param in sync with `currentStep` so each tab has
+  // its own shareable URL. Uses replace (not push) so tab-switching does not
+  // pollute the browser history — Back should return to the previous page.
+  // Skipped on the initial mount by the mount-time snapshot below.
+
+  // Scroll target used by Start Training. When the user launches a run we
+  // want to hide the "Federated Training" title + subtitle + 3-step navigator
+  // and land the top of the flex container (Federation Map + Training Running
+  // box) just below the sticky navbar (h-16 = 64 px).
+  const mainContentRef = useRef<HTMLDivElement>(null);
+  const scrollMainContentToTop = useCallback(() => {
+    const el = mainContentRef.current;
+    if (!el) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+    const NAVBAR_HEIGHT = 64;   // Navbar.tsx sits sticky top-0 with h-16
+    const BREATHING = 8;        // small gap so the top isn't flush against the bar
+    const y = el.getBoundingClientRect().top + window.scrollY - NAVBAR_HEIGHT - BREATHING;
+    window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
+  }, []);
 
   // ── URL state: ?orchestrator_id=<websocket-service-id> ────────────────────
   // Lets the user share / bookmark a training session and survive page
@@ -848,19 +866,30 @@ const Training: React.FC = () => {
     const q = location.search.startsWith('?') ? location.search.slice(1) : location.search;
     return new URLSearchParams(q).get('orchestrator_id');
   }, [location.search]);
-  // Optional ?step= param (numeric 1-3 or named workers/apps/train) lets
-  // callers like the runs page deep-link straight to step 3 ("Continue
-  // session"). Without it we default to step 2 once the URL-selected
-  // orchestrator is found, which matches the historical behaviour.
+  // ?step= URL param — bidirectional sync with currentStep.
+  //   Canonical names: workers | apps | train (also written back to the URL).
+  //   Aliases accepted on read: setup ≡ workers, select ≡ apps, plus 1|2|3.
+  // The Runs page deep-links to ?step=apps for "Continue" (jumps to Select
+  // Apps so the user can adjust trainers before starting more rounds). A
+  // future "View" button on a completed run would land at ?step=train to
+  // show the run's loss curves and Save Weights panel directly.
+  const STEP_NAMES: Record<1 | 2 | 3, 'workers' | 'apps' | 'train'> = {
+    1: 'workers', 2: 'apps', 3: 'train',
+  };
+  const STEP_ALIASES: Record<string, 1 | 2 | 3> = {
+    workers: 1, setup: 1,
+    apps: 2, select: 2,
+    train: 3,
+  };
   const urlStep = useMemo(() => {
     const q = location.search.startsWith('?') ? location.search.slice(1) : location.search;
     const raw = new URLSearchParams(q).get('step');
     if (!raw) return null;
-    const named: Record<string, 1 | 2 | 3> = { workers: 1, apps: 2, train: 3 };
-    if (raw in named) return named[raw];
+    if (raw in STEP_ALIASES) return STEP_ALIASES[raw];
     const n = parseInt(raw, 10);
     if (n === 1 || n === 2 || n === 3) return n as 1 | 2 | 3;
     return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search]);
   // Snapshot the URL's orchestrator_id at mount time. The user can clear the
   // URL or deselect mid-session; we only want to auto-apply the *initial*
@@ -920,6 +949,25 @@ const Training: React.FC = () => {
       { replace: true },
     );
   }, [selectedOrchestrator, orchestrators, location.pathname, location.search, navigate]);
+
+  // Keep ?step=<workers|apps|train> in sync with currentStep so each tab is
+  // shareable. Uses replace (not push) so tab-switching doesn't spam browser
+  // history — Back still returns to the previous page. Ignores the initial
+  // mount: the URL is the source of truth for the first render (see the
+  // urlStep + initialUrlStepRef reader above), and this effect only writes
+  // back when the user actively moves between tabs.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search.startsWith('?') ? location.search.slice(1) : location.search);
+    const desired = STEP_NAMES[currentStep];
+    if (params.get('step') === desired) return;
+    params.set('step', desired);
+    const newSearch = params.toString();
+    navigate(
+      { pathname: location.pathname, search: newSearch ? `?${newSearch}` : '' },
+      { replace: true },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep]);
 
   const [highlightedWorkerIds, setHighlightedWorkerIds] = useState<string[]>([]);
   useEffect(() => {
@@ -2291,7 +2339,10 @@ const Training: React.FC = () => {
       const launchedFrom = selectedOrchestrator!;
       setIsPreparingTraining(false); setIsTraining(true); setTrainingResumed(false); setTrainingOrchestratorId(launchedFrom); setTrainingConfigCollapsed(true);
       setParticipatedTrainerIds(new Set());
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      // Land the top of the flex container (Federation Map + "Training Running"
+      // box) just under the navbar. Rendering hasn't flushed yet, so defer
+      // a beat so the ref's rect reflects the collapsed config panel.
+      requestAnimationFrame(() => scrollMainContentToTop());
       setSavedItems({});
       setSaveStatuses({});
       const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout };
@@ -3004,7 +3055,7 @@ const Training: React.FC = () => {
       </div>
 
       {/* Main content: map left + step content right */}
-      <div className="flex gap-6 items-start">
+      <div ref={mainContentRef} className="flex gap-6 items-start">
         {/* Left: World Map */}
         <div className="w-72 xl:w-[360px] flex-shrink-0 space-y-4 sticky top-6">
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
@@ -3012,7 +3063,11 @@ const Training: React.FC = () => {
               <span className="text-sm font-semibold text-gray-700">Federation Map</span>
               <span className="ml-auto text-xs text-gray-400">{mapWorkers.length} worker{mapWorkers.length !== 1 ? 's' : ''}</span>
             </div>
-            <FederatedWorldMap workers={mapWorkersWithActive} connections={mapConnections} style={{ height: 260, width: '100%' }} onSelect={setHighlightedWorkerIds} />
+            {/* Setup Workers step just discovers workers — no orchestrator is
+                selected yet, so drawing connections between pins would only
+                suggest a federation that doesn't exist. Hide them until the
+                user reaches Select Apps / Train. */}
+            <FederatedWorldMap workers={mapWorkersWithActive} connections={currentStep === 1 ? [] : mapConnections} style={{ height: 260, width: '100%' }} onSelect={setHighlightedWorkerIds} />
             <div className="px-4 py-3 border-t border-gray-50">
               <MapLegend mode={currentStep >= 2 ? 'select' : 'setup'} />
             </div>
@@ -3497,12 +3552,16 @@ const Training: React.FC = () => {
             <div className="space-y-4">
               {/* Config + Controls */}
               <div className={`rounded-2xl border shadow-sm transition-colors ${isActivelyTraining ? 'bg-blue-50 border-blue-200' : 'bg-white border-emerald-200'}`}>
-                {/* Header — always visible, acts as the primary CTA */}
-                <button
-                  onClick={() => setTrainingConfigCollapsed(c => !c)}
-                  className="w-full flex items-center justify-between px-5 py-4 text-left group"
-                >
-                  <div className="flex items-center gap-3">
+                {/* Header row — title + inline action buttons (Stop After Round,
+                    Stop Now, Clear Training History) + collapse chevron. Was
+                    previously a big <button> wrapping everything, split so the
+                    action buttons can be nested (HTML forbids nested <button>). */}
+                <div className="w-full flex items-center gap-3 px-5 py-4">
+                  <button
+                    type="button"
+                    onClick={() => setTrainingConfigCollapsed(c => !c)}
+                    className="flex items-center gap-3 flex-1 min-w-0 text-left group"
+                  >
                     {isActivelyTraining ? (
                       <div className="w-7 h-7 bg-blue-500 rounded-lg flex items-center justify-center flex-shrink-0">
                         <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
@@ -3512,7 +3571,7 @@ const Training: React.FC = () => {
                         <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
                       </div>
                     )}
-                    <div>
+                    <div className="min-w-0">
                       <p className={`font-semibold text-sm leading-tight ${isActivelyTraining ? 'text-blue-900' : 'text-gray-900'}`}>
                         {isActivelyTraining ? 'Training Running' : 'Start Training'}
                       </p>
@@ -3520,11 +3579,67 @@ const Training: React.FC = () => {
                         {trainingConfigSummary.numRounds} round{trainingConfigSummary.numRounds !== 1 ? 's' : ''} · {trainingConfigSummary.perRoundTimeoutMinutes} min timeout
                       </p>
                     </div>
+                  </button>
+                  {/* Inline actions — visible whether the panel is collapsed
+                      or not. Stop* only render during an active run; Clear
+                      History is always in the DOM but disabled when there's
+                      nothing to clear. */}
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {isActivelyTraining && (() => {
+                      const stopPending = !!(trainingStatus && (trainingStatus as any).stop_after_current_round);
+                      return (
+                        <>
+                          <button
+                            type="button"
+                            onClick={requestGracefulStop}
+                            disabled={isRequestingGracefulStop || stopPending || isStoppingTraining}
+                            title="Finish the round in flight, then exit without starting any more rounds"
+                            className="flex items-center gap-2 px-4 py-2 bg-amber-500 text-white text-sm font-semibold rounded-xl hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                          >
+                            {stopPending
+                              ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping after this round…</>
+                              : isRequestingGracefulStop
+                                ? <><BiLoaderAlt className="animate-spin" size={14} /> Scheduling…</>
+                                : <><FaStop size={12} /> Stop After Round</>}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={stopTraining}
+                            disabled={isStoppingTraining}
+                            title="Cancel the round in flight immediately — trainers return partial weights and the run is marked stopped"
+                            className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                          >
+                            {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping…</> : <><FaStop size={12} /> Stop Now</>}
+                          </button>
+                        </>
+                      );
+                    })()}
+                    <button
+                      type="button"
+                      onClick={() => showConfirmDialog(
+                        'Clear Training History',
+                        'This will permanently delete all training history (losses, round data) stored in the orchestrator. You will need to start a new training run from scratch.\n\nAre you sure?',
+                        resetTrainingState,
+                        true
+                      )}
+                      disabled={isActivelyTraining || !(trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0))}
+                      title="Clear the training history stored in the orchestrator so you can start a fresh training run"
+                      className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border rounded-xl transition-all ${resetStateSuccess ? 'text-emerald-700 border-emerald-300 bg-emerald-50' : 'text-gray-600 border-gray-200 hover:bg-gray-50'} disabled:opacity-40 disabled:cursor-not-allowed`}
+                    >
+                      {resetStateSuccess ? <><FaCheckCircle size={12} /> History Cleared</> : <><FaTrash size={12} /> Clear Training History</>}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTrainingConfigCollapsed(c => !c)}
+                      aria-label={trainingConfigCollapsed ? 'Expand training configuration' : 'Collapse training configuration'}
+                      className="p-1 text-gray-400 hover:text-gray-600 transition-colors"
+                    >
+                      <svg className={`w-4 h-4 transition-transform duration-200 ${trainingConfigCollapsed ? '-rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
                   </div>
-                  <svg className={`w-4 h-4 text-gray-400 transition-transform duration-200 flex-shrink-0 ${trainingConfigCollapsed ? '-rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
+                </div>
 
                 {/* Expanded body */}
                 {!trainingConfigCollapsed && (
@@ -3544,50 +3659,6 @@ const Training: React.FC = () => {
                     </div>
                   </div>
                 )}
-
-                {/* Always-visible action strip */}
-                <div className={`px-5 py-3 flex items-center gap-3 ${trainingConfigCollapsed ? '' : 'border-t border-gray-100'}`}>
-                  {isActivelyTraining && (() => {
-                    const stopPending = !!(trainingStatus && (trainingStatus as any).stop_after_current_round);
-                    return (
-                      <>
-                        <button
-                          onClick={requestGracefulStop}
-                          disabled={isRequestingGracefulStop || stopPending || isStoppingTraining}
-                          title="Finish the round in flight, then exit without starting any more rounds"
-                          className="flex items-center gap-2 px-4 py-2 bg-amber-500 text-white text-sm font-semibold rounded-xl hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                        >
-                          {stopPending
-                            ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping after this round…</>
-                            : isRequestingGracefulStop
-                              ? <><BiLoaderAlt className="animate-spin" size={14} /> Scheduling…</>
-                              : <><FaStop size={12} /> Stop After Round</>}
-                        </button>
-                        <button
-                          onClick={stopTraining}
-                          disabled={isStoppingTraining}
-                          title="Cancel the round in flight immediately — trainers return partial weights and the run is marked stopped"
-                          className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white text-sm font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                        >
-                          {isStoppingTraining ? <><BiLoaderAlt className="animate-spin" size={14} /> Stopping…</> : <><FaStop size={12} /> Stop Now</>}
-                        </button>
-                      </>
-                    );
-                  })()}
-                  <button
-                    onClick={() => showConfirmDialog(
-                      'Clear Training History',
-                      'This will permanently delete all training history (losses, round data) stored in the orchestrator. You will need to start a new training run from scratch.\n\nAre you sure?',
-                      resetTrainingState,
-                      true
-                    )}
-                    disabled={isActivelyTraining || !(trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0))}
-                    title="Clear the training history stored in the orchestrator so you can start a fresh training run"
-                    className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border rounded-xl transition-all ${resetStateSuccess ? 'text-emerald-700 border-emerald-300 bg-emerald-50' : 'text-gray-600 border-gray-200 hover:bg-gray-50'} disabled:opacity-40 disabled:cursor-not-allowed`}
-                  >
-                    {resetStateSuccess ? <><FaCheckCircle size={12} /> History Cleared</> : <><FaTrash size={12} /> Clear Training History</>}
-                  </button>
-                </div>
               </div>
 
               {/* Training Status */}
