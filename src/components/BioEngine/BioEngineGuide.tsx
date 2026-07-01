@@ -741,15 +741,12 @@ ${bin} exec ${gpuFlag}\\
                 {showDataExample && (
                   <div className="mt-3 bg-gray-900 rounded-lg p-3">
                     <pre className="text-green-400 text-xs font-mono overflow-x-auto whitespace-pre">{`/path/to/data/
-├── aging/
-│   ├── blsa_fibroblasts.h5ad
-│   └── manifest.yaml         ← describes this dataset
-├── blood/
-│   ├── pbmc_10k.zarr/        ← already-converted zarr is fine too
-│   └── manifest.yaml
-└── thymus/
-    ├── thymus_atlas.zarr/    ← .h5ad or .zarr, your choice
-    └── manifest.yaml`}</pre>
+├── thymus/
+│   ├── thymus_atlas.h5ad   ← .h5ad auto converts to .zarr
+│   └── manifest.yaml       ← describes the thymus dataset
+└── blood/
+    ├── pbmc_10k.zarr/      ← already-converted zarr is fine too
+    └── manifest.yaml       ← describes the blood dataset`}</pre>
                   </div>
                 )}
 
