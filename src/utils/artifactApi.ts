@@ -76,7 +76,17 @@ export async function listArtifactChildren(
   }
   const headers: Record<string, string> = {};
   if (opts.token) headers['Authorization'] = `Bearer ${opts.token}`;
-  const res = await fetch(url.toString(), { headers });
+  // Force a fresh fetch every call. Without this, the Models / MyModels
+  // page can return a stale snapshot of a child's manifest after the
+  // owner edits it (e.g. Publish or Discard) — the children endpoint
+  // sits behind both the browser HTTP cache and the Hypha gateway CDN,
+  // so the user sees an old manifest.status while the per-artifact read
+  // endpoint already returns the new one. `cache: 'no-store'` skips
+  // the browser cache; the timestamp query param defeats any CDN /
+  // service-worker layer that ignores headers.
+  const sep = url.search ? '&' : '?';
+  const bustUrl = `${url.toString()}${sep}_=${Date.now()}`;
+  const res = await fetch(bustUrl, { headers, cache: 'no-store' });
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} listing ${parentId}/children: ${await res.text()}`);
   }
@@ -96,7 +106,11 @@ export async function readArtifact(artifactId: string, token?: string): Promise<
   const alias = rest.join('/');
   const headers: Record<string, string> = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${HYPHA_BASE}/${workspace}/artifacts/${alias}`, { headers });
+  // Match listArtifactChildren — same cache-bust applies so the detail
+  // page always reflects the latest committed manifest after an Edit
+  // round-trip (Publish, Discard, Undo).
+  const url = `${HYPHA_BASE}/${workspace}/artifacts/${alias}?_=${Date.now()}`;
+  const res = await fetch(url, { headers, cache: 'no-store' });
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} reading ${artifactId}: ${await res.text()}`);
   }
