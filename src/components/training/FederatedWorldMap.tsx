@@ -40,7 +40,14 @@ const ROLE_COLORS: Record<MapWorkerRole, string> = {
 };
 
 const ROLE_LABELS: Record<MapWorkerRole, string> = {
-  available:    'Available',
+  // `available` used to mean "worker discovered, user hasn't clicked
+  // Connect yet". Now that the Setup Workers table auto-polls every
+  // known manager, the only way a worker sits in this state is a
+  // manager we successfully reached before but can't reach right now —
+  // matching the greyed-out row in the setup table. Rename the label
+  // to reflect that; the internal enum key stays `available` so no
+  // downstream call sites need to change.
+  available:    'Connection lost',
   connected:    'Connected',
   orchestrator: 'Orchestrator',
   trainer:      'Trainer',
@@ -50,7 +57,10 @@ const ROLE_LABELS: Record<MapWorkerRole, string> = {
 export type MapLegendMode = 'setup' | 'select';
 
 const LEGEND_ROLES: Record<MapLegendMode, MapWorkerRole[]> = {
-  setup:  ['available', 'connected'],
+  // Connected first — that's the state we want the operator to expect
+  // and the one they'll see most of the time. Connection-lost second,
+  // as the fallback grey state.
+  setup:  ['connected', 'available'],
   select: ['orchestrator', 'trainer', 'both'],
 };
 

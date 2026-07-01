@@ -2721,7 +2721,12 @@ const Training: React.FC = () => {
       });
     }
 
-    // Setup stage (step 1): connected + available discovered workers
+    // Setup stage (step 1): everything we know about, coloured by whether
+    // its manager RPC is reachable right now.
+    //   `connected` (green) — last get_worker_info succeeded.
+    //   `available` (grey, labelled "Connection lost") — either a manager
+    //     whose last poll failed, or a worker we saw in the workspace
+    //     service list but haven't polled successfully yet.
     const result: MapWorker[] = [];
     managers.forEach(manager => {
       const geo = manager.workerInfo?.worker_info?.geo_location;
@@ -2729,7 +2734,7 @@ const Training: React.FC = () => {
       const orchCount = orchestrators.filter(o => o.managerId === manager.serviceId).length;
       const trainerCount = trainers.filter(t => t.managerId === manager.serviceId).length;
       const datasetCount = manager.workerInfo?.datasets ? Object.keys(manager.workerInfo.datasets).length : 0;
-      result.push({ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: 'connected', label: `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}, ${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` });
+      result.push({ id: manager.serviceId, name: manager.workerInfo?.worker_info ? `${geo.region}, ${geo.country_name}` : manager.workspace, lat: geo.latitude, lng: geo.longitude, role: manager.isConnected ? 'connected' : 'available', label: `${datasetCount} dataset${datasetCount !== 1 ? 's' : ''}, ${orchCount} orchestrator${orchCount !== 1 ? 's' : ''}, ${trainerCount} trainer${trainerCount !== 1 ? 's' : ''}` });
     });
     observedWorkspaces.forEach(ws => {
       (discoveredWorkers[ws] || []).forEach(worker => {
