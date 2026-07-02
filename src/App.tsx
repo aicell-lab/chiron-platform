@@ -45,9 +45,16 @@ const AppContent: React.FC = () => {
     // Implement search confirmation logic
   };
 
+  // Scope the "reset scroll on navigation" to actual route changes
+  // (pathname). Depending on `location` as a whole meant every replaceState
+  // inside a page — e.g. Training.tsx syncing ?step=<workers|apps|train>
+  // or ?orchestrator_id=… — fired this effect and stomped whatever
+  // targeted scroll the page had just requested (the Train step's below-
+  // navbar landing, for one). Query / hash tweaks are always in-page
+  // interactions; only a new pathname is an actual "navigated somewhere".
   useEffect(() => {
     window.scrollTo(0, 0);
-  }, [location]);
+  }, [location.pathname]);
 
   const toggleSidebar = () => {
     setSidebarOpen(!sidebarOpen);
