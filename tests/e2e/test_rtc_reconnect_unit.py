@@ -234,8 +234,9 @@ async def test_persistent_rtc_failure_falls_back_to_ws():
 
 
 async def test_next_call_after_fallback_retries_rtc_fresh():
-    """After a WS fallback the proxy's cached RTC state must be cleared so the
-    next call attempts RTC from scratch instead of sticking to WS forever."""
+    """After the cooldown expires, the proxy re-attempts RTC on the next call.
+    Zero the cooldown here to prove the retry path — the cooldown itself is
+    covered by test_cooldown_skips_rtc_within_window."""
     ws = FakeWSService()
     rtc = FakeRTCService()
     proxy = FlowerClientProxy(
@@ -251,10 +252,14 @@ async def test_next_call_after_fallback_retries_rtc_fresh():
         return rtc
     proxy._open_rtc = flaky_then_ok
 
-    # Call 1 falls back to WS.
+    # Call 1 falls back to WS + arms the cooldown.
     r1 = await proxy._call_rtc("start_fit", parameters=[b"a"], server_round=1)
     assert r1 == "ws-start-fit-ok"
     assert len(ws.calls) == 1
+    assert proxy._rtc_cooldown_until > 0, "cooldown should be armed after fallback"
+
+    # Simulate the cooldown having expired.
+    proxy._rtc_cooldown_until = 0
 
     # Call 2 should attempt RTC afresh, and succeed.
     r2 = await proxy._call_rtc("get_fit_status")
@@ -263,7 +268,44 @@ async def test_next_call_after_fallback_retries_rtc_fresh():
         f"expected RTC result on the recovered call, got {r2['result']}"
     )
     assert len(ws.calls) == 1, f"WS should NOT have been touched on the recovered call: {ws.calls}"
+    # A successful RTC call must clear the cooldown so subsequent calls also
+    # go via RTC at full cadence.
+    assert proxy._rtc_cooldown_until == 0.0, (
+        "cooldown should have been cleared on RTC success"
+    )
     print("  ✓ post-fallback state is clean: next call retries RTC and succeeds")
+
+
+async def test_cooldown_skips_rtc_within_window():
+    """After a WS fallback, subsequent calls made within the cooldown window
+    must bypass RTC entirely — this is the perf-critical optimisation that
+    keeps a broken-TURN session from paying the ICE-timeout tax per call."""
+    ws = FakeWSService()
+    proxy = FlowerClientProxy(
+        ws_service=ws, hypha_client=None,
+        artifact_id="chiron-platform/tabula-trainer", check_interval=0.001,
+    )
+    open_calls = {"n": 0}
+    async def always_broken_open():
+        open_calls["n"] += 1
+        raise RuntimeError("simulated TURN gap")
+    proxy._open_rtc = always_broken_open
+
+    # First call: RTC attempted _RTC_MAX_RETRIES times, then falls back.
+    await proxy._call_rtc("start_fit", parameters=[b"a"], server_round=1)
+    assert open_calls["n"] == mod._RTC_MAX_RETRIES
+    assert proxy._rtc_cooldown_until > 0
+
+    # Second call, still inside the cooldown window: MUST NOT attempt RTC.
+    await proxy._call_rtc("get_fit_status")
+    assert open_calls["n"] == mod._RTC_MAX_RETRIES, (
+        f"cooldown should have suppressed RTC attempts, but _open_rtc was called "
+        f"{open_calls['n']} times (expected {mod._RTC_MAX_RETRIES})"
+    )
+    # Both calls should have landed on WS.
+    assert len(ws.calls) == 2, f"expected 2 WS calls (both routed via cooldown), got {ws.calls}"
+
+    print(f"  ✓ cooldown ({mod._RTC_COOLDOWN_SECONDS:.0f}s) skips RTC on the next call")
 
 
 # ── Runner ────────────────────────────────────────────────────────────────
@@ -276,6 +318,7 @@ async def main():
         test_transient_rtc_failure_recovers,
         test_persistent_rtc_failure_falls_back_to_ws,
         test_next_call_after_fallback_retries_rtc_fresh,
+        test_cooldown_skips_rtc_within_window,
     ]:
         print(f"── {t.__name__}")
         await t()
