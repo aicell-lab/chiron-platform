@@ -1,6 +1,12 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { hyphaWebsocketClient } from 'hypha-rpc';
 import { useHyphaStore } from '../../store/hyphaStore';
+import {
+  CHIRON_MODELS,
+  CHIRON_MODEL_FAMILIES,
+  DEFAULT_MODEL_FAMILY,
+  ChironModelFamily,
+} from '../../config/chironModels';
 
 type OSType = 'linux' | 'macos' | 'windows';
 type ContainerRuntimeType = 'docker' | 'podman' | 'singularity' | 'apptainer';
@@ -107,7 +113,9 @@ const TagInput: React.FC<{
   );
 };
 
-const DEFAULT_IMAGE = 'ghcr.io/aicell-lab/tabula:0.6.4';
+// There is no single default image any more. A worker carries one model's
+// dependencies and can host only that model's trainer, so the image is chosen
+// from the model the site wants to train. See src/config/chironModels.ts.
 
 const BioEngineGuide: React.FC = () => {
   const { client, server, connect, isConnected, isLoggedIn, user } = useHyphaStore();
@@ -186,8 +194,15 @@ const BioEngineGuide: React.FC = () => {
   const [serverUrl, setServerUrl] = useState('');
   const [clientId, setClientId] = useState('');
   const [gpuIndices, setGpuIndices] = useState('');
+  const [modelFamily, setModelFamily] = useState<ChironModelFamily>(DEFAULT_MODEL_FAMILY);
   const [customImage, setCustomImage] = useState('');
   const [platformOverride, setPlatformOverride] = useState('');
+
+  // The image the selected model resolves to, and the one actually used, which
+  // the Container Image override in Advanced Options can replace.
+  const selectedModel = CHIRON_MODELS[modelFamily];
+  const modelImage = selectedModel.image;
+  const effectiveImage = customImage || modelImage;
 
   useEffect(() => {
     try {
@@ -261,7 +276,7 @@ const BioEngineGuide: React.FC = () => {
 
   // Derive a clean SIF filename from the image reference
   const getSifFilename = () => {
-    const img = customImage || DEFAULT_IMAGE;
+    const img = effectiveImage;
     const parts = img.split('/');
     const nameTag = parts[parts.length - 1]; // e.g. "tabula:0.6.0"
     return nameTag.replace(':', '_') + '.sif'; // "tabula_0.3.3.sif"
@@ -293,7 +308,7 @@ const BioEngineGuide: React.FC = () => {
   };
 
   const getDockerComposeContent = () => {
-    const imageToUse = customImage || DEFAULT_IMAGE;
+    const imageToUse = effectiveImage;
     const workspaceDirPath = getWorkspaceDirPath();
     const workerSlug = (workerName || 'Chiron Worker')
       .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
@@ -399,7 +414,7 @@ mkdir -p ${dirPath}`;
 
   const getPullCommand = () => {
     const bin = containerRuntime;
-    const image = `docker://${customImage || DEFAULT_IMAGE}`;
+    const image = `docker://${effectiveImage}`;
     const sif = getSifFilename();
     return `# Pull and convert the Docker image to a local SIF file (~10 GB, one-time)
 ${bin} pull ${sif} ${image}`;
@@ -624,7 +639,9 @@ ${bin} exec ${gpuFlag}\\
           {audience === 'agent' && (() => {
             const skillUrl = 'https://chiron.aicell.io/skills/chiron-platform/SKILL.md';
             const basePrompt =
-              `Read ${skillUrl} and help me set up a Chiron worker on this machine.`;
+              `Read ${skillUrl} and help me set up a Chiron worker on this machine. `
+              + `Ask me which model I want to train, since the container image decides `
+              + `which trainer the worker can host.`;
             const promptText = (includeAgentToken && token)
               ? `${basePrompt}\n\nUse this Hypha admin token for my workspace:\n${token}`
               : basePrompt;
@@ -633,7 +650,7 @@ ${bin} exec ${gpuFlag}\\
                 <div className="p-5 bg-blue-50 rounded-xl border border-blue-200">
                   <h4 className="text-base font-semibold text-blue-900 mb-2">Set up your worker with an AI agent</h4>
                   <p className="text-sm text-blue-800">
-                    Copy the prompt below into your AI agent (Claude Code, Codex, Gemini CLI, and so on). It loads the Chiron skill, which tells the agent to detect your OS, container runtime, and GPU, ask for your training data, prepare any files that need adjustment, and walk you through the worker launch.
+                    Copy the prompt below into your AI agent (Claude Code, Codex, Gemini CLI, and so on). It loads the Chiron skill, which tells the agent to detect your OS, container runtime, and GPU, ask which model you want to train and pick the matching image, ask for your training data, prepare any files that need adjustment, and walk you through the worker launch.
                   </p>
                 </div>
 
@@ -713,7 +730,7 @@ ${bin} exec ${gpuFlag}\\
               <div className="text-sm text-blue-800 flex-1">
                 <span className="font-medium">Training Data Directory</span>
                 <span className="text-blue-700 text-xs block mt-1">
-                  A <strong>Tabula Trainer</strong> reads single-cell datasets from a directory on the host that the worker mounts. Nothing is copied or imported. Each dataset lives in its own subfolder with one or more <code className="bg-blue-100 px-1 rounded">.h5ad</code> files and a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>. The data&#8209;server auto&#8209;converts <code className="bg-blue-100 px-1 rounded">.h5ad</code> &rarr; <code className="bg-blue-100 px-1 rounded">.zarr</code> on first read, ranks genes by per-dataset over-dispersion to pick the 1,200 most variable as the trainer-ready input, discretises every cell into 50 quantile bins, and pre-cuts a <code className="bg-blue-100 px-1 rounded">tabula_binned</code> layer of shape <code className="bg-blue-100 px-1 rounded">(n_cells, 1200)</code>. It rescans every 30&nbsp;seconds. Cell- and gene-level quality control is left to whatever you applied upstream.
+                  A <strong>trainer</strong> reads single-cell datasets from a directory on the host that the worker mounts. Nothing is copied or imported. Each dataset lives in its own subfolder with one or more <code className="bg-blue-100 px-1 rounded">.h5ad</code> files and a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>. The data&#8209;server auto&#8209;converts <code className="bg-blue-100 px-1 rounded">.h5ad</code> &rarr; <code className="bg-blue-100 px-1 rounded">.zarr</code> on first read and rescans every 30&nbsp;seconds. It also ranks genes by per-dataset over-dispersion to pick the 1,200 most variable, discretises every cell into 50 quantile bins, and pre-cuts a <code className="bg-blue-100 px-1 rounded">tabula_binned</code> layer of shape <code className="bg-blue-100 px-1 rounded">(n_cells, 1200)</code>, which is what <strong>Tabula</strong> trains on. The other models read the counts themselves and do their own encoding. Cell- and gene-level quality control is left to whatever you applied upstream.
                   <br /><br />
                   An <strong>Orchestrator</strong> needs no data &mdash; leave the field empty and the data&#8209;server is omitted entirely.
                 </span>
@@ -1004,10 +1021,36 @@ ${bin} exec ${gpuFlag}\\
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                     <p className="text-xs text-gray-500 mt-1">
-                      Path to your local single-cell datasets for model training. Required for a <strong>Tabula Trainer</strong>.
+                      Path to your local single-cell datasets for model training. Required for a <strong>Trainer</strong>.
                       Leave empty if running an <strong>Orchestrator only</strong>. The data server will be omitted.
                     </p>
                   </div>
+                </div>
+
+                {/* Model — full width. Picking a model picks the container
+                    image, which is what decides the trainer this worker can
+                    host. It is not an app-level setting the user changes
+                    later. */}
+                <div className="md:col-span-2 lg:col-span-3">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Model</label>
+                  <select value={modelFamily} onChange={(e) => setModelFamily(e.target.value as ChironModelFamily)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    {CHIRON_MODEL_FAMILIES.map(family => (
+                      <option key={family} value={family}>{CHIRON_MODELS[family].displayName}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {selectedModel.summary}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    The image below carries only {selectedModel.displayName}'s dependencies, so this worker can host{' '}
+                    <code className="bg-gray-100 px-0.5 rounded">{selectedModel.trainerArtifactId}</code> and no other trainer.
+                    To train a second model at this site, run a second worker on that model's image.
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Image: <code className="bg-gray-100 px-0.5 rounded">{effectiveImage}</code>
+                    {customImage && ' (overridden in Advanced Options)'}
+                  </p>
                 </div>
 
                 <div>
@@ -1217,9 +1260,12 @@ ${bin} exec ${gpuFlag}\\
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Container Image</label>
                     <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={customImage} onChange={(e) => setCustomImage(e.target.value)}
-                      placeholder={DEFAULT_IMAGE}
+                      placeholder={modelImage}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    <p className="text-xs text-gray-500 mt-1">Custom image tag. Leave empty for default ({DEFAULT_IMAGE})</p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Overrides the image chosen by the Model selector above. Leave empty for {selectedModel.displayName}'s image ({modelImage}).
+                      An override must still be an image built for {selectedModel.displayName}, otherwise the worker cannot host its trainer.
+                    </p>
                   </div>
 
                   {/* Platform override — compose only */}
