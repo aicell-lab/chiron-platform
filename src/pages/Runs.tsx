@@ -42,6 +42,11 @@ interface RunArtifact {
     // has been reset since, so this artifact is no longer resumable even
     // though the orchestrator service is still alive.
     run_id?: string;
+    // Which model this run trained, captured by chiron-orchestrator 0.3.17 when
+    // the run artifact was created. Absent on older runs, all of which were
+    // Tabula, but the UI shows no badge rather than asserting that.
+    model_family?: string;
+    model_name?: string;
     config: Record<string, any>;
     trainers: Record<string, {
       client_name: string;
@@ -258,6 +263,11 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
               </span>
             )}
             {isCompleted && <CompletedBadge />}
+            {(m.model_name || m.model_family) && (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100">
+                {m.model_name || m.model_family}
+              </span>
+            )}
           </div>
           <p className="text-xs text-gray-400 mt-0.5">
             {formatTs(m.started_at)} · {completedRounds} round{completedRounds !== 1 ? 's' : ''} completed · {numTrainers} trainer{numTrainers !== 1 ? 's' : ''}

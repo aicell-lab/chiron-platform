@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { FaChevronDown, FaChevronRight } from 'react-icons/fa';
+import { DEFAULT_MODEL_FAMILY, getChironModel } from '../../config/chironModels';
 
 interface ParamConfig {
   type: string;
@@ -15,12 +16,35 @@ interface ParamSection {
 interface TrainerParams {
   fit: ParamSection;
   evaluate: ParamSection;
+  /**
+   * Which model the parameters above belong to, reported by chiron-orchestrator
+   * 0.3.17 from the registered trainer's own properties. Absent when an older
+   * orchestrator answers, in which case the panel simply names no model rather
+   * than assuming one.
+   */
+  model?: {
+    family: string;
+    display_name: string;
+    /** Prose description of the federated subset of the state dict, e.g.
+     *  "the shared transformer trunk". Written by the trainer, not by a table
+     *  in the frontend. */
+    shared_weight_scope: string;
+  };
 }
 
 interface ArtifactEntry {
   id: string;
   alias: string;
-  manifest: { name?: string; global_transformer?: boolean; tissue?: string; num_rounds?: number; datasets?: {name: string}[] };
+  manifest: {
+    name?: string;
+    global_transformer?: boolean;
+    tissue?: string;
+    num_rounds?: number;
+    datasets?: {name: string}[];
+    /** Family the checkpoint belongs to. Written by the orchestrator since
+     *  0.3.x. Checkpoints published before that are all Tabula. */
+    model_family?: string;
+  };
 }
 
 interface TrainingConfigPanelProps {
@@ -58,6 +82,12 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   hasHistory,
   onConfigChange,
 }) => {
+
+  // The model these parameters belong to. Everything model-specific in this
+  // panel (its title, the checkpoint list, the wording of what gets federated)
+  // reads from here rather than naming a model in the markup.
+  const model = params?.model;
+  const modelFamily = model?.family;
 
   // Top-level parameters
   const [numRounds, setNumRounds] = useState(5);
@@ -97,9 +127,10 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   }, [numRounds, perRoundTimeoutMinutes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch every chiron-models checkpoint — at training start, the orchestrator
-  // broadcasts the selected weights as the initial transformer state to every
-  // trainer. Both full Tabula models (global_transformer=false) and
-  // transformer-only FedAvg saves (global_transformer=true) are valid here.
+  // broadcasts the selected weights as the initial shared state to every
+  // trainer. Both full models (global_transformer=false) and shared-weights
+  // FedAvg saves (global_transformer=true) are valid here, as long as they
+  // belong to the model this federation is training.
   const fetchArtifacts = useCallback(async () => {
     if (!artifactManager) return;
     setArtifactsLoading(true);
@@ -110,34 +141,43 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
         limit: 100,
         _rkwargs: true,
       });
-      // Surface tabula-foundation (the generalist multi-tissue checkpoint)
-      // first so it's the default Start-from-Pretrained-Weights selection.
-      // Tissue-specific full models and global_transformer-only saves come
-      // after, each group sorted alphabetically by manifest name for
+      // A checkpoint only loads into the model it was trained for, so the list
+      // is restricted to this federation's family. Checkpoints published
+      // before the orchestrator wrote model_family are all Tabula, and an
+      // orchestrator too old to report a model is training Tabula too.
+      const family = modelFamily || DEFAULT_MODEL_FAMILY;
+      const familyOf = (a: ArtifactEntry) =>
+        a.manifest?.model_family || DEFAULT_MODEL_FAMILY;
+      // Surface the model's foundation checkpoint (its generalist multi-tissue
+      // release) first so it's the default Start-from-Pretrained-Weights
+      // selection. Tissue-specific full models and shared-weights-only saves
+      // come after, each group sorted alphabetically by manifest name for
       // predictability.
+      const foundationAlias = getChironModel(family)?.foundationAlias;
       const isFoundation = (a: ArtifactEntry) =>
-        (a.alias || a.id.split('/').pop() || '').toLowerCase() === 'tabula-foundation';
+        !!foundationAlias &&
+        (a.alias || a.id.split('/').pop() || '').toLowerCase() === foundationAlias;
       const byName = (a: ArtifactEntry, b: ArtifactEntry) =>
         (a.manifest?.name || a.alias || a.id).localeCompare(b.manifest?.name || b.alias || b.id);
-      const all = ((result || []) as ArtifactEntry[]);
+      const all = ((result || []) as ArtifactEntry[]).filter(a => familyOf(a) === family);
       const foundation = all.filter(isFoundation);
       const others = all.filter(a => !isFoundation(a)).sort(byName);
       const checkpoints = [...foundation, ...others];
       setArtifacts(checkpoints);
-      if (checkpoints.length > 0) {
-        setSelectedArtifactId(checkpoints[0].id);
-      }
+      // Clear the selection when the new list is empty, otherwise a checkpoint
+      // picked for a different model would still be sent to start_training.
+      setSelectedArtifactId(checkpoints.length > 0 ? checkpoints[0].id : '');
     } catch (e: any) {
-      console.error('Failed to load global transformer weights:', e);
-      setArtifactsError('Failed to load global transformer weights');
+      console.error('Failed to load pretrained checkpoints:', e);
+      setArtifactsError('Failed to load pretrained checkpoints');
     } finally {
       setArtifactsLoading(false);
     }
-  }, [artifactManager]);
+  }, [artifactManager, modelFamily]);
 
   useEffect(() => {
     if (usePretrainedWeights) fetchArtifacts();
-  }, [usePretrainedWeights]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [usePretrainedWeights, modelFamily]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Global transformer weight artifacts always use model.pth — no file picker needed.
 
@@ -371,7 +411,23 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
 
   return (
     <div>
-      
+
+      {/* Which model these parameters belong to. The lists below are read from
+          the registered trainer's own schema, so without this line a user
+          reading them has no way to tell whose parameters they are. */}
+      {model && (
+        <div className="mb-5 pb-4 border-b border-gray-100 flex items-center gap-2 flex-wrap">
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100">
+            {model.display_name}
+          </span>
+          <p className="text-xs text-gray-400">
+            Parameters below are declared by this federation's {model.display_name} trainer.
+            Each round federates the weights under{' '}
+            <code className="text-gray-500">{model.shared_weight_scope}</code>.
+          </p>
+        </div>
+      )}
+
       {/* Top-level parameters */}
       <div className="mb-5 pb-5 border-b border-gray-100">
         <div className="grid grid-cols-2 gap-4">
@@ -408,10 +464,13 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
           <div>
             <label className="block text-xs font-semibold text-gray-700">Start from Pretrained Weights</label>
             <p className="text-xs text-gray-400 mt-0.5">
-              Broadcasts only the shared transformer weights from the selected
-              checkpoint to every trainer before round 1. Each trainer's
-              tissue-specific embedder and projection heads stay local: they
-              are not overwritten.
+              Broadcasts only the shared weights
+              {model?.shared_weight_scope && (
+                <> (<code className="text-gray-500">{model.shared_weight_scope}</code>)</>
+              )}{' '}from
+              the selected checkpoint to every trainer before round 1. Each
+              trainer's site-local components stay local: they are not
+              overwritten.
               {hasHistory && (
                 <> Enabling this on an orchestrator with existing history
                   also resets the orchestrator's training history so the
@@ -449,7 +508,9 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
                 <button onClick={fetchArtifacts} className="text-xs text-blue-600 hover:underline">Retry</button>
               </div>
             ) : artifacts.length === 0 ? (
-              <p className="text-xs text-gray-400 italic">No published checkpoints in chiron-models yet</p>
+              <p className="text-xs text-gray-400 italic">
+                No published {model?.display_name ? `${model.display_name} ` : ''}checkpoints in chiron-models yet
+              </p>
             ) : (() => {
               const selected = artifacts.find(a => a.id === selectedArtifactId);
               const fullModels = artifacts.filter(a => a.manifest?.global_transformer !== true);
@@ -570,7 +631,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
               <svg className="w-6 h-6 text-amber-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              <h3 className="font-semibold text-gray-900">Overwrite trained transformer and reset history?</h3>
+              <h3 className="font-semibold text-gray-900">Overwrite trained weights and reset history?</h3>
             </div>
             <div className="px-6 py-4 text-sm text-gray-600 space-y-2">
               <p>
@@ -579,8 +640,8 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
               </p>
               <ul className="list-disc list-inside space-y-1 pl-2">
                 <li>
-                  Overwrite the previously trained shared transformer
-                  weights with the selected checkpoint before round 1.
+                  Overwrite the previously trained shared weights with the
+                  selected checkpoint before round 1.
                 </li>
                 <li>
                   Reset the orchestrator's training history (per-round
@@ -589,8 +650,11 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
                 </li>
               </ul>
               <p>
-                Each trainer's tissue-specific embedder and projection
-                heads stay local; only the federated transformer is
+                Each trainer's site-local components stay local. Only the
+                shared weights
+                {model?.shared_weight_scope && (
+                  <> (<code className="text-gray-500">{model.shared_weight_scope}</code>)</>
+                )}{' '}are
                 replaced. Trainers' on-disk weight checkpoints are not
                 touched either.
               </p>

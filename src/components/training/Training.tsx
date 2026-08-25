@@ -7,6 +7,14 @@ import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
 import FederatedWorldMap, { MapWorker, MapConnection, MapLegend, MapLegendMode } from './FederatedWorldMap';
 import LossChart from './LossChart';
+import {
+  ChironImageIdentity,
+  DEFAULT_MODEL_FAMILY,
+  localWeightsLabel,
+  modelDisplayName,
+  referenceMemoryEntries,
+  sharedWeightsLabel,
+} from '../../config/chironModels';
 
 const CountryFlag: React.FC<{ countryName?: string; countryCode?: string; className?: string }> = ({ countryName, countryCode, className }) => {
   const flagUrl = countryCode
@@ -35,6 +43,13 @@ interface WorkerStatus {
   admin_users: string[];
   geo_location: GeoLocation;
   is_ready: boolean;
+  /**
+   * Which model this worker's container image was built for, added by
+   * chiron-manager from the CHIRON_* variables baked into the image. Absent
+   * on an image built before per-model support existed, which is how the UI
+   * tells "no marker" apart from "marker says tabula".
+   */
+  chiron_image?: ChironImageIdentity;
 }
 
 interface ApplicationInfo {
@@ -600,6 +615,21 @@ const Training: React.FC = () => {
   }, [user]);
 
   const [managers, setManagers] = useState<ManagerConnection[]>([]);
+
+  /**
+   * What the worker's container image says it can train, or undefined when
+   * the image predates per-model support. This is the only source of the
+   * trainer artifact a worker may deploy: the image carries one model's
+   * dependencies and no other's, so there is nothing for the user to choose.
+   */
+  const workerImageFor = useCallback(
+    (managerId: string | null | undefined): ChironImageIdentity | undefined =>
+      managerId
+        ? managers.find(m => m.serviceId === managerId)?.workerInfo?.worker_info?.chiron_image
+        : undefined,
+    [managers]
+  );
+
   const [connectingWorkspace, setConnectingWorkspace] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
 
@@ -640,7 +670,6 @@ const Training: React.FC = () => {
     !!(managerId && creatingTrainerMgrs[managerId]);
   const [newOrchestratorArtifactId, setNewOrchestratorArtifactId] = useState('chiron-platform/chiron-orchestrator');
   const [newTrainerDatasets, setNewTrainerDatasets] = useState<string[]>([]);
-  const [newTrainerArtifactId, setNewTrainerArtifactId] = useState('chiron-platform/tabula-trainer');
   // Hardware-aware upper bound for this trainer's training batch size. Set
   // once at deploy time based on the worker's GPU memory; the trainer
   // clamps any per-session fit_config batch_size at this value so a session
@@ -650,8 +679,10 @@ const Training: React.FC = () => {
   const [selectedWeightsPath, setSelectedWeightsPath] = useState<string | null>(null);
   const [isLoadingLocalWeights, setIsLoadingLocalWeights] = useState(false);
   const [isWeightsDropdownOpen, setIsWeightsDropdownOpen] = useState(false);
-  // chiron-models artifacts (tabula_model only) selectable as the trainer's
-  // pretrained starting weights. Mutually exclusive with selectedWeightsPath.
+  // Full chiron-models checkpoints (shared-weights-only saves excluded)
+  // selectable as the trainer's pretrained starting weights, across every
+  // model. Narrowed to the worker's own family by trainerWeightArtifacts.
+  // Mutually exclusive with selectedWeightsPath.
   const [chironModelArtifacts, setChironModelArtifacts] = useState<Array<{id: string; alias?: string; manifest?: any; created_at?: number}>>([]);
   const [selectedTrainerWeightsArtifactId, setSelectedTrainerWeightsArtifactId] = useState<string | null>(null);
 
@@ -1013,8 +1044,8 @@ const Training: React.FC = () => {
   // Populate the trainer dialog's pretrained-weights dropdown when the user is
   // looking at the Trainer tab — fetches local-worker weights from the manager
   // and the chiron-models artifact list (full models only — checkpoints with
-  // global_transformer=true don't have embedder/heads and can't bootstrap a
-  // fresh trainer).
+  // global_transformer=true hold the shared weights alone and can't bootstrap
+  // a fresh trainer).
   useEffect(() => {
     if (!showLaunchDialog || launchDialogTab !== 'trainer' || !launchDialogManagerId) return;
     if (localModelWeights === null) {
@@ -1043,12 +1074,24 @@ const Training: React.FC = () => {
         try {
           const all = await artifactManager.list({ parent_id: 'chiron-platform/chiron-models', limit: 100, _rkwargs: true });
           // Only full models (global_transformer != true) are valid pretrained
-          // starting points; transformer-only saves are filtered out here.
+          // starting points, so shared-weights-only saves are dropped here.
           setChironModelArtifacts((all || []).filter((a: any) => a.manifest?.global_transformer !== true));
         } catch (e) { console.error('Failed to load chiron-models', e); }
       })();
     }
   }, [showLaunchDialog, launchDialogTab, launchDialogManagerId, artifactManager]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A checkpoint only loads into the model it was trained for, so the dialog
+  // offers those of the model this worker's image hosts. Checkpoints published
+  // before the orchestrator wrote model_family are all Tabula, which is also
+  // the family assumed for a worker that reports no image identity (its
+  // trainer deploy is blocked anyway, so the list is moot there).
+  const trainerWeightArtifacts = useMemo(() => {
+    const family = workerImageFor(launchDialogManagerId)?.model_family || DEFAULT_MODEL_FAMILY;
+    return chironModelArtifacts.filter(
+      a => (a.manifest?.model_family || DEFAULT_MODEL_FAMILY) === family
+    );
+  }, [chironModelArtifacts, launchDialogManagerId, workerImageFor]);
 
   const userWorkspace = server?.config?.workspace as string | undefined;
 
@@ -1299,7 +1342,10 @@ const Training: React.FC = () => {
     status: s.status,
     serviceIds: normalizeServiceIds(s.service_ids),
     datasets: s.datasets || {},
-    artifactId: s.artifact_id || 'chiron-platform/tabula-trainer',
+    // A running trainer knows its own artifact. On the rare app row that does
+    // not report one, say so rather than guessing at Tabula: this worker may
+    // be running any of the four models.
+    artifactId: s.artifact_id || 'unknown trainer',
     displayName: s.display_name,
     applicationId: appId,
     isBusy: s.is_busy ?? false,
@@ -1676,6 +1722,10 @@ const Training: React.FC = () => {
 
   const createTrainer = async (managerId: string) => {
     if (newTrainerDatasets.length === 0) return;
+    // The image decides the trainer. Without a marker there is nothing safe
+    // to deploy, and the manager would refuse anyway, so stop at the button.
+    const workerImage = workerImageFor(managerId);
+    if (!workerImage?.trainer_artifact) return;
     // Guard against a re-entrant call (double-click on the deploy button,
     // user retrying after an HTTP timeout while the previous deploy is
     // still running server-side, etc). Acquire the lock BEFORE any state
@@ -1691,7 +1741,7 @@ const Training: React.FC = () => {
     setCreatingTrainerMgrs(prev => ({ ...prev, [managerId]: true }));
     // Snapshot user-input state before clearing the form
     const datasetsArg = newTrainerDatasets;
-    const trainerArtifactArg = newTrainerArtifactId;
+    const trainerArtifactArg = workerImage.trainer_artifact;
     const pretrainedPathArg = selectedWeightsPath;
     const pretrainedArtifactArg = selectedTrainerWeightsArtifactId;
     // Close UI immediately and reset the form
@@ -1717,7 +1767,7 @@ const Training: React.FC = () => {
       status: 'NOT_STARTED',
       serviceIds: [],
       datasets: optimisticDatasets,
-      artifactId: trainerArtifactArg || 'chiron-platform/tabula-trainer',
+      artifactId: trainerArtifactArg,
       displayName: undefined,
       applicationId: pendingAppId,
       isBusy: false,
@@ -3215,6 +3265,11 @@ const Training: React.FC = () => {
                           const trainerCount = trainers.filter(t => t.managerId === worker.serviceId).length;
                           const geo = manager?.workerInfo?.worker_info?.geo_location;
                           const datasetEntries = manager?.workerInfo?.datasets ? Object.entries(manager.workerInfo.datasets) : [];
+                          // The model this worker's image can train. Only
+                          // meaningful once the worker has answered at least
+                          // one poll, so an unreachable worker shows neither
+                          // the badge nor the outdated notice.
+                          const workerImage = manager?.workerInfo?.worker_info?.chiron_image;
 
                           const isHighlighted = highlightedWorkerIds.includes(worker.serviceId);
                           return (
@@ -3225,6 +3280,21 @@ const Training: React.FC = () => {
                                   <div>
                                     <p className="font-medium text-gray-900 leading-tight">{worker.name}</p>
                                     <p className="text-xs text-gray-400 font-mono">{worker.workspace}</p>
+                                    {isConnected && (workerImage ? (
+                                      <span
+                                        className="inline-block mt-1 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-indigo-50 text-indigo-700 border border-indigo-100"
+                                        title={workerImage.image_ref ? `Image: ${workerImage.image_ref}` : undefined}
+                                      >
+                                        {modelDisplayName(workerImage)}
+                                      </span>
+                                    ) : (
+                                      <span
+                                        className="inline-block mt-1 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-50 text-amber-700 border border-amber-100"
+                                        title="This worker's image predates per-model support, so Chiron cannot tell which model it can train. Restart it on a current image."
+                                      >
+                                        Outdated image
+                                      </span>
+                                    ))}
                                   </div>
                                 </div>
                               </td>
@@ -3461,7 +3531,7 @@ const Training: React.FC = () => {
                                 <input type="checkbox" checked={isRegistered} disabled={isDisabled} onChange={async e => { e.target.checked ? await registerTrainer(trainerId) : await unregisterTrainer(trainerId); }} className="mt-0.5 accent-emerald-600" />
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-center gap-1.5 flex-wrap">
-                                    <p className="font-medium text-gray-900 text-sm leading-tight">{trainer.displayName || 'Tabula Trainer'}</p>
+                                    <p className="font-medium text-gray-900 text-sm leading-tight">{trainer.displayName || 'Trainer'}</p>
                                     {isPendingRemove && (
                                       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700">
                                         <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />Leaving after this round
@@ -3537,7 +3607,10 @@ const Training: React.FC = () => {
                                     <input type="checkbox" checked={true} disabled={isLoadingRegisteredTrainers} onChange={async () => { await unregisterRemoteTrainer(svcId); }} className="mt-0.5 accent-emerald-600" />
                                     <div className="flex-1 min-w-0">
                                       <div className="flex items-center gap-1.5 flex-wrap">
-                                        <p className="font-medium text-gray-700 text-sm leading-tight">Tabula Trainer</p>
+                                        {/* The worker is gone, so its image identity is gone with
+                                            it and the model cannot be named. The service id below
+                                            carries whatever the app was called. */}
+                                        <p className="font-medium text-gray-700 text-sm leading-tight">Trainer</p>
                                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs bg-gray-100 text-gray-500">
                                           <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
                                           Worker disconnected
@@ -3817,10 +3890,32 @@ const Training: React.FC = () => {
                 const allDatasets = [...new Set(registeredTrainerApps.flatMap(t =>
                   Object.values(t.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean)
                 ))].sort((a, b) => a.localeCompare(b));
-                const globalAutoDesc = `Tabula transformer · ${rounds} federated round${rounds !== 1 ? 's' : ''} · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''}: ${allDatasets.join(', ')}`;
+                // The orchestrator names the model and the subset it averages, so the
+                // description says what was actually federated rather than assuming Tabula.
+                const fedModelName = trainerParams?.model?.display_name || 'Federated model';
+                const fedScope = trainerParams?.model?.shared_weight_scope;
+                // The orchestrator is the authority on which model ran, but it
+                // only answers get_trainer_params while a trainer is
+                // registered. After a recovered run that call may never have
+                // landed, so fall back to the image the trainers' own worker
+                // reports. Both can be absent, and every label below degrades
+                // to model-neutral wording rather than to Tabula's.
+                const fedFamily = trainerParams?.model?.family
+                  || workerImageFor(registeredTrainerApps[0]?.managerId)?.model_family;
+                const fedModelShort = trainerParams?.model?.display_name
+                  || modelDisplayName(workerImageFor(registeredTrainerApps[0]?.managerId));
+                // What FedAvg averages, and what it never touches. Every model
+                // federates a subset, so the two cards below hold genuinely
+                // different files and the wording has to say which is which.
+                const sharedPhrase = sharedWeightsLabel(fedFamily, fedScope);
+                const localPhrase = localWeightsLabel(fedFamily);
+                // The dataset list is empty whenever the trainers were redeployed after
+                // the run, so keep the ": <datasets>" tail conditional rather than
+                // leaving a dangling colon in a field the user is about to publish.
+                const globalAutoDesc = `${fedModelName}${sharedPhrase ? ` (${sharedPhrase})` : ''} · ${rounds} federated round${rounds !== 1 ? 's' : ''} · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''}${allDatasets.length ? `: ${allDatasets.join(', ')}` : ''}`;
 
-                const SaveCard = ({ itemKey, title, subtitle, autoDesc, actions, checkpointPicker }: {
-                  itemKey: string; title: string; subtitle: string; autoDesc: string;
+                const SaveCard = ({ itemKey, title, subtitle, note, autoDesc, actions, checkpointPicker }: {
+                  itemKey: string; title: string; subtitle: string; note?: string; autoDesc: string;
                   actions: React.ReactNode;
                   // Optional per-card checkpoint picker; rendered inside the card so it is
                   // visually scoped to this card alone (not shared across the panel).
@@ -3835,6 +3930,7 @@ const Training: React.FC = () => {
                       <div>
                         <p className="text-sm font-semibold text-gray-800">{title}</p>
                         <p className="text-xs text-gray-400">{subtitle}</p>
+                        {note && <p className="text-xs text-gray-400 mt-0.5">{note}</p>}
                       </div>
                       {checkpointPicker}
                       <input type="text"
@@ -3918,7 +4014,7 @@ const Training: React.FC = () => {
                     <div className="space-y-3">
                       <SaveCard
                         itemKey="global"
-                        title="Global averaged transformer"
+                        title={fedModelShort ? `Global ${fedModelShort} weights` : 'Global averaged weights'}
                         checkpointPicker={globalCheckpoints.length > 1 ? (
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-xs text-gray-500 flex-shrink-0">Use checkpoint:</span>
@@ -3934,6 +4030,7 @@ const Training: React.FC = () => {
                           </div>
                         ) : undefined}
                         subtitle={`FedAvg result · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''} · round ${selectedGlobalRound ?? rounds}`}
+                        note={`Shared weights only${sharedPhrase ? `: ${sharedPhrase}` : ''}. Seeds a federated run, not a standalone model.`}
                         autoDesc={globalAutoDesc}
                         actions={
                           <button onClick={() => saveGlobalWeights(globalAutoDesc)} disabled={globalStatus === 'saving' || selectedGlobalRound === null}
@@ -3975,7 +4072,7 @@ const Training: React.FC = () => {
                             ? (isMgrConnected ? 'Offline' : 'Disconnected')
                             : null;
                           const clientRounds = trainingHistory.client_training_losses?.[svcId]?.length || rounds;
-                          const autoDesc = `Tabula model (embedder + transformer + heads) · ${clientRounds} federated round${clientRounds !== 1 ? 's' : ''} · ${datasetNames.join(', ')}`;
+                          const autoDesc = `${fedModelShort || 'Trainer'} full model (${localPhrase ? `all weights including this site's ${localPhrase}` : 'full state_dict'}) · ${clientRounds} federated round${clientRounds !== 1 ? 's' : ''}${datasetNames.length ? ` · ${datasetNames.join(', ')}` : ''}`;
                           const pubKey = `publish-${svcId}`;
                           const locKey = `local-${svcId}`;
                           const pubStatus = saveStatuses[pubKey] || 'idle';
@@ -3995,8 +4092,19 @@ const Training: React.FC = () => {
                                   <p className={`text-sm font-semibold ${!isConnected ? 'text-gray-500' : 'text-gray-800'}`}>{workerName}</p>
                                   <p className="text-xs text-gray-400">
                                     {geoDisplay && <>{geoDisplay}<span className="text-gray-300 mx-1">·</span></>}
-                                    {datasetNames.join(', ') || 'No datasets'}<span className="text-gray-300 ml-1">· full model</span>
+                                    {datasetNames.join(', ') || 'No datasets'}
+                                    {!localPhrase && <span className="text-gray-300 ml-1">· full model</span>}
                                   </p>
+                                  {/* The contrast with the global card above is
+                                      the whole point of keeping both exports:
+                                      this file is the only one that carries the
+                                      site-local part, so it is the only one that
+                                      loads as a model on its own. */}
+                                  {localPhrase && (
+                                    <p className="text-xs text-gray-400 mt-0.5">
+                                      Full model{sharedPhrase ? `: ${sharedPhrase}` : ''}, plus this site's {localPhrase}.
+                                    </p>
+                                  )}
                                 </div>
                                 {offlineBadge && (
                                   <span className={`flex-shrink-0 text-xs font-medium px-2 py-0.5 rounded-full ${offlineBadge === 'Offline' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>{offlineBadge}</span>
@@ -4050,7 +4158,7 @@ const Training: React.FC = () => {
                               />
                               <div className={`flex flex-wrap items-center gap-2 rounded-lg p-1.5 -m-1.5 transition-colors`}>
                                 <button onClick={() => saveTrainerPublish(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
-                                  title={isConnected ? "Upload the full Tabula model as a staged artifact. Review and publish to the Model Hub from My Models." : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker; cannot save" : "Worker manager is not reachable; cannot save"}
+                                  title={isConnected ? "Upload the full model as a staged artifact. Review and publish to the Model Hub from My Models." : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker; cannot save" : "Worker manager is not reachable; cannot save"}
                                   className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
                                   {pubStatus === 'saving'
                                     ? <>{spinner} Uploading…</>
@@ -4154,25 +4262,70 @@ const Training: React.FC = () => {
                       })()}
                     </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Artifact ID</label>
-                    <input type="text" value={newTrainerArtifactId} onChange={e => setNewTrainerArtifactId(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="chiron-platform/tabula-trainer" />
-                  </div>
+                  {/* Trainer, resolved from the worker's image. Not a choice:
+                      the image carries one model's dependencies, so any other
+                      trainer would fail on import inside Ray. The manager
+                      rejects a mismatch independently. */}
+                  {(() => {
+                    const img = workerImageFor(launchDialogManagerId);
+                    if (!img) {
+                      return (
+                        <div className="text-xs bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800">
+                          <p className="font-semibold mb-1">This worker's image predates per-model support</p>
+                          <p>
+                            It does not report which model it can train, so Chiron cannot pick a trainer for it.
+                            Restart the worker on a current image, then deploy from here.
+                          </p>
+                          <Link to="/worker" className="inline-block mt-2 underline hover:text-amber-900">
+                            Open the worker setup guide
+                          </Link>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1.5">Trainer</label>
+                        <div className="px-3 py-2 text-sm border border-gray-200 rounded-lg bg-gray-50">
+                          <p className="text-gray-800">{modelDisplayName(img)}</p>
+                          <p className="text-xs text-gray-500 font-mono mt-0.5 truncate">{img.trainer_artifact}</p>
+                        </div>
+                        <p className="text-xs text-gray-400 mt-1">
+                          Set by the worker's image{img.image_ref ? ` (${img.image_ref})` : ''}. To train a different model, run a worker on that model's image.
+                        </p>
+                      </div>
+                    );
+                  })()}
                   <div>
                     <label className="block text-xs font-semibold text-gray-700 mb-1.5">Max batch size</label>
                     <p className="text-xs text-gray-400 -mt-1 mb-1.5">
                       Hardware-aware upper bound for this trainer. Any session that requests a larger <code className="bg-gray-100 px-1 rounded">batch_size</code> is clamped to this value. Pick based on the worker's GPU memory.
                     </p>
-                    {/* Reference GPU memory at common batch sizes, measured live on an
-                        RTX 3090 with the Tabula trainer + the demo blood dataset. Above
-                        the trainer's idle ~0.7 GiB baseline. Scaling is super-linear, so
-                        we don't extrapolate to in-between sizes. */}
-                    <div className="text-xs text-gray-600 -mt-1 mb-1.5 bg-gray-50 border border-gray-200 rounded-md px-2 py-1.5">
-                      <span className="font-medium text-gray-700">Reference memory:</span>{' '}
-                      <code className="bg-white px-1 rounded">8</code> ≈ 2 GB ·{' '}
-                      <code className="bg-white px-1 rounded">16</code> ≈ 6 GB ·{' '}
-                      <code className="bg-white px-1 rounded">32</code> ≈ 20 GB
-                    </div>
+                    {/* Reference figures for the model this worker hosts, from
+                        src/config/chironModels.ts. Measured on a 24 GB RTX 3090
+                        above the trainer's idle ~0.7 GiB baseline. Scaling is
+                        super-linear, so in-between sizes are not extrapolated.
+                        A model whose memory curve is not measured yet lists the
+                        batch sizes validated so far without a memory claim. */}
+                    {(() => {
+                      const img = workerImageFor(launchDialogManagerId);
+                      const entries = referenceMemoryEntries(img?.model_family);
+                      if (entries.length === 0) return null;
+                      const measured = entries.filter(e => e.gb > 0);
+                      return (
+                        <div className="text-xs text-gray-600 -mt-1 mb-1.5 bg-gray-50 border border-gray-200 rounded-md px-2 py-1.5">
+                          <span className="font-medium text-gray-700">
+                            {measured.length > 0 ? `${modelDisplayName(img)} reference memory:` : `${modelDisplayName(img)} validated batch sizes:`}
+                          </span>{' '}
+                          {entries.map((e, i) => (
+                            <React.Fragment key={e.batchSize}>
+                              {i > 0 && ' · '}
+                              <code className="bg-white px-1 rounded">{e.batchSize}</code>
+                              {e.gb > 0 && ` ≈ ${e.gb} GB`}
+                            </React.Fragment>
+                          ))}
+                        </div>
+                      );
+                    })()}
                     {(() => {
                       const cs = managers.find(m => m.serviceId === launchDialogManagerId)?.workerInfo?.cluster_status;
                       if (!cs || !cs.total_gpu_memory || cs.total_gpu_memory <= 0) return null;
@@ -4260,11 +4413,12 @@ const Training: React.FC = () => {
                       );
                     })()}
                   </div>
-                  {/* Pretrained weights selection — local-worker saves + chiron-models full tabula models */}
+                  {/* Pretrained weights selection — local-worker saves + full
+                      chiron-models checkpoints of this worker's model */}
                   <div>
                     <label className="block text-xs font-semibold text-gray-700 mb-1.5">Pretrained weights <span className="text-gray-400 font-normal">(optional)</span></label>
                     <p className="text-xs text-gray-400 -mt-1 mb-1.5">
-                      Loads a full Tabula checkpoint into the new trainer: sets the tissue-specific embedder, the shared transformer, and the projection heads. Transformer-only checkpoints can't be used here.
+                      Loads a full checkpoint of this worker's model into the new trainer: the input embedder, the shared transformer, and the output heads. Checkpoints holding only the shared transformer can't be used here, and neither can a checkpoint from a different model.
                     </p>
                     {isLoadingLocalWeights ? (
                       <div className="flex items-center gap-2 text-xs text-gray-400 py-2"><BiLoaderAlt className="animate-spin" size={12} /> Loading saved weights…</div>
@@ -4272,7 +4426,7 @@ const Training: React.FC = () => {
                       <p className="text-xs text-gray-400">Switch to Trainer tab to load available weights.</p>
                     ) : (() => {
                       const selectedLocal = localModelWeights.find(w => w.path === selectedWeightsPath);
-                      const selectedArtifact = chironModelArtifacts.find(a => a.id === selectedTrainerWeightsArtifactId);
+                      const selectedArtifact = trainerWeightArtifacts.find(a => a.id === selectedTrainerWeightsArtifactId);
                       const selectedLocalDatasets = selectedLocal ? Object.values(selectedLocal.datasets).map((d: any) => d.name || '').filter(Boolean) : [];
                       const selectedLocalDate = selectedLocal?.saved_at ? new Date(selectedLocal.saved_at).toLocaleDateString() : null;
                       return (
@@ -4290,7 +4444,9 @@ const Training: React.FC = () => {
                             ) : selectedArtifact ? (
                               <div className="pr-5">
                                 <p className="text-sm text-gray-800">{selectedArtifact.manifest?.name || selectedArtifact.alias || selectedArtifact.id}</p>
-                                <p className="text-xs text-gray-500 mt-0.5">Tabula model · from Model Collection</p>
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                  {modelDisplayName(workerImageFor(launchDialogManagerId)) || 'Model'} · from Model Collection
+                                </p>
                               </div>
                             ) : (
                               <span className="text-sm text-gray-500 pr-5">Start fresh (no pretrained weights)</span>
@@ -4305,12 +4461,17 @@ const Training: React.FC = () => {
                                   <span className="text-sm text-gray-700">Start fresh</span>
                                 </button>
 
-                                {/* From Model Collection (chiron-models tabula_model artifacts) */}
+                                {/* From Model Collection (full chiron-models checkpoints) */}
                                 <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">From Model Collection</div>
-                                {chironModelArtifacts.length === 0 && (
-                                  <p className="text-xs text-gray-400 text-center py-3 px-3">No tabula models published yet.</p>
+                                {trainerWeightArtifacts.length === 0 && (
+                                  <p className="text-xs text-gray-400 text-center py-3 px-3">
+                                    {(() => {
+                                      const name = modelDisplayName(workerImageFor(launchDialogManagerId));
+                                      return name ? `No ${name} models published yet.` : 'No models published yet.';
+                                    })()}
+                                  </p>
                                 )}
-                                {chironModelArtifacts.map(a => {
+                                {trainerWeightArtifacts.map(a => {
                                   const name = a.manifest?.name || a.alias || a.id;
                                   const tissue = a.manifest?.tissue as string | undefined;
                                   const date = a.manifest?.created_at || a.created_at;
@@ -4353,7 +4514,7 @@ const Training: React.FC = () => {
                       );
                     })()}
                   </div>
-                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainerFor(launchDialogManagerId) || newTrainerDatasets.length === 0} className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainerFor(launchDialogManagerId) || newTrainerDatasets.length === 0 || !workerImageFor(launchDialogManagerId)?.trainer_artifact} title={workerImageFor(launchDialogManagerId)?.trainer_artifact ? undefined : "This worker's image does not declare a model, so there is no trainer to deploy"} className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                     {isCreatingTrainerFor(launchDialogManagerId) ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Trainer ({newTrainerDatasets.length} dataset{newTrainerDatasets.length !== 1 ? 's' : ''})</>}
                   </button>
                 </div>
