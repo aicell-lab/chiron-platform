@@ -1194,6 +1194,16 @@ const Training: React.FC = () => {
   // deploy on the same single-threaded manager actor.
   const mutatingManagersRef = React.useRef<Set<string>>(new Set());
 
+  // Consecutive get_worker_info failures per manager. One dropped poll is not
+  // evidence that a worker is gone — a single network blip used to empty the
+  // orchestrator and trainer lists, which disables Start Training and Save to
+  // worker with no way back until the next successful poll. We only believe
+  // the worker is unreachable after this many misses in a row, mirroring the
+  // MAX_STATUS_FAILURES tolerance the training-status poller already uses.
+  // 3 × 10 s = ~30 s, long enough to ride out a flap mid-round.
+  const workerRefreshFailuresRef = React.useRef<Map<string, number>>(new Map());
+  const MAX_WORKER_REFRESH_FAILURES = 3;
+
   // appIds the user just deleted. BioEngine's stop_app is asynchronous —
   // it spawns a background _undeploy_application task and returns
   // immediately, so the app lingers in _deployed_applications (with status
@@ -1517,6 +1527,7 @@ const Training: React.FC = () => {
     const managerId = serviceId;
     try {
       const workerInfo: WorkerInfo = await callHyphaService(serviceId, 'get_worker_info', {}, { timeoutMs: 10000 });
+      workerRefreshFailuresRef.current.delete(serviceId);
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: true, workerInfo } : m));
       // Merge — preserve only the pending-* placeholder optimism. The
       // DELETING optimism set by the user click is a *one-tick* flip:
@@ -1585,6 +1596,12 @@ const Training: React.FC = () => {
         return [...otherMgrs, ...next];
       });
     } catch (error) {
+      const misses = (workerRefreshFailuresRef.current.get(serviceId) ?? 0) + 1;
+      workerRefreshFailuresRef.current.set(serviceId, misses);
+      // Ride out a blip. Keep the last known good app lists so the buttons that
+      // depend on them stay live, and only declare the worker unreachable once
+      // the misses stack up.
+      if (misses < MAX_WORKER_REFRESH_FAILURES) return;
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: false } : m));
       // Clear stale app data for this manager when it becomes unreachable.
       setOrchestrators(prev => prev.filter(o => o.managerId !== managerId));
