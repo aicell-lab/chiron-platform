@@ -28,3 +28,7 @@ yarn-error.log*
 
 # Local pnpm overrides (e.g. allowBuilds approvals)
 pnpm-workspace.yaml
+
+# Python bytecode from the e2e drivers under tests/
+__pycache__/
+*.pyc

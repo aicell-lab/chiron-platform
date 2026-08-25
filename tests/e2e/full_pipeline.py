@@ -459,9 +459,12 @@ async def main():
             res = await deploy_trainer(server, site, pretrained_artifact=None, app_token=app_token, user_id=user_id, user_email=user_email)
             trainer_apps[site] = res["app_id"]
             trainer_svcs[site] = res["service_id"]
-            keys = await hypha_post(trainer_svcs[site], "get_transformer_keys", {})
+            # get_shared_keys, not the pre-0.5.0 get_transformer_keys. The
+            # scaffold still exposes the old name as an alias, but the
+            # orchestrator calls this one, so this is the path worth covering.
+            keys = await hypha_post(trainer_svcs[site], "get_shared_keys", {})
             check(len(keys) == 24, f"{site} reports 24 FlashAttention keys",
-                  f"{site} expected 24 transformer keys, got {len(keys)}")
+                  f"{site} expected 24 shared weight keys, got {len(keys)}")
 
         log_step("Step 3 — register both with orchestrator")
         for site, svc in trainer_svcs.items():
@@ -487,7 +490,7 @@ async def main():
                                        user_email=user_email)
             trainer_apps["stockholm"] = res["app_id"]
             trainer_svcs["stockholm"] = res["service_id"]
-            keys = await hypha_post(trainer_svcs["stockholm"], "get_transformer_keys", {})
+            keys = await hypha_post(trainer_svcs["stockholm"], "get_shared_keys", {})
             check(len(keys) == 24, "stockholm reports 24 FlashAttention keys",
                   f"stockholm expected 24 transformer keys, got {len(keys)}")
             await hypha_post(orch_svc, "add_trainer", {
