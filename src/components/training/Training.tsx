@@ -2345,6 +2345,135 @@ const Training: React.FC = () => {
     return () => clearInterval(historyInterval);
   }, [isTraining, trainingOrchestratorId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Mirror of `orchestrators` so the status poll below can re-read it from
+  // inside an interval callback without capturing a stale closure.
+  const orchestratorsRef = React.useRef(orchestrators);
+  orchestratorsRef.current = orchestrators;
+
+  // Resolve an orchestrator's *current* Hypha service id.
+  //
+  // These ids are pinned (`<clientId>:<appName>`), so they change whenever the
+  // app's Ray Serve proxy replica rotates. A poll that captured the id once at
+  // launch keeps calling the dead registration and gets a permanent 404, which
+  // is what stranded finished runs: the poll could never observe
+  // `is_running: false` again, so the run stayed "Training Running" forever and
+  // the Save Weights panel (gated on not-actively-training) never rendered.
+  // The 2s history poll above already re-resolves per tick, which is exactly
+  // why that one kept working through the same rotation.
+  const resolveOrchSvcId = React.useCallback((orchKey: string): string | null => {
+    const orch = orchestratorsRef.current.find(o => `${o.managerId}::${o.appId}` === orchKey);
+    if (!orch || orch.status !== 'RUNNING') return null;
+    return orch.serviceIds?.[0]?.websocket_service_id ?? null;
+  }, []);
+
+  // The one poll currently following a run, if any. Owned here rather than by
+  // the effect that starts it: that effect depends on `orchestrators`, which
+  // re-publishes on every worker-info refresh, so an effect-owned poll was torn
+  // down seconds after it started and the re-run then early-returned (training
+  // was by then active) without starting a replacement. Nothing was left
+  // watching, which is how a finished run never got reconciled.
+  const activePollRef = React.useRef<{ key: string; stop: () => void } | null>(null);
+  useEffect(() => () => { activePollRef.current?.stop(); activePollRef.current = null; }, []);
+
+  // Follow a training session to its end and reconcile the UI with it.
+  //
+  // Idempotent: calling it again for the orchestrator already being followed is
+  // a no-op, so both the launch path and the resume path can call it freely.
+  // Shared by both, which previously carried two hand-copied versions of this
+  // loop that had drifted apart.
+  const startTrainingStatusPoll = React.useCallback((orchKey: string) => {
+    if (activePollRef.current?.key === orchKey) return;
+    activePollRef.current?.stop();
+
+    const FAST_MS = 3000;
+    // After the orchestrator has been unreachable for a while, keep watching on
+    // a slower cadence rather than giving up. Deregistration and replica
+    // rotation both recover on their own, and the run usually survives them.
+    const SLOW_MS = 15000;
+    // 10 x 3s = ~30s before we unlock the UI. Shorter than this and a routine
+    // network flap strands the user in a view that refuses Delete and Stop.
+    const MAX_STATUS_FAILURES = 10;
+    // Stop reconciling after this long with no contact at all. Without a cap a
+    // deleted orchestrator would be polled for the lifetime of the page.
+    const MAX_RECONCILE_MS = 30 * 60 * 1000;
+
+    let failures = 0;
+    let unreachableSince = 0;
+    let unlockedByFailure = false;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const stop = () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      if (activePollRef.current?.key === orchKey) activePollRef.current = null;
+    };
+    const schedule = (ms: number) => { if (!stopped) timer = setTimeout(tick, ms); };
+
+    const finish = async (svcId: string) => {
+      setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
+      stop();
+      // Always through callHyphaService with the freshly resolved id. The
+      // resume path used to call an undeclared `orchestratorService` here,
+      // which threw a ReferenceError and left trainingHistory unset, and the
+      // Save Weights panel needs that history to render at all.
+      try {
+        const history = await callHyphaService<any>(svcId, 'get_training_history', {});
+        if (history) setTrainingHistory(history);
+      } catch { /* curves stay as last polled */ }
+    };
+
+    const tick = async () => {
+      if (stopped) return;
+      const svcId = resolveOrchSvcId(orchKey);
+      if (!svcId) { onFailure(); return; }
+      try {
+        const status = await callHyphaService<any>(svcId, 'get_training_status', {});
+        if (stopped) return;
+        failures = 0; unreachableSince = 0;
+        setTrainingStatus(status);
+        const newIds = Object.keys(status.trainers_progress ?? {});
+        if (newIds.length > 0) {
+          setParticipatedTrainerIds(prev => {
+            const next = new Set(prev);
+            newIds.forEach(id => next.add(id));
+            return next;
+          });
+        }
+        if (!status.is_running) { await finish(svcId); return; }
+        // Reachable and still training. Re-enter the training view only if this
+        // poll is what unlocked it, never unconditionally: the user may have
+        // just pressed Stop Now, and the orchestrator still reports is_running
+        // until it winds down. Re-entering there would undo their click.
+        if (unlockedByFailure) {
+          unlockedByFailure = false;
+          setIsTraining(true); setTrainingOrchestratorId(orchKey);
+        }
+        schedule(FAST_MS);
+      } catch {
+        onFailure();
+      }
+    };
+
+    const onFailure = () => {
+      if (stopped) return;
+      failures += 1;
+      if (failures === MAX_STATUS_FAILURES) {
+        // Unlock the UI so Delete and Stop work, but keep watching. This is the
+        // difference that fixes the stranded-run case: the old code cleared the
+        // interval here, so `is_running: false` became unobservable for good.
+        unreachableSince = Date.now();
+        unlockedByFailure = true;
+        setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
+      }
+      if (unreachableSince && Date.now() - unreachableSince > MAX_RECONCILE_MS) { stop(); return; }
+      schedule(failures >= MAX_STATUS_FAILURES ? SLOW_MS : FAST_MS);
+    };
+
+    activePollRef.current = { key: orchKey, stop };
+    schedule(FAST_MS);
+  }, [resolveOrchSvcId]);
+
   // Auto-detect already-running training when the selected orchestrator changes or
   // when the orchestrators list first loads.  Covers:
   //   • User navigates away and back (selectedOrchestrator unchanged, orchestrators reloaded)
@@ -2375,40 +2504,9 @@ const Training: React.FC = () => {
         setTrainingStatus(status);
         const ids = Object.keys(status.trainers_progress ?? {});
         if (ids.length > 0) setParticipatedTrainerIds(new Set(ids));
-        // Poll until done. After 3 consecutive get_training_status failures we
-        // assume the orchestrator is gone (its websocket dropped, replica
-        // rotated and was never replaced, etc.) and exit the training view so
-        // the user can Delete/Stop the registered trainers. See the matching
-        // counter in startTraining's polling loop for the rationale.
-        let consecutiveStatusFailures = 0;
-        const MAX_STATUS_FAILURES = 3;
-        const statusInterval = setInterval(async () => {
-          try {
-            const s = await callHyphaService<any>(orchSvcId, 'get_training_status', {});
-            if (cancelled) { clearInterval(statusInterval); return; }
-            consecutiveStatusFailures = 0;
-            setTrainingStatus(s);
-            const newIds = Object.keys(s.trainers_progress ?? {});
-            if (newIds.length > 0) {
-              setParticipatedTrainerIds(prev => {
-                const next = new Set(prev);
-                newIds.forEach(id => next.add(id));
-                return next;
-              });
-            }
-            if (!s.is_running) {
-              setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null); clearInterval(statusInterval);
-              const h = await orchestratorService.get_training_history();
-              if (h) setTrainingHistory(h);
-            }
-          } catch {
-            consecutiveStatusFailures += 1;
-            if (consecutiveStatusFailures >= MAX_STATUS_FAILURES) {
-              setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
-              clearInterval(statusInterval);
-            }
-          }
-        }, 3000);
+        // The poll owns its own lifetime (see activePollRef), so this effect
+        // re-running on an `orchestrators` refresh does not disturb it.
+        startTrainingStatusPoll(selectedOrchestrator);
       } catch { /* orchestrator not yet reachable — will retry on next dep change */ }
     };
     checkOngoingTraining();
@@ -2441,41 +2539,7 @@ const Training: React.FC = () => {
         setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true);
         setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
       });
-      // After this many consecutive get_training_status failures we treat the
-      // orchestrator as gone and exit the training view, so the user is not
-      // stranded with a UI that refuses Delete and Stop on a dead session.
-      // 3 × 3 s = ~9 s tolerance, comfortable enough to ride out one slow
-      // Hypha hop without flipping out of training mid-round.
-      let consecutiveStatusFailures = 0;
-      const MAX_STATUS_FAILURES = 3;
-      const statusInterval = setInterval(async () => {
-        try {
-          const status = await callHyphaService<any>(orchSvcId, 'get_training_status', {});
-          consecutiveStatusFailures = 0;
-          setTrainingStatus(status);
-          // Accumulate trainer IDs that have appeared in trainers_progress
-          const newIds = Object.keys(status.trainers_progress);
-          if (newIds.length > 0) {
-            setParticipatedTrainerIds(prev => {
-              const next = new Set(prev);
-              newIds.forEach(id => next.add(id));
-              return next;
-            });
-          }
-          if (!status.is_running) {
-            setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null); clearInterval(statusInterval);
-            const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
-            setTrainingHistory(history);
-          }
-        } catch {
-          consecutiveStatusFailures += 1;
-          if (consecutiveStatusFailures >= MAX_STATUS_FAILURES) {
-            // Orchestrator unreachable — exit the training view so Delete/Stop unblock.
-            setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
-            clearInterval(statusInterval);
-          }
-        }
-      }, 3000);
+      startTrainingStatusPoll(launchedFrom);
     } catch (error) {
       setErrorPopupMessage('Failed to Start Training');
       setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
