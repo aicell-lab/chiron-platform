@@ -1,6 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { FaChevronDown, FaChevronRight } from 'react-icons/fa';
 import { DEFAULT_MODEL_FAMILY, getChironModel } from '../../config/chironModels';
+import {
+  WeightTransport,
+  WEIGHT_TRANSPORTS,
+  WEIGHT_TRANSPORT_LABELS,
+  readWeightTransport,
+  storeWeightTransport,
+} from '../../config/federation';
 
 interface ParamConfig {
   type: string;
@@ -58,6 +65,9 @@ interface TrainingConfigPanelProps {
     eval_config: Record<string, any>;
     per_round_timeout: number;
     initial_weights: { artifact_id: string; file_path: string } | null;
+    /** Which transport carries the weight blobs for this run. Chosen per run,
+     *  not per deployment: the same orchestrator and trainers serve both. */
+    transport: WeightTransport;
   }) => void;
   isPreparingTraining: boolean;
   isTraining: boolean;
@@ -92,6 +102,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   // Top-level parameters
   const [numRounds, setNumRounds] = useState(5);
   const [perRoundTimeoutMinutes, setPerRoundTimeoutMinutes] = useState(20);
+  const [transport, setTransport] = useState<WeightTransport>(readWeightTransport);
 
   // Pretrained weights — defaults ON for a fresh orchestrator, OFF when
   // history already exists (loading new pretrained weights would clobber
@@ -377,6 +388,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
       fit_config,
       eval_config,
       per_round_timeout: perRoundTimeoutMinutes * 60,
+      transport,
       initial_weights: usePretrainedWeights && selectedArtifactId
         ? { artifact_id: selectedArtifactId, file_path: 'model.pth' }
         : null,
@@ -455,6 +467,40 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
             />
             <p className="mt-1 text-xs text-gray-400">Maximum time for fit + evaluate per round. Aborts if exceeded.</p>
           </div>
+        </div>
+
+        {/* Weight transport. A run-level choice rather than a deployment one:
+            the same orchestrator and trainers serve both, so switching costs a
+            restart of the run and nothing else. It is surfaced because WebRTC
+            depends on a TURN relay that is outside this platform's control,
+            and when that relay is down the operator needs a way through
+            without waiting for anyone. */}
+        <div className="mt-4">
+          <label className="block text-xs font-semibold text-gray-700 mb-1">Weight Transport</label>
+          <div className="inline-flex rounded-lg border border-gray-200 p-0.5 bg-gray-50">
+            {WEIGHT_TRANSPORTS.map((option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => { setTransport(option); storeWeightTransport(option); }}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  transport === option
+                    ? 'bg-white text-gray-900 shadow-sm font-medium'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {WEIGHT_TRANSPORT_LABELS[option].label}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-gray-400">{WEIGHT_TRANSPORT_LABELS[transport].hint}</p>
+          {transport === 'webrtc' && (
+            <p className="mt-1 text-xs text-gray-400">
+              No automatic fallback: if the handshake fails, the trainer sits out that round rather than
+              quietly relaying its weights through the server. Switch back to WebSocket to get through a
+              network that blocks it.
+            </p>
+          )}
         </div>
       </div>
 

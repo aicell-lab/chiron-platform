@@ -132,3 +132,50 @@ Resource baseline per site:
 | Manager | 0 | 0 |
 
 The same flow is available via Hypha RPC. See `public/skills/chiron-platform/apps/chiron-orchestrator.md` for the underlying `start_training` contract.
+
+## Weight transport and the TURN relay
+
+Step 4 above carries a `transport` choice, exposed in the UI as the **Weight Transport** picker and as the `transport` argument on `start_training`. `websocket` relays weight blobs through the Hypha gateway. `webrtc` sends them peer to peer so the gateway never sees them. Both run on the same orchestrator and trainer apps, so switching is a property of the run, not of the deployment.
+
+`webrtc` depends on infrastructure outside this repo. Peers behind institutional NATs can only complete an ICE handshake through a TURN relay, and both sides fetch credentials from the `turn-server/coturn` Hypha service. The orchestrator does this in `_fetch_ice_servers()`; bioengine's `ProxyDeployment` does the same for the trainer. When that service is unreachable, `hypha_rpc` falls back to a public STUN server with no relay at all, which connects only when both peers happen to sit on friendly networks. The orchestrator logs a warning in that case, so a failing run can be told apart from a blocked one in the app logs.
+
+Credentials are short-lived. The username is `<expiry-epoch>:<user>`, so they are fetched per peer connection rather than cached. A cached list would go stale exactly at the reopen meant to recover a broken channel.
+
+### Is WebRTC usable from this site right now
+
+Run the probe from inside a worker container, not from the host. The container is the network location that matters, and it already has `aiortc` installed. `docker exec` needs `-i`, or the heredoc never reaches the container and the probe prints nothing.
+
+```bash
+docker exec -i -e PROBE_TOKEN="$PERSONAL_HYPHA_TOKEN" chiron-demo-worker python - <<'PY'
+import asyncio, os
+from hypha_rpc import connect_to_server
+from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer
+
+async def main():
+    server = await connect_to_server(
+        {"server_url": "https://hypha.aicell.io", "token": os.environ["PROBE_TOKEN"]}
+    )
+    coturn = await server.get_service("turn-server/coturn")
+    ice = await coturn.get_rtc_ice_servers()
+    print("ICE servers:", ice)
+    pc = RTCPeerConnection(RTCConfiguration([RTCIceServer(**s) for s in ice]))
+    pc.createDataChannel("probe")
+    await pc.setLocalDescription(await pc.createOffer())
+    kinds = {}
+    for line in pc.localDescription.sdp.splitlines():
+        if line.startswith("a=candidate:"):
+            print("  ", line)
+            kinds[line.split()[7]] = kinds.get(line.split()[7], 0) + 1
+    print("by type:", kinds)
+    print("RELAY AVAILABLE:", "relay" in kinds)
+    await pc.close()
+
+asyncio.run(main())
+PY
+```
+
+A `typ relay` candidate means the relay is allocating and `webrtc` is worth using. Only `typ host` means the relay is unreachable from here, and runs should stay on `websocket` until it comes back.
+
+The relay is reached at `turns:turn.hypha.aicell.io:443` over TCP. Port 443 is the one port institutional egress filters reliably leave open. The classic TURN ports (UDP 3478 and TCP 5349) are blocked from the KTH subnet the demo workers sit on, and the relay works anyway, which is exactly why the service advertises 443.
+
+A single-worker demo does not exercise any of this: both peers share a container network namespace, so ICE succeeds on host candidates and the relay is never used. The probe above is the meaningful evidence for a real cross-site run.

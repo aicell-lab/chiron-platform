@@ -15,6 +15,7 @@ import {
   referenceMemoryEntries,
   sharedWeightsLabel,
 } from '../../config/chironModels';
+import { DEFAULT_WEIGHT_TRANSPORT, WeightTransport } from '../../config/federation';
 
 const CountryFlag: React.FC<{ countryName?: string; countryCode?: string; className?: string }> = ({ countryName, countryCode, className }) => {
   const flagUrl = countryCode
@@ -2513,7 +2514,7 @@ const Training: React.FC = () => {
     return () => { cancelled = true; };
   }, [selectedOrchestrator, orchestrators]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const startTraining = async (config: { num_rounds: number; fit_config: Record<string, any>; eval_config: Record<string, any>; per_round_timeout: number; initial_weights: { artifact_id: string; file_path: string } | null; }) => {
+  const startTraining = async (config: { num_rounds: number; fit_config: Record<string, any>; eval_config: Record<string, any>; per_round_timeout: number; initial_weights: { artifact_id: string; file_path: string } | null; transport?: WeightTransport; }) => {
     if (!selectedOrchestrator) return;
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
@@ -2531,7 +2532,11 @@ const Training: React.FC = () => {
       requestAnimationFrame(() => scrollMainContentToTop());
       setSavedItems({});
       setSaveStatuses({});
-      const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout };
+      // `transport` picks how weight blobs move between the orchestrator and
+      // the trainers. Same apps either way — see src/config/federation.ts. The
+      // config panel owns the choice; the default is only reached when a caller
+      // hands us a config from before the picker existed.
+      const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, transport: config.transport || DEFAULT_WEIGHT_TRANSPORT };
       if (config.initial_weights) trainingParams.initial_weights = config.initial_weights;
       // start_training runs the whole session server-side and only returns when
       // done — fire-and-forget with a generous timeout (just shy of an hour).
