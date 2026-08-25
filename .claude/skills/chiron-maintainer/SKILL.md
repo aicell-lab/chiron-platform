@@ -5,7 +5,7 @@ description: Maintainer-side operations for the Chiron platform and its Tabula t
 
 # Chiron / Tabula maintainer skill
 
-Use this skill when working on the Chiron platform internals: setting up a local Tabula backend, building or redeploying a BioEngine app (`chiron-manager`, `chiron-orchestrator`, `tabula-trainer`), or running a federated training session. For agent or end-user workflows on the public platform, use `public/skills/chiron-platform/SKILL.md` instead.
+Use this skill when working on the Chiron platform internals: setting up a local Tabula backend, building or redeploying a BioEngine app (`chiron-manager`, `chiron-orchestrator`, or one of the four per-model trainers), or running a federated training session. For agent or end-user workflows on the public platform, use `public/skills/chiron-platform/SKILL.md` instead.
 
 ## Tabula backend setup
 
@@ -47,7 +47,22 @@ unset HYPHA_TOKEN && docker compose up -d worker-tabula
 unset HYPHA_TOKEN && docker compose down worker-tabula && docker compose up -d worker-tabula
 ```
 
-The current trainer image is `ghcr.io/aicell-lab/tabula:0.6.0`.
+## Per-model worker images
+
+One image per model, each carrying that model's dependencies and hosting that model's trainer only. Built from `../tabula/docker/` (see its README for the layer order and the image identity contract), all released together under a single version tag.
+
+| Model | Image | Trainer artifact | Validated batch size |
+|-------|-------|------------------|----------------------|
+| Tabula | `ghcr.io/aicell-lab/chiron-tabula:<version>` | `chiron-platform/tabula-trainer` | 32 (about 20 GB on a 24 GB RTX 3090, 16 is about 6 GB, 8 is about 2 GB) |
+| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` | 32 |
+| Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` | 16 |
+| scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` | 8 |
+
+The batch sizes other than Tabula's come from the four-model probe runs on a 24 GB RTX 3090 and are the sizes that ran, not measured memory curves.
+
+Each image bakes in `CHIRON_MODEL_FAMILY`, `CHIRON_MODEL_NAME`, `CHIRON_TRAINER_ARTIFACT` and `CHIRON_IMAGE_REF`. `chiron-manager` reads them from its own environment, reports them as `worker_info.chiron_image`, defaults `create_trainer` to the declared artifact, and refuses any trainer whose manifest declares a different `model_family`. The frontend mirror of the image refs is `src/config/chironModels.ts`, whose `CHIRON_IMAGE_VERSION` must be bumped when a new image set is published.
+
+Legacy `ghcr.io/aicell-lab/tabula:<version>` images carry no identity variables. A worker on one shows as an outdated image in the UI and cannot deploy a trainer.
 
 ## Uploading and deploying BioEngine apps
 
@@ -103,7 +118,7 @@ Notes:
 Once at least one orchestrator and one or more trainer workers are running, drive the session from the Chiron UI at https://chiron.aicell.io/#/training:
 
 1. Create an Orchestrator application.
-2. Create one or more Tabula Trainer applications.
+2. Create one or more Trainer applications. The trainer artifact is fixed by the worker's image, so every trainer in one session trains the same model.
 3. Register trainers to the orchestrator.
 4. Start federated training rounds.
 5. Monitor progress and publish trained weights to the artifact hub.
@@ -112,7 +127,7 @@ Resource baseline per site:
 
 | Application | CPU | GPU |
 |-------------|-----|-----|
-| Tabula Trainer | 1 | 1 |
+| Trainer | 1 | 1 |
 | Orchestrator | 1 | 0 |
 | Manager | 0 | 0 |
 

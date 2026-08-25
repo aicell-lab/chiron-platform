@@ -101,11 +101,14 @@ version: 0.1.0
 name: My Foundation Model Trainer
 description: Federated trainer for <model name> on Chiron.
 tags: ["federated learning", "<model name>", "single-cell"]
+model_family: my-foundation-model   # same slug as get_properties and the image
 authorized_users:
   - "*"           # public: any chiron-platform user can deploy this trainer artifact
 deployments:
   - trainer:MyFoundationModelTrainer
 ```
+
+`model_family` is what makes a worker accept this trainer. Before deploying, `chiron-manager` compares it against the `CHIRON_MODEL_FAMILY` baked into the worker's image and refuses the pair when they disagree, naming both families. Declare no pip requirements: the trainer runs in the image built for its model, which already carries every dependency it needs. Document the versions the trainer expects in its README instead.
 
 Resource baseline (matches the Tabula trainer):
 
@@ -164,7 +167,16 @@ class MyFoundationModelTrainer:
 
     @schema_method
     async def get_properties(self) -> Dict[str, Union[str, int]]:
-        return {"artifact_id": os.environ.get("BIOENGINE_APP_ARTIFACT_ID", "")}
+        # model_family must match the manifest and the image's
+        # CHIRON_MODEL_FAMILY. The orchestrator reads these three fields to
+        # label the run, title the parameter panel, and say in prose what
+        # FedAvg averages, so they are the only place a model names itself.
+        return {
+            "artifact_id": os.environ.get("BIOENGINE_APP_ARTIFACT_ID", ""),
+            "model_family": "my-foundation-model",
+            "display_name": "My Foundation Model",
+            "shared_weight_scope": "the shared transformer trunk",
+        }
 
     @schema_method
     async def get_transformer_keys(self) -> List[str]:

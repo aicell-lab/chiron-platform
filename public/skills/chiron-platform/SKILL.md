@@ -37,9 +37,9 @@ Chiron's Hypha workspace is `chiron-platform`. Published model checkpoints live 
 
 - **Chiron Manager** (`<worker>:chiron-manager`) — control plane: discovers datasets, launches and tears down orchestrator and trainer apps, surfaces logs, reports cluster state.
 - **Chiron Orchestrator** (`<orch-app>:chiron-orchestrator`) — Flower-based FedAvg server that coordinates one federated training session at a time.
-- **Tabula Trainer** (`<trainer-app>:tabula-trainer`) — local Flower client that trains on the institution's private datasets. There can be many trainer apps registered to one orchestrator.
+- **Trainer** (`<trainer-app>:<model>-trainer`, for example `:tabula-trainer`) — local Flower client that trains on the institution's private datasets. There can be many trainer apps registered to one orchestrator, all training the same model.
 
-Tabula's `in_feature` (gene-sequence length the model consumes) is hard-coded to 1,200 in `tabula/framework.yaml` and the data server pre-cuts every dataset to this width before exposing it to the trainer. Chiron runs on BioEngine v0.10.13. The bioengine skill at [bioimage.io/public/skills/bioengine/SKILL.md](https://bioimage.io/public/skills/bioengine/SKILL.md) targets v0.11; the Hypha RPC contract documented here is stable across both, but the BioEngine app build / manifest examples in that skill may differ slightly. **Use this skill for everything Chiron-specific. Delegate to the bioengine skill for everything BioEngine-general.**
+The manager and the orchestrator are model-agnostic. The trainer is not: each worker image carries exactly one model's dependencies and hosts that model's trainer only (see [§ 2](#2-set-up-a-chiron-worker)). For Tabula, `in_feature` (the gene-sequence length the model consumes) is hard-coded to 1,200 in `tabula/framework.yaml` and the data server pre-cuts every dataset to this width before exposing it to the trainer. The other models read the counts themselves and do their own encoding. Chiron runs on BioEngine v0.10.13. The bioengine skill at [bioimage.io/public/skills/bioengine/SKILL.md](https://bioimage.io/public/skills/bioengine/SKILL.md) targets v0.11; the Hypha RPC contract documented here is stable across both, but the BioEngine app build / manifest examples in that skill may differ slightly. **Use this skill for everything Chiron-specific. Delegate to the bioengine skill for everything BioEngine-general.**
 
 ## 1. Explore published Tabula models
 
@@ -48,6 +48,17 @@ See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
 ## 2. Set up a Chiron worker
 
 Before generating any launch command, gather the environment yourself rather than asking the user to guess.
+
+**Pick the model first.** A worker's container image decides which model it can train: it carries that model's dependencies and hosts that model's trainer, and no other. Ask the user which model they want to train and launch the matching image.
+
+| Model | Image | Trainer artifact |
+|-------|-------|------------------|
+| Tabula | `ghcr.io/aicell-lab/chiron-tabula:<version>` | `chiron-platform/tabula-trainer` |
+| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` |
+| Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` |
+| scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` |
+
+A site that wants to train two models runs two workers, one per image. Every image declares its identity in `CHIRON_MODEL_FAMILY`, `CHIRON_MODEL_NAME`, `CHIRON_TRAINER_ARTIFACT` and `CHIRON_IMAGE_REF`, which the manager reports as `worker_info.chiron_image` and the Chiron UI shows as the worker's model badge. `create_trainer` defaults to `CHIRON_TRAINER_ARTIFACT` and refuses any trainer artifact declaring a different `model_family`. A worker on an image that predates this contract reports no `chiron_image` and cannot deploy a trainer at all, so the fix is to pull a current image. The setup wizard at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker) has a model selector that fills the right image in for you.
 
 **Detect the host environment.** Run these checks and only ask the user when a check fails or is ambiguous:
 
@@ -80,7 +91,13 @@ The Chiron web interface at [chiron.aicell.io/#/training](https://chiron.aicell.
 
 ## 4. Contribute a trainer for another single cell foundation model
 
-Chiron's orchestrator does not require code changes to host a new foundation model. The trainer template at [references/trainer-artifact-template.md](references/trainer-artifact-template.md) documents the per-model engineering: extend the base trainer image with the model's Python dependencies, implement the `trainer.py` against the same Flower client + Hypha RPC contract that `tabula-trainer` uses, and register the result as a new trainer artifact. Each worker image bundles a single foundation model's trainer at build time, so a site that wants to participate in federations for multiple foundation models deploys one worker per model. External contributions for additional foundation models are welcome.
+Chiron's manager and orchestrator do not require code changes to host a new foundation model. The trainer template at [references/trainer-artifact-template.md](references/trainer-artifact-template.md) documents the per-model engineering: extend the Chiron base image with the model's Python dependencies, implement the `trainer.py` against the same Flower client + Hypha RPC contract that `tabula-trainer` uses, and register the result as a new trainer artifact. Each worker image bundles a single foundation model's trainer at build time, so a site that wants to participate in federations for multiple foundation models deploys one worker per model. External contributions for additional foundation models are welcome.
+
+A new model is wired in through three matching declarations, all carrying the same family slug:
+
+- The **adapter** sets `model_family` as a `ClassVar`, plus the display name and the shared-weight scope it reports through `get_properties()`. The orchestrator reads those to label the run, name the parameters in the UI, and describe what FedAvg actually averages.
+- The **trainer artifact manifest** sets `model_family: <slug>`. The manager compares it against the image before deploying, so a mismatched pair fails at the button rather than inside Ray.
+- The **image** sets `CHIRON_MODEL_FAMILY=<slug>`, `CHIRON_MODEL_NAME`, `CHIRON_TRAINER_ARTIFACT` pointing at that artifact, and `CHIRON_IMAGE_REF`. Nothing else in the platform needs to know the model exists.
 
 ## Conventions (read once)
 
@@ -104,7 +121,7 @@ manager = await server.get_service(managers[0]["id"])
 
 **Authentication.** Set the `HYPHA_TOKEN` environment variable from a token issued for the `chiron-platform` workspace. The browser flow at [hypha.aicell.io](https://hypha.aicell.io) issues tokens. Read-only methods (`get_worker_info`, `get_datasets_info`, `list_trainers`, etc.) are accessible to any authenticated user. Write methods (`create_orchestrator`, `create_trainer`, `start_training`, `save_*_weights`) enforce ownership via the `caller_id` and `owner_id` parameters; see [apps/chiron-manager.md § Permissions](apps/chiron-manager.md).
 
-**Model Hub collection.** Every published checkpoint, whether transformer-only (orchestrator save) or full (trainer save), lives in `chiron-platform/chiron-models`. The artifact manifest carries a `global_transformer` boolean flag that distinguishes the two. See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
+**Model Hub collection.** Every published checkpoint, whether shared-weights-only (orchestrator save) or full (trainer save), lives in `chiron-platform/chiron-models`. The artifact manifest carries a `global_transformer` boolean flag that distinguishes the two, and a `model_family` slug saying which model it belongs to. A checkpoint only loads into its own model, so the UI offers each worker the checkpoints of its family alone. Checkpoints published before `model_family` existed are all Tabula. See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
 
 ## Common pitfalls
 

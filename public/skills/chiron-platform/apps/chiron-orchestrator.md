@@ -33,11 +33,27 @@ Trainers usually self-register through their own `register_to_orchestrator` meth
 
 ### `get_trainer_params() -> dict`
 
-Returns the fit and evaluate parameter schemas (Flower-style `fit_config` / `eval_config` dictionaries) that every registered trainer expects. Call this before `start_training` to see what knobs you can pass and what their defaults are. The Tabula trainer's `fit_config` includes `batch_size`, `learning_rate`, `corruption_rate`, `contrastive_scale`, `reconstruction_scale`, `temperature`, and `limit_train_batches`. The `eval_config` includes `batch_size` and `limit_val_batches`.
+Returns the fit and evaluate parameter schemas (Flower-style `fit_config` / `eval_config` dictionaries) that every registered trainer expects, plus a `model` block naming which model they belong to. Call this before `start_training` to see what knobs you can pass and what their defaults are.
+
+The schemas are read live from the registered trainer's own `start_fit` / `start_evaluate` signature, so each model reports its own knobs. The Tabula trainer's `fit_config` includes `batch_size`, `learning_rate`, `corruption_rate`, `contrastive_scale`, `reconstruction_scale`, `temperature`, and `limit_train_batches`, and its `eval_config` includes `batch_size` and `limit_val_batches`. Do not assume those names for another model.
+
+```python
+{
+    "fit": {...},
+    "evaluate": {...},
+    "model": {
+        "family": "scgpt",
+        "display_name": "scGPT",
+        "shared_weight_scope": "encoder.+value_encoder.+transformer_encoder.",
+    },
+}
+```
+
+`shared_weight_scope` is the trainer's own weight-scope label, a `+`-joined list of the `state_dict` key prefixes that get averaged each round (Tabula reports `transformer.`). Everything outside it stays site-local. The `model` block requires at least one registered trainer, the same precondition as the schemas. Orchestrators older than 0.3.17 omit it.
 
 ## Starting training
 
-### `start_training(num_rounds, fit_config=None, eval_config=None, initial_weights=None, per_round_timeout=300) -> None`
+### `start_training(num_rounds, fit_config=None, fit_config_per_trainer=None, eval_config=None, eval_config_per_trainer=None, initial_weights=None, per_round_timeout=300) -> None`
 
 Begin a federated run. The orchestrator validates the configs against every registered trainer, creates a run-artifact in `chiron-platform/chiron-models`, optionally broadcasts initial weights, and enters the round loop.
 
@@ -45,7 +61,9 @@ Parameters:
 
 - `num_rounds: int` — how many FedAvg rounds to execute.
 - `fit_config: dict | None` — per-round fit configuration handed to each trainer. Defaults to the schema's defaults.
+- `fit_config_per_trainer: dict | None` — per-trainer overrides keyed by trainer service id, merged on top of `fit_config` for that trainer only. Use it to give heterogeneous hardware different batch sizes.
 - `eval_config: dict | None` — per-round evaluation configuration.
+- `eval_config_per_trainer: dict | None` — same merge semantics, for the evaluation phase.
 - `initial_weights: dict | None` — optional pretrained weights, schema `{"artifact_id": "<ws>/<alias>", "file_path": "model.pth"}`. If set, every trainer downloads and loads them via `load_pretrained_weights(transformer_only=True)` before round 1.
 - `per_round_timeout: int` — seconds; default `300`. A round that exceeds this is aborted and excluded from the training history. The trainer-side watchdog uses this timeout plus an aggregation buffer to clear its session-active flag if the orchestrator crashes mid-round.
 
