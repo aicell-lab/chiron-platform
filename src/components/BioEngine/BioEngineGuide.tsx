@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { hyphaWebsocketClient } from 'hypha-rpc';
 import { useHyphaStore } from '../../store/hyphaStore';
+import InfoPopover from './InfoPopover';
+import { HYPHA_SERVER_URL } from '../../config/hypha';
 import {
   CHIRON_MODELS,
   CHIRON_MODEL_FAMILIES,
@@ -131,7 +133,7 @@ const BioEngineGuide: React.FC<BioEngineGuideProps> = ({ onScrollToWorkers }) =>
     if (isConnected && server) return;
     setIsLoggingIn(true);
     try {
-      const serverUrl = 'https://hypha.aicell.io';
+      const serverUrl = HYPHA_SERVER_URL;
       const loginToken = await client.login({
         server_url: serverUrl,
         login_callback: (ctx: { login_url: string }) => window.open(ctx.login_url),
@@ -245,7 +247,7 @@ const BioEngineGuide: React.FC<BioEngineGuideProps> = ({ onScrollToWorkers }) =>
     let cancelled = false;
     const resolveWorkspace = async () => {
       try {
-        const url = serverUrl || 'https://hypha.aicell.io';
+        const url = serverUrl || HYPHA_SERVER_URL;
         const tmpServer = await hyphaWebsocketClient.connectToServer({ server_url: url, token });
         if (!cancelled) {
           const ws = tmpServer?.config?.workspace as string | undefined;
@@ -705,252 +707,220 @@ ${bin} exec ${gpuFlag}\\
           {/* ── Human mode: full manual configurator (Chiron-specific). ── */}
           {audience === 'human' && (<>
 
-          {/* Container runtime required */}
-          <div className="p-4 bg-orange-50 rounded-xl border border-orange-200">
-            <p className="text-sm font-semibold text-orange-800 mb-1">Container runtime required</p>
-            <p className="text-sm text-orange-700">
-              The Chiron worker runs inside a container image (~10 GB, pulled automatically on first use).{' '}
-              <strong>Docker</strong> and <strong>Podman</strong> use Docker Compose to manage the two services.{' '}
-              <strong>Singularity</strong> and <strong>Apptainer</strong> run each process directly, recommended for HPC clusters where Docker is unavailable.
+          {/* Training Data Directory */}
+          <div className="bg-gradient-to-r from-blue-50 to-purple-50 p-4 rounded-xl border border-blue-200">
+            <p className="text-sm font-semibold text-gray-800 mb-1">Training Data Directory</p>
+            <p className="text-sm text-gray-700">
+              A <strong>trainer</strong> reads single-cell datasets from a directory on the host that the worker mounts.
+              Nothing is copied or imported. An <strong>Orchestrator</strong> needs no data at all: leave the field empty
+              and the data&#8209;server is omitted entirely.
             </p>
-            {gpus > 0 && (
-              <p className="text-sm text-orange-700 mt-2">
-                <strong>GPU support: </strong>
-                {isComposeRuntime() ? (
-                  <>Requires the <strong>NVIDIA Container Toolkit</strong> on the host. See the{' '}
-                    <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html" target="_blank" rel="noopener noreferrer" className="underline hover:text-orange-900">installation guide</a>.
-                  </>
-                ) : (
-                  <>Pass <code className="bg-orange-100 px-1 rounded">--nv</code> to expose NVIDIA GPUs to the container. NVIDIA drivers must be installed on the host; no additional toolkit is required on most HPC systems.</>
-                )}
-              </p>
-            )}
-          </div>
 
-          {/* Data Import Directory */}
-          <div className="p-4 bg-blue-50 rounded-xl border border-blue-200">
-            <div className="flex items-start">
-              <svg className="w-4 h-4 text-blue-500 mr-2 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <p className="text-sm font-medium text-gray-800 mt-3 mb-1">How the directory is laid out</p>
+            <ul className="text-sm text-gray-700 list-disc list-inside space-y-1">
+              <li>One subfolder per dataset, holding one or more <code className="bg-white/60 px-1 rounded">.h5ad</code> files and a <code className="bg-white/60 px-1 rounded">manifest.yaml</code>.</li>
+              <li>The data&#8209;server auto&#8209;converts <code className="bg-white/60 px-1 rounded">.h5ad</code> &rarr; <code className="bg-white/60 px-1 rounded">.zarr</code> on first read, and rescans the directory every 30&nbsp;seconds.</li>
+            </ul>
+
+            <p className="text-sm font-medium text-gray-800 mt-3 mb-1">What the data&#8209;server precomputes</p>
+            <ul className="text-sm text-gray-700 list-disc list-inside space-y-1">
+              <li>Ranks genes by per-dataset over-dispersion and keeps the 1,200 most variable.</li>
+              <li>Discretises every cell into 50 quantile bins and pre-cuts a <code className="bg-white/60 px-1 rounded">tabula_binned</code> layer of shape <code className="bg-white/60 px-1 rounded">(n_cells, 1200)</code>, which is what <strong>Tabula</strong> trains on.</li>
+              <li>The other models read the counts themselves and do their own encoding. Cell- and gene-level quality control is left to whatever you applied upstream.</li>
+            </ul>
+
+            {/* Amber callout: zarr is mutated in place */}
+            <div className="mt-3 bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2">
+              <svg className="w-4 h-4 mt-0.5 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z" />
               </svg>
-              <div className="text-sm text-blue-800 flex-1">
-                <span className="font-medium">Training Data Directory</span>
-                <span className="text-blue-700 text-xs block mt-1">
-                  A <strong>trainer</strong> reads single-cell datasets from a directory on the host that the worker mounts. Nothing is copied or imported. Each dataset lives in its own subfolder with one or more <code className="bg-blue-100 px-1 rounded">.h5ad</code> files and a <code className="bg-blue-100 px-1 rounded">manifest.yaml</code>. The data&#8209;server auto&#8209;converts <code className="bg-blue-100 px-1 rounded">.h5ad</code> &rarr; <code className="bg-blue-100 px-1 rounded">.zarr</code> on first read and rescans every 30&nbsp;seconds. It also ranks genes by per-dataset over-dispersion to pick the 1,200 most variable, discretises every cell into 50 quantile bins, and pre-cuts a <code className="bg-blue-100 px-1 rounded">tabula_binned</code> layer of shape <code className="bg-blue-100 px-1 rounded">(n_cells, 1200)</code>, which is what <strong>Tabula</strong> trains on. The other models read the counts themselves and do their own encoding. Cell- and gene-level quality control is left to whatever you applied upstream.
-                  <br /><br />
-                  An <strong>Orchestrator</strong> needs no data &mdash; leave the field empty and the data&#8209;server is omitted entirely.
-                </span>
+              <div className="text-xs text-amber-800 leading-snug">
+                <strong>Heads up:</strong> the data&#8209;server writes the HVG rank, the value&#8209;binned layer, and a UMAP into every <code className="bg-amber-100 px-1 rounded">.zarr/</code> it discovers. To keep your original file unchanged, ship the <code className="bg-amber-100 px-1 rounded">.h5ad</code>. The <code className="bg-amber-100 px-1 rounded">.h5ad</code> is opened read&#8209;only and the data&#8209;server only ever mutates the sibling <code className="bg-amber-100 px-1 rounded">.zarr/</code> it creates. If you point the worker at a <code className="bg-amber-100 px-1 rounded">.zarr/</code> you consider canonical, back it up first.
+              </div>
+            </div>
 
-                {/* Amber callout: zarr is mutated in place */}
-                <div className="mt-3 bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2">
-                  <svg className="w-4 h-4 mt-0.5 text-amber-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z" />
-                  </svg>
-                  <div className="text-xs text-amber-800 leading-snug">
-                    <strong>Heads up:</strong> the data&#8209;server writes the HVG rank, the value&#8209;binned layer, and a UMAP into every <code className="bg-amber-100 px-1 rounded">.zarr/</code> it discovers. To keep your original file unchanged, ship the <code className="bg-amber-100 px-1 rounded">.h5ad</code>. The <code className="bg-amber-100 px-1 rounded">.h5ad</code> is opened read&#8209;only and the data&#8209;server only ever mutates the sibling <code className="bg-amber-100 px-1 rounded">.zarr/</code> it creates. If you point the worker at a <code className="bg-amber-100 px-1 rounded">.zarr/</code> you consider canonical, back it up first.
-                  </div>
-                </div>
-
-                {/* Disclosure 1 — example folder structure */}
-                <button
-                  onClick={() => setShowDataExample(!showDataExample)}
-                  className="flex items-center text-xs text-blue-600 hover:text-blue-900 mt-3 transition-colors duration-150 ease-out active:scale-[0.97]"
-                >
-                  <svg className={`w-3 h-3 mr-1 transition-transform duration-200 ease-out ${showDataExample ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
-                  {showDataExample ? 'Hide' : 'Show'} example folder layout
-                </button>
-                {showDataExample && (
-                  <div className="mt-3 bg-gray-900 rounded-lg p-3">
-                    <pre className="text-green-400 text-xs font-mono overflow-x-auto whitespace-pre">{`/path/to/data/
+            {/* Disclosure 1 — example folder structure */}
+            <button
+              onClick={() => setShowDataExample(!showDataExample)}
+              className="flex items-center text-xs text-blue-600 hover:text-blue-900 mt-3 transition-colors duration-150 ease-out active:scale-[0.97]"
+            >
+              <svg className={`w-3 h-3 mr-1 transition-transform duration-200 ease-out ${showDataExample ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+              {showDataExample ? 'Hide' : 'Show'} example folder layout
+            </button>
+            {showDataExample && (
+              <div className="mt-3 bg-gray-900 rounded-lg p-3">
+                <pre className="text-green-400 text-xs font-mono overflow-x-auto whitespace-pre">{`/path/to/data/
 ├── thymus/
 │   ├── thymus_atlas.h5ad   ← .h5ad auto converts to .zarr
 │   └── manifest.yaml       ← describes the thymus dataset
 └── blood/
     ├── pbmc_10k.zarr/      ← already-converted zarr is fine too
     └── manifest.yaml       ← describes the blood dataset`}</pre>
-                  </div>
-                )}
-
-                {/* Disclosure 2 — expected AnnData structure */}
-                <button
-                  onClick={() => setShowAnnDataKeys(!showAnnDataKeys)}
-                  className="flex items-center text-xs text-blue-600 hover:text-blue-900 mt-3 transition-colors duration-150 ease-out active:scale-[0.97]"
-                >
-                  <svg className={`w-3 h-3 mr-1 transition-transform duration-200 ease-out ${showAnnDataKeys ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
-                  {showAnnDataKeys ? 'Hide' : 'Show'} expected AnnData structure
-                </button>
-                {showAnnDataKeys && (
-                  <div className="mt-3 bg-white rounded-lg p-3 border border-blue-100">
-                    <p className="text-xs text-blue-900 mb-2 leading-snug">
-                      Only these AnnData slots are read. Anything in <code className="bg-blue-50 px-1 rounded">adata.raw.X</code>, <code className="bg-blue-50 px-1 rounded">adata.layers[...]</code>, or other groups is ignored. Move counts into <code className="bg-blue-50 px-1 rounded">adata.X</code> before shipping.
-                    </p>
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="text-gray-500">
-                          <th className="text-left font-medium pb-1">Slot</th>
-                          <th className="text-left font-medium pb-1">Role</th>
-                          <th className="text-left font-medium pb-1">Required?</th>
-                        </tr>
-                      </thead>
-                      <tbody className="text-blue-900">
-                        <tr className="border-t border-blue-100">
-                          <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.X</code></td>
-                          <td className="py-1">Raw integer count matrix <code className="bg-blue-50 px-1 rounded">(n_cells, n_vars)</code>. Source for HVG ranking, binning, and UMAP.</td>
-                          <td className="py-1 font-medium">Yes</td>
-                        </tr>
-                        <tr className="border-t border-blue-100">
-                          <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.var[&quot;gene_id&quot;]</code></td>
-                          <td className="py-1">Int gene token IDs the trainer feeds to the model. Without it cross-dataset gene matching breaks.</td>
-                          <td className="py-1">Strongly recommended</td>
-                        </tr>
-                        <tr className="border-t border-blue-100">
-                          <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.obs</code>, <code className="bg-blue-50 px-1 rounded">adata.var</code></td>
-                          <td className="py-1">Preserved verbatim. HVG rank and selection arrays are written alongside.</td>
-                          <td className="py-1">Optional</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-
-                {/* Disclosure 3 — manifest.yaml builder form */}
-                <button
-                  onClick={() => setShowManifestForm(!showManifestForm)}
-                  className="flex items-center text-xs text-blue-600 hover:text-blue-900 mt-3 transition-colors duration-150 ease-out active:scale-[0.97]"
-                >
-                  <svg className={`w-3 h-3 mr-1 transition-transform duration-200 ease-out ${showManifestForm ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
-                  {showManifestForm ? 'Hide' : 'Build'}<code className="bg-blue-100 px-1 rounded mx-1">manifest.yaml</code>
-                </button>
-                {showManifestForm && (
-                  <div className="mt-3 bg-white rounded-lg p-3 border border-blue-100 space-y-3">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">
-                          Dataset ID <span className="text-red-500">*</span>
-                        </label>
-                        <input
-                          type="text"
-                          value={manifestId}
-                          onChange={(e) => setManifestId(e.target.value)}
-                          placeholder="blood_perturb"
-                          className="w-full px-2 py-1.5 text-xs font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        />
-                        <p className="text-[10px] text-gray-500 mt-1">Unique. <code>snake_case</code> conventional.</p>
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">
-                          Display name <span className="text-red-500">*</span>
-                        </label>
-                        <input
-                          type="text"
-                          value={manifestName}
-                          onChange={(e) => setManifestName(e.target.value)}
-                          placeholder="Blood-Perturb"
-                          className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        />
-                        <p className="text-[10px] text-gray-500 mt-1">Short, Title-cased label shown in the Chiron UI. Use a tissue or one-word descriptor, hyphenate a sub-descriptor when needed (e.g. <code className="bg-gray-100 px-1 rounded">Thymus</code>, <code className="bg-gray-100 px-1 rounded">Blood-Perturb</code>, <code className="bg-gray-100 px-1 rounded">Skin Aging - BLSA</code>).</p>
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Description</label>
-                      <textarea autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other"
-                        rows={2}
-                        value={manifestDescription}
-                        onChange={(e) => setManifestDescription(e.target.value)}
-                        placeholder="One-line description of what the dataset contains."
-                        className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Authorized users</label>
-                        <TagInput
-                          tags={manifestAuthorizedUsers}
-                          onChange={setManifestAuthorizedUsers}
-                          placeholder="user@example.com or *"
-                        />
-                        <p className="text-[10px] text-gray-500 mt-1"><code>*</code> = public access on this worker.</p>
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Tags</label>
-                        <TagInput
-                          tags={manifestTags}
-                          onChange={setManifestTags}
-                          placeholder="tissue, assay, disease…"
-                        />
-                        <p className="text-[10px] text-gray-500 mt-1">Free-text. Optional.</p>
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">License</label>
-                      <select
-                        value={manifestLicense}
-                        onChange={(e) => setManifestLicense(e.target.value)}
-                        className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      >
-                        <option value="CC-BY-4.0">CC-BY-4.0 — attribution, commercial OK</option>
-                        <option value="CC-BY-NC-4.0">CC-BY-NC-4.0 — attribution, non-commercial</option>
-                        <option value="CC0-1.0">CC0-1.0 — public domain</option>
-                        <option value="MIT">MIT</option>
-                        <option value="">Other / unspecified</option>
-                      </select>
-                    </div>
-
-                    {/* Preview + download */}
-                    <div className="bg-gray-50 border border-gray-200 rounded p-2">
-                      <p className="text-[10px] uppercase tracking-wide font-semibold text-gray-500 mb-1">Preview</p>
-                      <pre className="text-gray-700 text-[11px] font-mono whitespace-pre overflow-x-auto">{buildManifestYaml()}</pre>
-                    </div>
-
-                    <button
-                      onClick={downloadManifest}
-                      className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-[transform,background-color] duration-150 ease-out active:scale-[0.97]"
-                    >
-                      {manifestDownloaded ? (
-                        <>
-                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                          Downloaded
-                        </>
-                      ) : (
-                        <>
-                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" /></svg>
-                          Download manifest.yaml
-                        </>
-                      )}
-                    </button>
-                    <p className="text-[11px] text-gray-600">
-                      Drop the file inside the dataset's subfolder (alongside your <code className="bg-gray-100 px-1 rounded">.h5ad</code> or <code className="bg-gray-100 px-1 rounded">.zarr</code>), with filename <code className="bg-gray-100 px-1 rounded font-mono">manifest.yaml</code>.
-                    </p>
-                  </div>
-                )}
-
               </div>
-            </div>
-          </div>
+            )}
 
-          {/* BioEngine Workspace Directory */}
-          <div className="p-4 bg-blue-50 rounded-xl border border-blue-200">
-            <div className="flex items-start">
-              <svg className="w-4 h-4 text-blue-500 mr-2 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            {/* Disclosure 2 — expected AnnData structure */}
+            <button
+              onClick={() => setShowAnnDataKeys(!showAnnDataKeys)}
+              className="flex items-center text-xs text-blue-600 hover:text-blue-900 mt-3 transition-colors duration-150 ease-out active:scale-[0.97]"
+            >
+              <svg className={`w-3 h-3 mr-1 transition-transform duration-200 ease-out ${showAnnDataKeys ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
               </svg>
-              <p className="text-sm text-blue-800">
-                <span className="font-medium">BioEngine Workspace Directory: </span>
-                <code className="bg-blue-100 px-1 rounded">{getWorkspaceDirPath()}</code>
-                <span className="text-blue-700 text-xs block mt-1">
-                  Created on the host and mounted into the container(s). Stores worker app data, Ray state, logs, and temporary files. Change it under Advanced Options below.
-                </span>
-              </p>
-            </div>
+              {showAnnDataKeys ? 'Hide' : 'Show'} expected AnnData structure
+            </button>
+            {showAnnDataKeys && (
+              <div className="mt-3 bg-white rounded-lg p-3 border border-blue-100">
+                <p className="text-xs text-blue-900 mb-2 leading-snug">
+                  Only these AnnData slots are read. Anything in <code className="bg-blue-50 px-1 rounded">adata.raw.X</code>, <code className="bg-blue-50 px-1 rounded">adata.layers[...]</code>, or other groups is ignored. Move counts into <code className="bg-blue-50 px-1 rounded">adata.X</code> before shipping.
+                </p>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-gray-500">
+                      <th className="text-left font-medium pb-1">Slot</th>
+                      <th className="text-left font-medium pb-1">Role</th>
+                      <th className="text-left font-medium pb-1">Required?</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-blue-900">
+                    <tr className="border-t border-blue-100">
+                      <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.X</code></td>
+                      <td className="py-1">Raw integer count matrix <code className="bg-blue-50 px-1 rounded">(n_cells, n_vars)</code>. Source for HVG ranking, binning, and UMAP.</td>
+                      <td className="py-1 font-medium">Yes</td>
+                    </tr>
+                    <tr className="border-t border-blue-100">
+                      <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.var[&quot;gene_id&quot;]</code></td>
+                      <td className="py-1">Int gene token IDs the trainer feeds to the model. Without it cross-dataset gene matching breaks.</td>
+                      <td className="py-1">Strongly recommended</td>
+                    </tr>
+                    <tr className="border-t border-blue-100">
+                      <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.obs</code>, <code className="bg-blue-50 px-1 rounded">adata.var</code></td>
+                      <td className="py-1">Preserved verbatim. HVG rank and selection arrays are written alongside.</td>
+                      <td className="py-1">Optional</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Disclosure 3 — manifest.yaml builder form */}
+            <button
+              onClick={() => setShowManifestForm(!showManifestForm)}
+              className="flex items-center text-xs text-blue-600 hover:text-blue-900 mt-3 transition-colors duration-150 ease-out active:scale-[0.97]"
+            >
+              <svg className={`w-3 h-3 mr-1 transition-transform duration-200 ease-out ${showManifestForm ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+              {showManifestForm ? 'Hide' : 'Build'}<code className="bg-blue-100 px-1 rounded mx-1">manifest.yaml</code>
+            </button>
+            {showManifestForm && (
+              <div className="mt-3 bg-white rounded-lg p-3 border border-blue-100 space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      Dataset ID <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={manifestId}
+                      onChange={(e) => setManifestId(e.target.value)}
+                      placeholder="blood_perturb"
+                      className="w-full px-2 py-1.5 text-xs font-mono border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="text-[10px] text-gray-500 mt-1">Unique. <code>snake_case</code> conventional.</p>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      Display name <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={manifestName}
+                      onChange={(e) => setManifestName(e.target.value)}
+                      placeholder="Blood-Perturb"
+                      className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="text-[10px] text-gray-500 mt-1">Short, Title-cased label shown in the Chiron UI. Use a tissue or one-word descriptor, hyphenate a sub-descriptor when needed (e.g. <code className="bg-gray-100 px-1 rounded">Thymus</code>, <code className="bg-gray-100 px-1 rounded">Blood-Perturb</code>, <code className="bg-gray-100 px-1 rounded">Skin Aging - BLSA</code>).</p>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Description</label>
+                  <textarea autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other"
+                    rows={2}
+                    value={manifestDescription}
+                    onChange={(e) => setManifestDescription(e.target.value)}
+                    placeholder="One-line description of what the dataset contains."
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Authorized users</label>
+                    <TagInput
+                      tags={manifestAuthorizedUsers}
+                      onChange={setManifestAuthorizedUsers}
+                      placeholder="user@example.com or *"
+                    />
+                    <p className="text-[10px] text-gray-500 mt-1"><code>*</code> = public access on this worker.</p>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Tags</label>
+                    <TagInput
+                      tags={manifestTags}
+                      onChange={setManifestTags}
+                      placeholder="tissue, assay, disease…"
+                    />
+                    <p className="text-[10px] text-gray-500 mt-1">Free-text. Optional.</p>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">License</label>
+                  <select
+                    value={manifestLicense}
+                    onChange={(e) => setManifestLicense(e.target.value)}
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="CC-BY-4.0">CC-BY-4.0 — attribution, commercial OK</option>
+                    <option value="CC-BY-NC-4.0">CC-BY-NC-4.0 — attribution, non-commercial</option>
+                    <option value="CC0-1.0">CC0-1.0 — public domain</option>
+                    <option value="MIT">MIT</option>
+                    <option value="">Other / unspecified</option>
+                  </select>
+                </div>
+
+                {/* Preview + download */}
+                <div className="bg-gray-50 border border-gray-200 rounded p-2">
+                  <p className="text-[10px] uppercase tracking-wide font-semibold text-gray-500 mb-1">Preview</p>
+                  <pre className="text-gray-700 text-[11px] font-mono whitespace-pre overflow-x-auto">{buildManifestYaml()}</pre>
+                </div>
+
+                <button
+                  onClick={downloadManifest}
+                  className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-[transform,background-color] duration-150 ease-out active:scale-[0.97]"
+                >
+                  {manifestDownloaded ? (
+                    <>
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                      Downloaded
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" /></svg>
+                      Download manifest.yaml
+                    </>
+                  )}
+                </button>
+                <p className="text-[11px] text-gray-600">
+                  Drop the file inside the dataset's subfolder (alongside your <code className="bg-gray-100 px-1 rounded">.h5ad</code> or <code className="bg-gray-100 px-1 rounded">.zarr</code>), with filename <code className="bg-gray-100 px-1 rounded font-mono">manifest.yaml</code>.
+                </p>
+              </div>
+            )}
+
           </div>
 
           {/* Authentication warning */}
@@ -1015,7 +985,7 @@ ${bin} exec ${gpuFlag}\\
                     <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={workerName} onChange={(e) => setWorkerName(e.target.value)}
                       placeholder="Chiron Worker"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    <p className="text-xs text-gray-500 mt-1">Display name for this worker in the Chiron UI</p>
+                    <p className="text-xs text-gray-500 mt-1">Display name for this worker in the Chiron UI and the Hypha service registry.</p>
                   </div>
                   <div className="col-span-2">
                     <label className="block text-sm font-medium text-gray-700 mb-1">Training Data Directory</label>
@@ -1070,7 +1040,16 @@ ${bin} exec ${gpuFlag}\\
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Container Runtime</label>
+                  <div className="flex items-center gap-1 mb-1">
+                    <label className="block text-sm font-medium text-gray-700">Container Runtime</label>
+                    <InfoPopover label="Container runtime info">
+                      The Chiron worker runs inside a container image (~10&nbsp;GB, pulled automatically on first use).
+                      The runtime selected here must already be installed on this machine.{' '}
+                      <strong>Docker</strong> and <strong>Podman</strong> drive the data server and the worker as two Compose services.{' '}
+                      <strong>Singularity</strong> and <strong>Apptainer</strong> run each process directly, which is the usual
+                      choice on HPC clusters where Docker is unavailable.
+                    </InfoPopover>
+                  </div>
                   <select value={containerRuntime} onChange={(e) => setContainerRuntime(e.target.value as ContainerRuntimeType)}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
                     <option value="docker">Docker</option>
@@ -1089,14 +1068,21 @@ ${bin} exec ${gpuFlag}\\
                 {/* Shared memory — compose only */}
                 {isComposeRuntime() && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Shared Memory Size</label>
+                    <div className="flex items-center gap-1 mb-1">
+                      <label className="block text-sm font-medium text-gray-700">Shared Memory Size (GB)</label>
+                      <InfoPopover label="Shared memory info">
+                        Ray keeps its object store in <code className="bg-gray-100 px-1 rounded">/dev/shm</code>, which Docker and
+                        Podman cap at 64&nbsp;MB by default, far too small for Ray. This sets that limit. It is independent of the
+                        BioEngine Workspace Directory mount below, which holds persistent files on the host.
+                      </InfoPopover>
+                    </div>
                     <select value={shmSize} onChange={(e) => setShmSize(e.target.value)}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
                       {['1g','2g','4g','6g','8g','10g','12g','16g'].map(v => (
                         <option key={v} value={v}>{v.replace('g', ' GB')}</option>
                       ))}
                     </select>
-                    <p className="text-xs text-gray-500 mt-1">Shared memory for the worker container. Increase for large models.</p>
+                    <p className="text-xs text-gray-500 mt-1">Size of <code className="bg-gray-100 px-1 rounded">/dev/shm</code> for Ray's object store. Increase for large models.</p>
                   </div>
                 )}
 
@@ -1105,11 +1091,26 @@ ${bin} exec ${gpuFlag}\\
                   <input type="number" min="1" max="128" value={cpus}
                     onChange={(e) => setCpus(parseInt(e.target.value) || 1)}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                  <p className="text-xs text-gray-500 mt-1">CPUs allocated to the Ray head node</p>
+                  <p className="text-xs text-gray-500 mt-1">CPUs allocated to the Ray head node.</p>
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">GPUs</label>
+                  <div className="flex items-center gap-1 mb-1">
+                    <label className="block text-sm font-medium text-gray-700">GPUs</label>
+                    <InfoPopover label="GPU support info">
+                      {isComposeRuntime() ? (
+                        <>Exposing GPUs to a Docker or Podman container needs the <strong>NVIDIA Container Toolkit</strong> on the
+                          host, on top of the NVIDIA drivers. See the{' '}
+                          <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html" target="_blank" rel="noopener noreferrer" className="text-blue-600 underline hover:text-blue-800">installation guide</a>.
+                        </>
+                      ) : (
+                        <>The generated command passes <code className="bg-gray-100 px-1 rounded">--nv</code> to expose NVIDIA GPUs to
+                          the container. Only the NVIDIA drivers are needed on the host, and most HPC systems already have them, so
+                          no extra toolkit is required.
+                        </>
+                      )}
+                    </InfoPopover>
+                  </div>
                   <input type="number" min="0" max="16" value={gpus}
                     onChange={(e) => setGpus(parseInt(e.target.value) || 0)}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
@@ -1125,7 +1126,7 @@ ${bin} exec ${gpuFlag}\\
                   <input type="number" min="4" max="512" value={memory}
                     onChange={(e) => setMemory(parseInt(e.target.value) || 4)}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                  <p className="text-xs text-gray-500 mt-1">RAM for the Ray head node in GB</p>
+                  <p className="text-xs text-gray-500 mt-1">Total RAM available to Ray on this machine, passed to the head node as <code className="bg-gray-100 px-0.5 rounded">--head-memory-in-gb</code>.</p>
                 </div>
 
                 {/* Chiron Manager Authorized Users — full-width row */}
@@ -1175,12 +1176,19 @@ ${bin} exec ${gpuFlag}\\
                   </div>
 
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">BioEngine Workspace Directory</label>
+                    <div className="flex items-center gap-1 mb-1">
+                      <label className="block text-sm font-medium text-gray-700">BioEngine Workspace Directory</label>
+                      <InfoPopover label="Workspace directory info">
+                        This worker resolves it to{' '}
+                        <code className="bg-gray-100 px-1 rounded break-all">{getWorkspaceDirPath()}</code>. The directory is
+                        created on the host and mounted into the container(s), so its contents survive a restart of the worker.
+                      </InfoPopover>
+                    </div>
                     <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={workspaceDir} onChange={(e) => setWorkspaceDir(e.target.value)}
                       placeholder={os === 'windows' ? '%USERPROFILE%\\.bioengine' : '$HOME/.bioengine'}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
                     <p className="text-xs text-gray-500 mt-1">
-                      Directory for app data, logs, and Ray cluster state. Defaults to {os === 'windows' ? '%USERPROFILE%\\.bioengine' : '$HOME/.bioengine'}.
+                      Holds worker app data, Ray cluster state, logs, and temporary files. Defaults to {os === 'windows' ? '%USERPROFILE%\\.bioengine' : '$HOME/.bioengine'}.
                     </p>
                   </div>
 
@@ -1223,9 +1231,9 @@ ${bin} exec ${gpuFlag}\\
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Server URL</label>
                     <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={serverUrl} onChange={(e) => setServerUrl(e.target.value)}
-                      placeholder="https://hypha.aicell.io"
+                      placeholder={HYPHA_SERVER_URL}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    <p className="text-xs text-gray-500 mt-1">Hypha server URL (defaults to public server)</p>
+                    <p className="text-xs text-gray-500 mt-1">Hypha server URL. Leave empty to use {HYPHA_SERVER_URL}.</p>
                   </div>
 
                   <div>
@@ -1244,14 +1252,14 @@ ${bin} exec ${gpuFlag}\\
                       onChange={(e) => { setWorkspace(e.target.value); setWorkspaceResolved(false); }}
                       placeholder="my-workspace" autoComplete="off"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    <p className="text-xs text-gray-500 mt-1">Hypha workspace for service registration (auto-resolved from token)</p>
+                    <p className="text-xs text-gray-500 mt-1">Hypha workspace name for service registration. Resolved from the token if left empty.</p>
                   </div>
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
                     <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={clientId} onChange={(e) => setClientId(e.target.value)}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                    <p className="text-xs text-gray-500 mt-1">Custom client ID (auto-generated if empty)</p>
+                    <p className="text-xs text-gray-500 mt-1">Auto-generated by BioEngine if left empty.</p>
                   </div>
 
                   {gpus > 0 && (
@@ -1259,7 +1267,7 @@ ${bin} exec ${gpuFlag}\\
                       <label className="block text-sm font-medium text-gray-700 mb-1">GPU Indices</label>
                       <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={gpuIndices} onChange={(e) => setGpuIndices(e.target.value)}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                      <p className="text-xs text-gray-500 mt-1">Comma-separated GPU device IDs. Leave empty to use the GPU count above</p>
+                      <p className="text-xs text-gray-500 mt-1">Comma-separated GPU device IDs (e.g. 0,1). Leave empty to use the GPU count above.</p>
                     </div>
                   )}
 
@@ -1284,7 +1292,7 @@ ${bin} exec ${gpuFlag}\\
                         <option value="linux/amd64">linux/amd64</option>
                         <option value="linux/arm64">linux/arm64</option>
                       </select>
-                      <p className="text-xs text-gray-500 mt-1">Override platform only if auto-detection is wrong</p>
+                      <p className="text-xs text-gray-500 mt-1">Override platform only if auto-detection is wrong.</p>
                     </div>
                   )}
 
