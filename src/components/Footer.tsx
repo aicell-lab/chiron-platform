@@ -1,59 +1,95 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { BiCube } from 'react-icons/bi';
+import ReportIssueDialog from './ReportIssueDialog';
 
-const footerLinks = [
-  {
-    label: "View source code on GitHub",
-    href: "https://github.com/aicell-lab/chiron-platform",
-    icon: "/img/github.png",
-    caption: "Source Code"
-  },
-  {
-    label: "Contact the development team",
-    href: "mailto:nils.mechtel@scilifelab.se",
-    icon: "/img/contact.png",
-    caption: "Contact Us"
-  },
-  {
-    label: "Report issues or request features",
-    href: "https://github.com/aicell-lab/chiron-platform/issues",
-    icon: "/img/feedback-icon.png",
-    caption: "Feedback"
-  }
-];
+// Each entry is either a link out (href) or an in-page action (onClick).
+// Report Issue is the action: it opens a dialog rather than sending the user
+// to GitHub, because the whole point is that a reporter should not need an
+// account anywhere to tell us something is broken.
+interface FooterLink {
+  label: string;
+  icon: string;
+  caption: string;
+  href?: string;
+  onClick?: () => void;
+}
 
 const Footer: React.FC = () => {
+  const [reportOpen, setReportOpen] = useState(false);
+
+  const footerLinks: FooterLink[] = [
+    {
+      label: "View source code on GitHub",
+      href: "https://github.com/aicell-lab/chiron-platform",
+      icon: "/img/github.png",
+      caption: "Source Code"
+    },
+    {
+      label: "Contact the development team",
+      href: "mailto:nils.mechtel@scilifelab.se",
+      icon: "/img/contact.png",
+      caption: "Contact Us"
+    },
+    {
+      label: "Report issues or request features",
+      href: "https://github.com/aicell-lab/chiron-platform/issues",
+      icon: "/img/feedback-icon.png",
+      caption: "Feedback"
+    },
+    {
+      label: "Send us a problem report with the platform logs attached",
+      onClick: () => setReportOpen(true),
+      icon: "/img/bug-icon.png",
+      caption: "Report Issue"
+    }
+  ];
+
   return (
     <footer className="w-full py-8 px-4 mt-16 bg-gray-50 border-t border-gray-200">
       <div className="max-w-7xl mx-auto">
         {/* Links Section */}
         <div className="flex flex-wrap justify-center items-start gap-4 mb-8">
-          {footerLinks.map((link, index) => (
-            <div key={index} className="w-[150px] text-center">
-              <div className="group relative" title={link.label}>
-                <a
-                  href={link.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-block hover:opacity-80 transition-opacity"
-                >
-                  <figure className="flex flex-col items-center">
-                    <img
-                      src={link.icon}
-                      alt={link.caption}
-                      className="h-[45px] w-auto object-contain mb-2"
-                    />
-                    <figcaption className="text-sm text-gray-600 hidden md:block">
-                      {link.caption}
-                    </figcaption>
-                  </figure>
-                </a>
-                <div className="opacity-0 group-hover:opacity-100 transition-opacity absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-4 py-2 bg-gray-900 text-white text-xs rounded-md shadow-lg whitespace-nowrap z-10">
-                  {link.label}
+          {footerLinks.map((link, index) => {
+            const figure = (
+              <figure className="flex flex-col items-center">
+                <img
+                  src={link.icon}
+                  alt={link.caption}
+                  className="h-[45px] w-auto object-contain mb-2"
+                />
+                <figcaption className="text-sm text-gray-600 hidden md:block">
+                  {link.caption}
+                </figcaption>
+              </figure>
+            );
+            return (
+              <div key={index} className="w-[150px] text-center">
+                <div className="group relative" title={link.label}>
+                  {link.onClick ? (
+                    <button
+                      type="button"
+                      onClick={link.onClick}
+                      className="inline-block hover:opacity-80 transition-opacity"
+                    >
+                      {figure}
+                    </button>
+                  ) : (
+                    <a
+                      href={link.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-block hover:opacity-80 transition-opacity"
+                    >
+                      {figure}
+                    </a>
+                  )}
+                  <div className="opacity-0 group-hover:opacity-100 transition-opacity absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-4 py-2 bg-gray-900 text-white text-xs rounded-md shadow-lg whitespace-nowrap z-10">
+                    {link.label}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* Content Section */}
@@ -72,8 +108,10 @@ const Footer: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <ReportIssueDialog open={reportOpen} onClose={() => setReportOpen(false)} />
     </footer>
   );
 };
 
-export default Footer; 
+export default Footer;

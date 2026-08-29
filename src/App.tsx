@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { HashRouter, Routes, Route, useLocation, Navigate } from 'react-router-dom';
 import Navbar from './components/Navbar';
 import HyphaStatusBanner from './components/HyphaStatusBanner';
+import AppErrorBoundary from './components/AppErrorBoundary';
 
 import ResourceGrid from './components/ResourceGrid';
 import ResourceDetails from './components/ResourceDetails';
@@ -25,6 +26,7 @@ import Models from './pages/Models';
 import ModelDetail from './pages/ModelDetail';
 import MyModels from './pages/MyModels';
 import Landing from './pages/Landing';
+import { logger } from './utils/logger';
 
 // Create a wrapper component that uses Router hooks
 const AppContent: React.FC = () => {
@@ -54,6 +56,13 @@ const AppContent: React.FC = () => {
   // interactions; only a new pathname is an actual "navigated somewhere".
   useEffect(() => {
     window.scrollTo(0, 0);
+  }, [location.pathname]);
+
+  // A report is far easier to read when it starts with where the user was.
+  // Only the pathname, never the query string, which carries ids a reporter
+  // has not agreed to hand over.
+  useEffect(() => {
+    logger.info('router', 'Navigated', { pathname: location.pathname });
   }, [location.pathname]);
 
   const toggleSidebar = () => {
@@ -121,13 +130,15 @@ const AppContent: React.FC = () => {
 // Main App component that provides Router context
 const App: React.FC = () => {
   return (
-    <HyphaProvider>
-      <ProjectsProvider>
-        <HashRouter>
-          <AppContent />
-        </HashRouter>
-      </ProjectsProvider>
-    </HyphaProvider>
+    <AppErrorBoundary>
+      <HyphaProvider>
+        <ProjectsProvider>
+          <HashRouter>
+            <AppContent />
+          </HashRouter>
+        </ProjectsProvider>
+      </HyphaProvider>
+    </AppErrorBoundary>
   );
 };
 
