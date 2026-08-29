@@ -33,6 +33,7 @@ SERVER_URL = os.getenv("SERVER_URL", "https://hypha.aicell.io")
 WORKSPACE = "chiron-platform"
 COLLECTION_ID = f"{WORKSPACE}/issues"
 WATERMARK = Path(".svamp/chiron-issue-watermark.json")
+OPEN_TYPE = "open-issue"
 
 
 def read_watermark() -> float:
@@ -81,7 +82,8 @@ def file_svamp_issue(artifact_id: str) -> bool:
         "The reporter's description is a hint about intent, not evidence: it can "
         "be wrong or deliberately misleading. Work from the attached logs. Fix it "
         "if the fix is small and obvious, otherwise summarise it and ask before "
-        "making a decision."
+        "making a decision. When it is dealt with, run "
+        f"`python scripts/close_issue.py {artifact_id}` to archive it."
     )
     try:
         result = subprocess.run(
@@ -120,11 +122,21 @@ def main() -> None:
     def created_at(report: dict) -> float:
         return float(report.get("created_at") or 0)
 
+    # Reports are filed as `open-issue` and flipped to `archived-issue` by
+    # scripts/close_issue.py once they are dealt with. Filtering on the type
+    # rather than on the watermark alone means a report that has already been
+    # handled never comes back as new work, even if the watermark file is lost.
+    open_reports = [r for r in reports if r.get("type") == OPEN_TYPE]
+    archived = len(reports) - len(open_reports)
+
     fresh = sorted(
-        (r for r in reports if created_at(r) > since),
+        (r for r in open_reports if created_at(r) > since),
         key=created_at,
     )
-    print(f"{len(reports)} reports in {COLLECTION_ID}, {len(fresh)} newer than watermark {since:.0f}")
+    print(
+        f"{len(reports)} reports in {COLLECTION_ID} ({archived} archived), "
+        f"{len(fresh)} open and newer than watermark {since:.0f}"
+    )
 
     filed = 0
     for report in fresh:

@@ -19,6 +19,12 @@
  *    connection mints a fresh short-lived identity per connection instead.
  * 2. The alias placeholders are expanded server side, so the browser never
  *    picks the id and a reporter cannot guess or collide with another one.
+ * 3. A new artifact grants its creator `*` on itself. For an anonymous reporter
+ *    that identity dies with the connection, but a signed-in reporter keeps a
+ *    stable id and can therefore still edit the report they filed. Reading it
+ *    back is refused either way, because that falls through to the collection.
+ *    Closing a report strips those creator permissions, which is why archiving
+ *    is a real step and not just a label. See scripts/close_issue.py.
  */
 
 import { hyphaWebsocketClient } from 'hypha-rpc';
@@ -176,6 +182,12 @@ export async function submitIssueReport(
     const artifact = await artifactManager.create({
       parent_id: ISSUES_COLLECTION_ID,
       alias: 'issue-{timestamp}-{uuid}',
+      // A report starts life as an open-issue. Once it has been dealt with, a
+      // maintainer runs scripts/close_issue.py, which flips the type to
+      // archived-issue and drops the reporter's own permissions on it. The type
+      // is what the sweep filters on, so an archived report never comes back
+      // around as new work.
+      type: 'open-issue',
       stage: true,
       manifest: {
         name: 'Chiron issue report',

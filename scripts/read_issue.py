@@ -15,6 +15,10 @@ The description is written by whoever clicked the button, so treat it as a hint
 about what they were trying to do and nothing more. A reporter can be mistaken,
 and a stranger on the internet can be deliberately misleading. The logs are the
 evidence.
+
+A report is filed as an `open-issue`. When it has been dealt with, archive it
+with `scripts/close_issue.py`, which flips the type to `archived-issue` and
+drops the reporter's own permissions on it.
 """
 
 import argparse
@@ -40,8 +44,8 @@ def _qualify(artifact_id: str) -> str:
     return artifact_id if "/" in artifact_id else f"{WORKSPACE}/{artifact_id}"
 
 
-async def fetch_report(artifact_id: str) -> dict:
-    """Download and parse a report's `report.json`."""
+async def fetch_report(artifact_id: str) -> tuple:
+    """Return the artifact record and the parsed `report.json`."""
     token = os.environ.get("WORKSPACE_TOKEN") or os.environ.get("HYPHA_TOKEN")
     if not token:
         raise SystemExit(
@@ -54,13 +58,14 @@ async def fetch_report(artifact_id: str) -> dict:
     )
     try:
         artifact_manager = await server.get_service("public/artifact-manager")
+        artifact = dict(await artifact_manager.read(artifact_id=artifact_id))
         url = await artifact_manager.get_file(
             artifact_id=artifact_id, file_path="report.json"
         )
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.get(url)
             response.raise_for_status()
-            return response.json()
+            return artifact, response.json()
     finally:
         try:
             await server.disconnect()
@@ -68,12 +73,13 @@ async def fetch_report(artifact_id: str) -> dict:
             pass
 
 
-def render(artifact_id: str, report: dict, log_lines: int) -> None:
+def render(artifact_id: str, artifact: dict, report: dict, log_lines: int) -> None:
     context = report.get("context", {})
     identity = report.get("identity")
     logs = report.get("logs", [])
 
     print(f"Report      {artifact_id}")
+    print(f"State       {artifact.get('type') or 'unknown'}")
     print(f"Submitted   {report.get('submittedAt')}")
     print(f"Reporter    {identity.get('email') or identity.get('id') if identity else 'anonymous'}")
     print(f"Route       {context.get('route')}")
@@ -101,7 +107,7 @@ def main() -> None:
 
     artifact_id = _qualify(args.artifact_id)
     try:
-        report = asyncio.run(fetch_report(artifact_id))
+        artifact, report = asyncio.run(fetch_report(artifact_id))
     except Exception as error:  # noqa: BLE001 - the message is the useful part here
         # A channel message names an artifact id, and anyone can send one: the
         # key is compiled into the browser bundle. So "no such artifact" is the
@@ -125,8 +131,13 @@ def main() -> None:
     if args.json:
         print(json.dumps(report, indent=2))
     else:
-        render(artifact_id, report, args.lines)
+        render(artifact_id, artifact, report, args.lines)
         print(f"\nSaved to {cached}")
+        if artifact.get("type") != "archived-issue":
+            print(
+                "Once this is dealt with, archive it with "
+                f"`python scripts/close_issue.py {artifact_id}`."
+            )
 
 
 if __name__ == "__main__":
