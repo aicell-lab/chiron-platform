@@ -125,6 +125,16 @@ manager = await server.get_service(managers[0]["id"])
 
 **Model Hub collection.** Every published checkpoint, whether shared-weights-only (orchestrator save) or full (trainer save), lives in `chiron-platform/chiron-models`. The artifact manifest carries a `global_transformer` boolean flag that distinguishes the two, and a `model_family` slug saying which model it belongs to. A checkpoint only loads into its own model, so the UI offers each worker the checkpoints of its family alone. Checkpoints published before `model_family` existed are all Tabula. See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
 
+## Reporting a problem
+
+The **Report Issue** button in the footer of every page on the platform sends us a problem report. No account is needed and there is nothing to fill in: the platform attaches its own log buffer, so you do not have to reconstruct what happened or reproduce it first.
+
+The dialog has one optional field, "What were you trying to do?". That is the part the logs cannot show. Everything that would be sent is viewable before you send it, under "What gets sent", including the log buffer itself. Access tokens and file paths are stripped out in the browser before anything leaves it.
+
+On success the dialog shows a report id. Quote it if you follow up.
+
+Reports go into a collection that only maintainers can read, so one reporter cannot read another's report and neither can we read it back through the website.
+
 ## Common pitfalls
 
 - **Stale BioEngine pin.** Chiron expects v0.10.13 (commit `375dadf` on `aicell-lab/bioengine`). A worker on a much older or newer BioEngine version may speak a different RPC dialect.

@@ -86,6 +86,8 @@ For Tabula backend setup, BioEngine app upload and deploy, and federated trainin
 | Worker dashboard and deployment UI | `src/components/BioEngine/` |
 | Setup wizard (Human / AI Agent toggle, manifest builder) | `src/components/BioEngine/BioEngineGuide.tsx` |
 | Dataset and worker services | `worker/` |
+| Frontend logging buffer and redaction | `src/utils/logger.ts` |
+| Report Issue submit path | `src/utils/issueReport.ts` |
 | FL client implementation | `../tabula/tabula/distributed/federated_client.py` |
 | Federated server (FedAvg) | `../tabula/apps/chiron_orchestrator/` |
 | Local trainer app | `../tabula/apps/tabula_trainer/` |
