@@ -156,7 +156,7 @@ const BioEngineGuide: React.FC<BioEngineGuideProps> = ({ onScrollToWorkers }) =>
   const [shmSize, setShmSize] = useState('8g');
   const [cpus, setCpus] = useState(4);
   const [gpus, setGpus] = useState(1);
-  const [memory, setMemory] = useState(30);
+  const [memory, setMemory] = useState(CHIRON_MODELS[DEFAULT_MODEL_FAMILY].workerMemoryGb);
   const [dataDir, setDataDir] = useState('');
 
   const [copied, setCopied] = useState(false);
@@ -210,6 +210,14 @@ const BioEngineGuide: React.FC<BioEngineGuideProps> = ({ onScrollToWorkers }) =>
   const selectedModel = CHIRON_MODELS[modelFamily];
   const modelImage = selectedModel.image;
   const effectiveImage = customImage || modelImage;
+
+  // Each model's trainer declares its own RAM ceiling, and Ray refuses to
+  // deploy an app that does not fit the head node's budget, so the Memory
+  // field has to move with the model. Re-picking a model resets it to that
+  // model's figure; an operator who needs more can still edit it afterwards.
+  useEffect(() => {
+    setMemory(CHIRON_MODELS[modelFamily].workerMemoryGb);
+  }, [modelFamily]);
 
   useEffect(() => {
     try {
@@ -1086,11 +1094,22 @@ ${bin} exec ${gpuFlag}\\
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Memory (GB)</label>
+            <div className="flex items-center gap-1.5 mb-1">
+              <label className="block text-sm font-medium text-gray-700">Memory (GB)</label>
+              <InfoPopover label="Memory info">
+                <p className="mb-2">Ray admits an application only if its declared memory still fits the head node&apos;s budget, so this value decides what the worker can deploy.</p>
+                <p className="mb-2">The budget has to cover every app at once: the Chiron Manager (1 GB), the Orchestrator on the site that coordinates the round (8 GB), and the trainer, whose figure is set by the model.</p>
+                <p>{selectedModel.displayName} needs <strong>{selectedModel.workerMemoryGb} GB</strong>. Setting less lets the worker start and then makes the trainer fail to deploy with &quot;Insufficient resources&quot;.</p>
+              </InfoPopover>
+            </div>
             <input type="number" min="4" max="512" value={memory}
               onChange={(e) => setMemory(parseInt(e.target.value) || 4)}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-            <p className="text-xs text-gray-500 mt-1">Total RAM available to Ray on this machine, passed to the head node as <code className="bg-gray-100 px-0.5 rounded">--head-memory-in-gb</code>.</p>
+            {memory < selectedModel.workerMemoryGb ? (
+              <p className="text-xs text-amber-700 mt-1">Below the {selectedModel.workerMemoryGb} GB {selectedModel.displayName} needs. The worker will start but its trainer will not deploy.</p>
+            ) : (
+              <p className="text-xs text-gray-500 mt-1">Total RAM available to Ray on this machine, passed to the head node as <code className="bg-gray-100 px-0.5 rounded">--head-memory-in-gb</code>. {selectedModel.displayName} needs at least {selectedModel.workerMemoryGb} GB.</p>
+            )}
           </div>
 
           {/* Chiron Manager Authorized Users — full-width row */}

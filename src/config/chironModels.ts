@@ -51,6 +51,9 @@ export interface ChironModel {
   /** Measured GPU memory at a given batch size, above the trainer's idle
    *  baseline. Reference for the launch dialog's max-batch-size field. */
   referenceMemory: { batchSize: number; gb: number }[];
+  /** Host RAM in GB the setup guide puts in `--head-memory-in-gb` for a
+   *  worker on this model's image. See WORKER_RAM_GB for how it is derived. */
+  workerMemoryGb: number;
   /** Cover image under public/assets/. Undefined where none exists yet. */
   coverUrl?: string;
 }
@@ -65,6 +68,32 @@ export const CHIRON_IMAGE_VERSION = '0.7.3';
 const image = (family: string) =>
   `ghcr.io/aicell-lab/chiron-${family}:${CHIRON_IMAGE_VERSION}`;
 
+/**
+ * Host RAM a worker needs, per model.
+ *
+ * Ray admits an application only when its declared `memory` still fits in the
+ * head node's budget, so `--head-memory-in-gb` is a hard gate on what a worker
+ * can deploy, not a hint. The budget has to cover every app the worker hosts
+ * at once:
+ *
+ *   chiron-manager       1 GiB   always running
+ *   chiron-orchestrator  8 GiB   on the site that coordinates the round
+ *   the trainer         16-32 GiB, declared per model in its `@bioengine.app`
+ *
+ * The trainer figure is the one that moves: 16 GiB for Tabula and scGPT, 24
+ * for Geneformer, 32 for scFoundation. Summed with the other two and rounded
+ * up for Ray's own overhead, that gives the numbers below. A worker set to
+ * less than its model's figure comes up fine and then refuses the trainer with
+ * "Insufficient resources", which is why this is a per-model default rather
+ * than one number for all four.
+ */
+const WORKER_RAM_GB: Record<ChironModelFamily, number> = {
+  tabula: 30,
+  scgpt: 30,
+  geneformer: 40,
+  scfoundation: 48,
+};
+
 export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
   tabula: {
     family: 'tabula',
@@ -73,6 +102,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
       'Tabular transformer over genes, trained by masked value reconstruction. The model Chiron was built around.',
     image: image('tabula'),
     trainerArtifactId: 'chiron-platform/tabula-trainer',
+    workerMemoryGb: WORKER_RAM_GB.tabula,
     // Tabula is the one model whose local part is input-side: the feature
     // tokenizer and the reconstruction head are both sized by the gene
     // panel, which is what makes a Tabula checkpoint dataset-specific.
@@ -95,6 +125,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
       'Generative transformer over gene tokens and binned expression values, trained by masked value prediction.',
     image: image('scgpt'),
     trainerArtifactId: 'chiron-platform/scgpt-trainer',
+    workerMemoryGb: WORKER_RAM_GB.scgpt,
     sharedWeights: 'gene embedding, value encoder and transformer',
     localWeights: 'expression decoder head',
     // Only the batch size validated on a 24 GB RTX 3090 so far. The memory
@@ -108,6 +139,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
       'BERT over rank-value-encoded gene tokens, trained by masked language modelling.',
     image: image('geneformer'),
     trainerArtifactId: 'chiron-platform/geneformer-trainer',
+    workerMemoryGb: WORKER_RAM_GB.geneformer,
     sharedWeights: 'token embedding and encoder stack',
     localWeights: 'masked-LM head',
     referenceMemory: [{ batchSize: 16, gb: 0 }],
@@ -119,6 +151,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
       "Read-depth-aware transformer over a cell's expressed genes, trained by masked value regression. Its checkpoint is fetched at runtime under each site's own licence grant.",
     image: image('scfoundation'),
     trainerArtifactId: 'chiron-platform/scfoundation-trainer',
+    workerMemoryGb: WORKER_RAM_GB.scfoundation,
     sharedWeights: 'value embedding, gene position embedding and encoder',
     localWeights: 'value-regression head',
     referenceMemory: [{ batchSize: 8, gb: 0 }],

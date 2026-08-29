@@ -51,14 +51,16 @@ unset HYPHA_TOKEN && docker compose down worker-tabula && docker compose up -d w
 
 One image per model, each carrying that model's dependencies and hosting that model's trainer only. Built from `../tabula/docker/` (see its README for the layer order and the image identity contract), all released together under a single version tag.
 
-| Model | Image | Trainer artifact | Validated batch size |
-|-------|-------|------------------|----------------------|
-| Tabula | `ghcr.io/aicell-lab/chiron-tabula:<version>` | `chiron-platform/tabula-trainer` | 32 (about 20 GB on a 24 GB RTX 3090, 16 is about 6 GB, 8 is about 2 GB) |
-| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` | 32 |
-| Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` | 16 |
-| scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` | 8 |
+| Model | Image | Trainer artifact | Validated batch size | Trainer RAM | Worker `--head-memory-in-gb` |
+|-------|-------|------------------|----------------------|-------------|------------------------------|
+| Tabula | `ghcr.io/aicell-lab/chiron-tabula:<version>` | `chiron-platform/tabula-trainer` | 32 (about 20 GB on a 24 GB RTX 3090, 16 is about 6 GB, 8 is about 2 GB) | 16 GiB | 30 |
+| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` | 32 | 16 GiB | 30 |
+| Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` | 16 | 24 GiB | 40 |
+| scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` | 8 | 32 GiB | 48 |
 
 The batch sizes other than Tabula's come from the four-model probe runs on a 24 GB RTX 3090 and are the sizes that ran, not measured memory curves.
+
+The head memory figure is a hard gate, not a hint. Ray admits an application only if its declared `memory` still fits the head node's budget, and a worker has to hold the manager (1 GiB), the orchestrator on the coordinating site (8 GiB) and the trainer at once. A worker started with less comes up healthy and then refuses the trainer with `Insufficient resources for application '<name>'`. The setup guide picks the right figure from the selected model (`WORKER_RAM_GB` in `src/config/chironModels.ts`); a hand-written command line has to pick it from this table.
 
 Each image bakes in `CHIRON_MODEL_FAMILY`, `CHIRON_MODEL_NAME`, `CHIRON_TRAINER_ARTIFACT` and `CHIRON_IMAGE_REF`. `chiron-manager` reads them from its own environment, reports them as `worker_info.chiron_image`, defaults `create_trainer` to the declared artifact, and refuses any trainer whose manifest declares a different `model_family`. The frontend mirror of the image refs is `src/config/chironModels.ts`, whose `CHIRON_IMAGE_VERSION` must be bumped when a new image set is published.
 
