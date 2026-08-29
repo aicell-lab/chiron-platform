@@ -6,6 +6,7 @@ import BioEngineApps from './BioEngineApps';
 import DeploymentConfigModal from './DeploymentConfigModal';
 import AppDiskCache from './AppDiskCache';
 import ErrorDialog from './ErrorDialog';
+import { logger } from '../../utils/logger';
 
 // Returns true when `actual` is >= `required` under loose semver-by-parts
 // comparison. Handles pre-release suffixes by stripping anything past the
@@ -268,6 +269,7 @@ const BioEngineWorker: React.FC = () => {
     initArtifactManager();
 
     if (serviceId) {
+      logger.info('bioengine', 'Attaching to worker', { serviceId, autoRefreshEnabled });
       fetchStatus();
 
       if (autoRefreshEnabled) {
@@ -330,6 +332,9 @@ const BioEngineWorker: React.FC = () => {
 
   // Use a ref to store the current manifest cache to avoid stale closures
   const manifestCacheRef = React.useRef<Record<string, any>>({});
+  // Last logged app-status fingerprint, so the poll only writes a log line
+  // when something actually changed.
+  const lastAppStatusKeyRef = React.useRef<string>('');
 
   // Update ref whenever manifestCache state changes
   React.useEffect(() => {
@@ -496,6 +501,24 @@ const BioEngineWorker: React.FC = () => {
         }
       }
 
+      // One line per change of the app set or of any app's status, not one per
+      // poll. At a 5s cadence an unfiltered status log would fill the whole
+      // buffer with a single dashboard session and push out everything that
+      // led up to the problem being reported.
+      const apps = statusData?.bioengine_apps || {};
+      const statusKey = Object.entries(apps)
+        .filter(([key, value]) => key !== 'service_id' && key !== 'note' && value && typeof value === 'object')
+        .map(([key, value]) => `${key}=${(value as any).status}`)
+        .sort()
+        .join(',');
+      if (statusKey !== lastAppStatusKeyRef.current) {
+        lastAppStatusKeyRef.current = statusKey;
+        logger.info('bioengine', 'Worker app status changed', {
+          serviceId,
+          apps: statusKey || '(none)',
+        });
+      }
+
       setError(null);
       setStatus(statusData);
       if (showLoading) {
@@ -512,11 +535,12 @@ const BioEngineWorker: React.FC = () => {
                                    errorMessage.includes('Service is not available');
       
       if (isServiceUnavailable) {
-        console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
+        logger.warn('bioengine', 'Worker service unavailable, redirecting home', { serviceId, errorMessage });
         navigate('/bioengine');
         return;
       }
-      
+
+      logger.error('bioengine', 'Failed to fetch worker status', { serviceId }, err);
       setError(`Failed to fetch BioEngine status: ${errorMessage}`);
       if (showLoading) {
         setLoading(false);
@@ -535,6 +559,17 @@ const BioEngineWorker: React.FC = () => {
 
       setDeployingArtifactId(artifactId);
 
+      // Config KEYS only beyond the artifact id and mode: a deployment config
+      // can carry data directories and dataset ids the operator typed in,
+      // which are theirs and never ours to ship off the machine.
+      logger.info('bioengine', 'Deploying app', {
+        serviceId,
+        artifact_id: artifactId,
+        mode: config.mode,
+        application_id: config.application_id,
+        config_keys: Object.keys(config || {}),
+      });
+
       const bioengineWorker = await server.getService(serviceId);
 
       await bioengineWorker.deploy_app({
@@ -546,9 +581,9 @@ const BioEngineWorker: React.FC = () => {
       await fetchStatus(false);
 
       setDeployingArtifactId(null);
-      console.log(`Successfully submitted deployment for ${artifactId}`);
+      logger.info('bioengine', 'Deployment submitted', { serviceId, artifact_id: artifactId });
     } catch (err) {
-      console.error('Deployment failed:', err);
+      logger.error('bioengine', 'Deployment failed', { serviceId, artifact_id: artifactId }, err);
       const errorMessage = err instanceof Error ? err.message : String(err);
 
       // Check if the error indicates the service is not available
@@ -559,7 +594,7 @@ const BioEngineWorker: React.FC = () => {
                                    errorMessage.includes('Service is not available');
 
       if (isServiceUnavailable) {
-        console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
+        logger.warn('bioengine', 'Worker service unavailable, redirecting home', { serviceId, errorMessage });
         navigate('/bioengine');
         return;
       }
@@ -658,6 +693,8 @@ const BioEngineWorker: React.FC = () => {
       setUndeploymentError(null); // Clear any previous errors
       setUndeployingArtifactId(applicationId);
 
+      logger.info('bioengine', 'Stopping app', { serviceId, application_id: applicationId });
+
       const bioengineWorker = await server.getService(serviceId);
       await bioengineWorker.stop_app({
         application_id: applicationId,
@@ -668,9 +705,9 @@ const BioEngineWorker: React.FC = () => {
 
       setUndeployingArtifactId(null);
 
-      console.log(`Successfully stopped application ${applicationId}`);
+      logger.info('bioengine', 'Stopped app', { serviceId, application_id: applicationId });
     } catch (err) {
-      console.error('Stop application failed:', err);
+      logger.error('bioengine', 'Stop application failed', { serviceId, application_id: applicationId }, err);
       const errorMessage = err instanceof Error ? err.message : String(err);
 
       // Check if the error indicates the service is not available
@@ -681,7 +718,7 @@ const BioEngineWorker: React.FC = () => {
                                    errorMessage.includes('Service is not available');
 
       if (isServiceUnavailable) {
-        console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
+        logger.warn('bioengine', 'Worker service unavailable, redirecting home', { serviceId, errorMessage });
         navigate('/bioengine');
         return;
       }

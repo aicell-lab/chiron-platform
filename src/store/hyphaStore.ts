@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { hyphaWebsocketClient } from 'hypha-rpc';
+import { logger } from '../utils/logger';
 // import { hRPC } from 'hypha';
 import { Resource } from '../types/resource';
 
@@ -124,20 +125,28 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
   },
   setTotalItems: (total) => set({ totalItems: total }),
   setLoggedIn: (status: boolean) => set({ isLoggedIn: status }),
-  logout: () => set({
-    server: null,
-    user: null,
-    artifactManager: null,
-    hyphaToken: null,
-    isConnected: false,
-    isAuthenticated: false,
-    isLoggedIn: false,
-    isInitialized: false,
-  }),
+  logout: () => {
+    logger.info('hyphaStore', 'Logging out, clearing connection and user state');
+    set({
+      server: null,
+      user: null,
+      artifactManager: null,
+      hyphaToken: null,
+      isConnected: false,
+      isAuthenticated: false,
+      isLoggedIn: false,
+      isInitialized: false,
+    });
+  },
   setSelectedResource: (resource) => set({ selectedResource: resource }),
   connect: async (config: ConnectionConfig) => {
     try {
       const client = hyphaWebsocketClient;
+      logger.info('hyphaStore', 'Connecting to Hypha', {
+        server_url: config.server_url,
+        // Whether a token was supplied, never the token itself.
+        authenticated: !!config.token,
+      });
       const server = await client.connectToServer(config);
       
       if (!server) {
@@ -147,6 +156,12 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
       const artifactManager = await server.getService('public/artifact-manager');
 
       const isAuthenticated = !!config.token;
+      logger.info('hyphaStore', 'Connected to Hypha', {
+        workspace: server.config?.workspace,
+        client_id: server.config?.client_id,
+        user_id: server.config?.user?.id,
+        authenticated: isAuthenticated,
+      });
       
       set({
         client,
@@ -166,7 +181,7 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
 
       return server;
     } catch (error) {
-      console.error('Failed to connect to Hypha:', error);
+      logger.error('hyphaStore', 'Failed to connect to Hypha', error);
       set({
         client: null,
         server: null,
@@ -189,7 +204,7 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
   },
   fetchResources: async (page: number, searchQuery?: string) => {
     try {
-      console.log('Fetching resources for page:', page, searchQuery);
+      logger.debug('hyphaStore', 'Fetching resources', { page, searchQuery });
       let offset = (page - 1) * get().itemsPerPage;
       if(offset < 0) {
         offset = 0;
@@ -218,7 +233,7 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
         totalItems: data.total || 0
       });
     } catch (error) {
-      console.error('Error fetching resources:', error);
+      logger.error('hyphaStore', 'Error fetching resources', error);
       set({ 
         resources: [],
         totalItems: 0
@@ -241,10 +256,10 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
       }
       
       const data = await response.json();
-      console.log(data);
+      logger.debug('hyphaStore', 'Fetched resource', { id, type: data?.type });
       set({ selectedResource: data, isLoading: false });
     } catch (error) {
-      console.error('Error fetching resource:', error);
+      logger.error('hyphaStore', 'Error fetching resource', { id }, error);
       set({ 
         isLoading: false, 
         error: error instanceof Error ? error.message : 'An unknown error occurred',
@@ -260,6 +275,7 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
     }
 
     set({ isLoggingIn: true });
+    logger.info('hyphaStore', 'Starting interactive login');
 
     try {
       const client = hyphaWebsocketClient;
@@ -270,6 +286,7 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
       };
 
       const token = await client.login(loginConfig);
+      logger.info('hyphaStore', 'Login token received', { received: !!token });
       if (!token) {
         throw new Error('Login failed - no token received');
       }
@@ -281,6 +298,8 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
         method_timeout: 600,
       });
 
+      logger.info('hyphaStore', 'Login complete');
+
       // Set both isAuthenticated and isLoggedIn to true after successful login
       set({ 
         isAuthenticated: true,
@@ -288,7 +307,7 @@ export const useHyphaStore = create<HyphaState>((set, get) => ({
       });
 
     } catch (error) {
-      console.error('Login failed:', error);
+      logger.error('hyphaStore', 'Login failed', error);
       set({ 
         isAuthenticated: false,
         isConnected: false,

@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useHyphaStore } from '../../store/hyphaStore';
 import { callHyphaService, listHyphaServices } from '../../utils/hyphaHttp';
+import { logger } from '../../utils/logger';
 import { FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
@@ -1672,6 +1673,7 @@ const Training: React.FC = () => {
     // turned the placeholder into a real app row.
     if (orchestrators.some(o => o.managerId === managerId && o.appId.startsWith('pending-'))) return;
     mutatingManagersRef.current.add(managerId);
+    logger.info('training', 'Creating orchestrator', { managerId });
     setCreatingOrchestratorMgrs(prev => ({ ...prev, [managerId]: true }));
     // Close UI immediately
     setShowCreateOrchestrator(false);
@@ -1946,6 +1948,7 @@ const Training: React.FC = () => {
   const performRemoveOrchestrator = async (managerId: string, appId: string, force: boolean) => {
     const orchestrator = orchestrators.find(o => o.managerId === managerId && o.appId === appId);
     if (!orchestrator) return;
+    logger.info('training', 'Removing orchestrator', { managerId, appId, force });
     markRecentlyDeleted(orchestrator.appId);
     setOrchestrators(prev => prev.map(o => o.managerId === managerId && o.appId === appId ? { ...o, status: 'DELETING' } : o));
     try {
@@ -1954,8 +1957,10 @@ const Training: React.FC = () => {
       await withManagerLock(managerId, () =>
         callManagerCompat(managerId, 'remove_orchestrator', { application_id: orchestrator.appId, force, caller_id: callerId, caller_email: callerEmail }, ['caller_email'], { timeoutMs: 60000 })
       );
+      logger.info('training', 'Removed orchestrator', { managerId, appId });
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
+      logger.error('training', 'Failed to remove orchestrator', { managerId, appId, force }, error);
       const msg = extractRemoteError(error instanceof Error ? error.message : 'Unknown error');
       setErrorPopupMessage('Failed to Remove Orchestrator');
       setErrorPopupDetails(msg);
@@ -2166,7 +2171,15 @@ const Training: React.FC = () => {
           trainer_service_id: trainerServiceId,
           orchestrator_service_id: orchestratorServiceId,
         }, { timeoutMs: 30000 });
+        logger.info('training', 'Registered trainer', {
+          orchestratorServiceId,
+          trainerServiceId,
+        });
       } catch (error) {
+        logger.error('training', 'Failed to register trainer', {
+          orchestratorServiceId,
+          trainerServiceId,
+        }, error);
         setRegisteredTrainers(prev);
         setErrorPopupMessage('Failed to Register Trainer');
         setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
@@ -2399,6 +2412,7 @@ const Training: React.FC = () => {
     const MAX_RECONCILE_MS = 30 * 60 * 1000;
 
     let failures = 0;
+    let lastStageKey = '';
     let unreachableSince = 0;
     let unlockedByFailure = false;
     let stopped = false;
@@ -2432,6 +2446,20 @@ const Training: React.FC = () => {
         const status = await callHyphaService<any>(svcId, 'get_training_status', {});
         if (stopped) return;
         failures = 0; unreachableSince = 0;
+        // One line per round or stage change, not one per poll: at a 3s cadence
+        // an unfiltered status log would fill the whole buffer with a single
+        // run and push out everything that led up to it.
+        const stageKey = `${status?.current_round ?? '-'}/${status?.stage ?? '-'}/${status?.is_running}`;
+        if (stageKey !== lastStageKey) {
+          lastStageKey = stageKey;
+          logger.info('training', 'Round status', {
+            orchestrator: orchKey,
+            round: status?.current_round,
+            total_rounds: status?.num_rounds,
+            stage: status?.stage,
+            is_running: status?.is_running,
+          });
+        }
         setTrainingStatus(status);
         const newIds = Object.keys(status.trainers_progress ?? {});
         if (newIds.length > 0) {
@@ -2459,7 +2487,14 @@ const Training: React.FC = () => {
     const onFailure = () => {
       if (stopped) return;
       failures += 1;
+      if (failures === 1) {
+        logger.warn('training', 'Orchestrator status poll failed', { orchestrator: orchKey });
+      }
       if (failures === MAX_STATUS_FAILURES) {
+        logger.warn('training', 'Orchestrator unreachable, unlocking the UI and slowing the poll', {
+          orchestrator: orchKey,
+          failures,
+        });
         // Unlock the UI so Delete and Stop work, but keep watching. This is the
         // difference that fixes the stranded-run case: the old code cleared the
         // interval here, so `is_running: false` became unobservable for good.
@@ -2538,14 +2573,29 @@ const Training: React.FC = () => {
       // hands us a config from before the picker existed.
       const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, transport: config.transport || DEFAULT_WEIGHT_TRANSPORT };
       if (config.initial_weights) trainingParams.initial_weights = config.initial_weights;
+      // Config KEYS only. fit_config and eval_config carry dataset ids and
+      // data directories the operator typed in, which are theirs and never
+      // ours to ship off the machine.
+      logger.info('training', 'Starting training', {
+        orchestrator: launchedFrom,
+        trainers: currentTrainers.length,
+        num_rounds: config.num_rounds,
+        per_round_timeout: config.per_round_timeout,
+        transport: trainingParams.transport,
+        has_initial_weights: !!config.initial_weights,
+        fit_config_keys: Object.keys(config.fit_config || {}),
+        eval_config_keys: Object.keys(config.eval_config || {}),
+      });
       // start_training runs the whole session server-side and only returns when
       // done — fire-and-forget with a generous timeout (just shy of an hour).
       callHyphaService(orchSvcId, 'start_training', trainingParams, { timeoutMs: 3_600_000 }).catch((error: Error) => {
+        logger.error('training', 'Training run failed', { orchestrator: launchedFrom }, error);
         setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true);
         setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
       });
       startTrainingStatusPoll(launchedFrom);
     } catch (error) {
+      logger.error('training', 'Failed to start training', error);
       setErrorPopupMessage('Failed to Start Training');
       setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true); setIsPreparingTraining(false); setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
@@ -2559,9 +2609,11 @@ const Training: React.FC = () => {
     setIsStoppingTraining(true);
     try {
       const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+      logger.info('training', 'Stopping training now', { orchestrator: selectedOrchestrator });
       await callHyphaService(orchSvcId, 'stop_training', {}, { timeoutMs: 30000 });
       setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null); setTrainingStatus(null);
     } catch (error) {
+      logger.error('training', 'Failed to stop training', error);
       setErrorPopupMessage('Failed to Stop Training');
       setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true);

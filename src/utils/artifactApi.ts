@@ -6,6 +6,8 @@
 // listing + reading works without auth; only the per-user filter needs a
 // logged-in user.
 
+import { logger } from './logger';
+
 const HYPHA_BASE = 'https://hypha.aicell.io';
 
 export interface ArtifactRef {
@@ -88,7 +90,13 @@ export async function listArtifactChildren(
   const bustUrl = `${url.toString()}${sep}_=${Date.now()}`;
   const res = await fetch(bustUrl, { headers, cache: 'no-store' });
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} listing ${parentId}/children: ${await res.text()}`);
+    const body = await res.text();
+    logger.error('artifactApi', 'listArtifactChildren failed', {
+      parentId,
+      status: res.status,
+      body: body.slice(0, 1000),
+    });
+    throw new Error(`HTTP ${res.status} listing ${parentId}/children: ${body}`);
   }
   const data = await res.json();
   // Paginated response shape: { items, total }; non-paginated: bare array
@@ -112,7 +120,13 @@ export async function readArtifact(artifactId: string, token?: string): Promise<
   const url = `${HYPHA_BASE}/${workspace}/artifacts/${alias}?_=${Date.now()}`;
   const res = await fetch(url, { headers, cache: 'no-store' });
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} reading ${artifactId}: ${await res.text()}`);
+    const body = await res.text();
+    logger.error('artifactApi', 'readArtifact failed', {
+      artifactId,
+      status: res.status,
+      body: body.slice(0, 1000),
+    });
+    throw new Error(`HTTP ${res.status} reading ${artifactId}: ${body}`);
   }
   return (await res.json()) as ArtifactRef;
 }
@@ -130,6 +144,12 @@ export async function listArtifactFiles(artifactId: string, token?: string): Pro
   const res = await fetch(`${HYPHA_BASE}/${workspace}/artifacts/${alias}/files/`, { headers });
   if (!res.ok) {
     // Some artifacts have no files endpoint — return empty rather than throwing.
+    // Still worth a line: an empty file list that came from a 403 looks exactly
+    // like an artifact that genuinely has no files.
+    logger.debug('artifactApi', 'listArtifactFiles returned no files', {
+      artifactId,
+      status: res.status,
+    });
     return [];
   }
   const data = await res.json();
