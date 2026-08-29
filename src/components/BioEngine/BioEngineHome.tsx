@@ -31,14 +31,14 @@ const BioEngineHome: React.FC = () => {
       <div className="flex items-start mb-12">
         <div className="flex-1" />
         <div className="text-center">
-          <div className="flex items-end justify-center gap-4 mb-4">
-            <img src="/bioengine-icon.svg" alt="BioEngine Logo" className="w-12 h-12 mb-3" />
-            <h1 className="text-5xl font-bold bg-gradient-to-r from-blue-600 via-purple-600 to-cyan-600 bg-clip-text text-transparent leading-tight">
+          <div className="flex items-center justify-center gap-3 mb-1">
+            <img src="/bioengine-icon.svg" alt="BioEngine Logo" className="w-[2.7rem] h-[2.7rem]" />
+            <h1 className="text-[2.7rem] font-bold bg-gradient-to-r from-blue-600 via-purple-600 to-cyan-600 bg-clip-text text-transparent tracking-tight">
               BioEngine
             </h1>
           </div>
-          <div className="w-24 h-1 bg-gradient-to-r from-blue-500 to-purple-500 mx-auto mt-4 rounded-full"></div>
-          <p className="mt-4 text-xl text-gray-600 font-medium">
+          <div className="w-24 h-1 bg-gradient-to-r from-blue-500 to-purple-500 mx-auto mt-3 rounded-full"></div>
+          <p className="mt-3 text-[1.05rem] text-gray-600">
             Unveiling cloud-powered AI for simplified Single-Cell Biology
           </p>
         </div>
