@@ -18,6 +18,7 @@ import ModelTrainer from './components/ModelTrainer';
 import ManageWorker from './components/ManageWorker';
 import BioEngineHome from './components/BioEngine/BioEngineHome';
 import BioEngineWorker from './components/BioEngine/BioEngineWorker';
+import BioEngineWorkerList from './components/BioEngine/BioEngineWorkerList';
 import Orchestrator from './components/BioEngine/Orchestrator';
 import AgentLab from './pages/AgentLab';
 import Training from './components/training/Training';
@@ -109,6 +110,7 @@ const AppContent: React.FC = () => {
           <Route path="/model-trainer/:id" element={<div className="container mx-auto px-4"><ModelTrainer /></div>} />
           <Route path="/manage-worker/:artifactId" element={<div className="container mx-auto px-4"><ManageWorker /></div>} />
           <Route path="/worker" element={<div className="container mx-auto px-4"><BioEngineHome /></div>} />
+          <Route path="/worker/instances" element={<div className="container mx-auto px-4"><BioEngineWorkerList /></div>} />
           <Route path="/worker/dashboard" element={<div className="container mx-auto px-4"><BioEngineWorker /></div>} />
           <Route path="/bioengine" element={<Navigate to="/worker" replace />} />
           <Route path="/bioengine/worker" element={<Navigate to="/worker/dashboard" replace />} />

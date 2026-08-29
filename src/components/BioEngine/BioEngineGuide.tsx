@@ -117,7 +117,13 @@ const TagInput: React.FC<{
 // dependencies and can host only that model's trainer, so the image is chosen
 // from the model the site wants to train. See src/config/chironModels.ts.
 
-const BioEngineGuide: React.FC = () => {
+interface BioEngineGuideProps {
+  /** Scroll the host page to its "View BioEngine Workers" button and flag it.
+   *  Supplied by BioEngineHome, absent when the guide is rendered elsewhere. */
+  onScrollToWorkers?: () => void;
+}
+
+const BioEngineGuide: React.FC<BioEngineGuideProps> = ({ onScrollToWorkers }) => {
   const { client, server, connect, isConnected, isLoggedIn, user } = useHyphaStore();
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
@@ -1287,7 +1293,7 @@ ${bin} exec ${gpuFlag}\\
             </div>
           </div>
 
-          {/* ── Steps 1–3 ── */}
+          {/* ── Steps 1–4 ── */}
           <div className="border-t border-gray-200 pt-4">
 
             {/* Step 1 */}
@@ -1387,6 +1393,22 @@ ${bin} exec ${gpuFlag}\\
                     {!dataDir && <> The worker runs in the foreground. Stop with <code className="bg-gray-100 px-1 rounded">Ctrl+C</code>.</>}
                   </>
                 )}
+              </p>
+            </div>
+
+            {/* Step 4: point back at the worker list */}
+            <div>
+              <p className="text-sm text-gray-700 font-medium">4. Open your worker's dashboard</p>
+              <p className="text-xs text-gray-500 mt-1">
+                The worker registers itself with Hypha a few seconds after it starts. Once it is up, use{' '}
+                <button
+                  type="button"
+                  onClick={() => onScrollToWorkers?.()}
+                  className="font-semibold text-blue-600 hover:text-blue-800 underline"
+                >
+                  View BioEngine Workers
+                </button>{' '}
+                at the top of this page to find it and open its dashboard.
               </p>
             </div>
 

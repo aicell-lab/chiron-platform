@@ -284,8 +284,9 @@ const BioEngineWorker: React.FC = () => {
         };
       }
     } else {
-      // If no service ID, redirect to home
-      navigate('/bioengine');
+      // No service id in the query: send the user to the instance list rather
+      // than to the setup guide, since picking a worker is what they were after.
+      navigate('/worker/instances');
     }
   }, [serviceId, server, isLoggedIn, autoRefreshEnabled]);
 
@@ -535,8 +536,8 @@ const BioEngineWorker: React.FC = () => {
                                    errorMessage.includes('Service is not available');
       
       if (isServiceUnavailable) {
-        logger.warn('bioengine', 'Worker service unavailable, redirecting home', { serviceId, errorMessage });
-        navigate('/bioengine');
+        logger.warn('bioengine', 'Worker service unavailable, returning to the instance list', { serviceId, errorMessage });
+        navigate('/worker/instances');
         return;
       }
 
@@ -594,8 +595,8 @@ const BioEngineWorker: React.FC = () => {
                                    errorMessage.includes('Service is not available');
 
       if (isServiceUnavailable) {
-        logger.warn('bioengine', 'Worker service unavailable, redirecting home', { serviceId, errorMessage });
-        navigate('/bioengine');
+        logger.warn('bioengine', 'Worker service unavailable, returning to the instance list', { serviceId, errorMessage });
+        navigate('/worker/instances');
         return;
       }
 
@@ -718,8 +719,8 @@ const BioEngineWorker: React.FC = () => {
                                    errorMessage.includes('Service is not available');
 
       if (isServiceUnavailable) {
-        logger.warn('bioengine', 'Worker service unavailable, redirecting home', { serviceId, errorMessage });
-        navigate('/bioengine');
+        logger.warn('bioengine', 'Worker service unavailable, returning to the instance list', { serviceId, errorMessage });
+        navigate('/worker/instances');
         return;
       }
 
@@ -1102,7 +1103,8 @@ ${token}`;
     );
   }
 
-  // If no service_id is provided, redirect to home
+  // If no service_id is provided, the effect above has already redirected to
+  // the instance list.
   if (!serviceId) {
     return null; // This will be handled by the useEffect redirect
   }
@@ -1123,7 +1125,7 @@ ${token}`;
           <div>
             <div className="flex items-center mb-2">
               <button
-                onClick={() => navigate('/bioengine')}
+                onClick={() => navigate('/worker/instances')}
                 className="flex items-center text-blue-600 hover:text-blue-800 transition-colors duration-200 mr-4"
                 title="Back to BioEngine Home"
               >
@@ -1132,7 +1134,7 @@ ${token}`;
                 </svg>
                 <span className="text-sm font-medium">Back</span>
               </button>
-              <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent cursor-pointer" onClick={() => navigate('/bioengine')}>
+              <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent cursor-pointer" onClick={() => navigate('/worker/instances')}>
                 BioEngine Worker Dashboard
               </h1>
             </div>
