@@ -262,9 +262,22 @@ const DeploymentConfigModal: React.FC<DeploymentConfigModalProps> = ({
                 type="text"
                 value={version}
                 onChange={(e) => setVersion(e.target.value)}
-                placeholder="Latest"
+                placeholder={isUpdateTarget ? 'Keep the deployed version' : 'Latest'}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-gray-900"
               />
+              {/* Blank does not mean the same thing in both directions, and the
+                  worker decides which. deploy_app treats a call as an update
+                  when the application ID is already deployed, and an update
+                  with no version inherits the one currently running rather than
+                  resolving the artifact's latest. Leaving the placeholder at
+                  "Latest" for an update therefore promises a fresh pull and
+                  quietly redeploys the old source, which reads as the upload
+                  having failed to take. Name the version to move an app to it. */}
+              <p className="text-xs text-gray-600 mt-1">
+                {isUpdateTarget
+                  ? 'Leave blank to redeploy the version this app is already running. It will not pick up a newer upload. Type a version to move to it.'
+                  : 'Leave blank to deploy the latest version of the artifact.'}
+              </p>
             </div>
 
             <div className="md:col-span-2">

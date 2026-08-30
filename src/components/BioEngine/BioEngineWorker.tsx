@@ -911,11 +911,16 @@ const BioEngineWorker: React.FC = () => {
   };
 
   // Submit a scaling-only update for a running app. Calls deploy_app with
-  // just the {application_id, artifact_id, scaling} triple — every other
-  // deploy parameter (token, env vars, kwargs, GPU mode...) is preserved by
-  // the worker's is_update branch when the application_id already exists
-  // (bioengine/apps/manager.py:1910-1941). Ray Serve handles the new
+  // just the {application_id, artifact_id, scaling} triple. Every other deploy
+  // parameter (token, env vars, kwargs, GPU mode, and the deployed VERSION) is
+  // preserved by the worker's is_update branch when the application_id already
+  // exists (bioengine/apps/manager.py:1910-1941). Ray Serve handles the new
   // replica counts as a rolling reconfigure.
+  //
+  // Inheriting the version is what we want here and is the reason this call
+  // omits it: changing replica counts must not also swap the running code out
+  // from under an operator who only touched a slider. A version change is a
+  // separate, deliberate act through the deployment config modal.
   const updateAppScaling = async (params: {
     application_id: string;
     artifact_id: string;

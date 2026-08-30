@@ -82,6 +82,7 @@ print(f"Token valid for {remaining/3600:.1f}h, expires {time.strftime('%Y-%m-%d 
 
 ```python
 import asyncio
+import yaml
 from hypha_rpc import connect_to_server
 
 HYPHA_TOKEN = "<chiron-platform token from ../tabula/.env>"
@@ -101,8 +102,16 @@ async def main():
     artifact_id = await worker.upload_app(files=files)
     print('Uploaded:', artifact_id)
 
-    result = await worker.deploy_app(artifact_id=artifact_id, application_id='chiron-manager')
-    print('Deployed:', result)
+    # Read the version out of the manifest you just uploaded and pass it.
+    # Omitting it redeploys whatever is already running, not the new upload.
+    version = yaml.safe_load(open(f"{APP_DIR}/manifest.yaml"))['version']
+
+    result = await worker.deploy_app(
+        artifact_id=artifact_id,
+        application_id='chiron-manager',
+        version=version,
+    )
+    print('Deployed:', result, 'at version', version)
 
 asyncio.run(main())
 ```
@@ -110,7 +119,9 @@ asyncio.run(main())
 Notes:
 
 - `worker.upload_app(files=)` uploads to the artifact store and returns the artifact id.
-- `worker.deploy_app(artifact_id=, application_id=)` deploys or redeploys the app on Ray Serve. Reuse the same `application_id` to replace in place.
+- `worker.deploy_app(artifact_id=, application_id=, version=)` deploys or redeploys the app on Ray Serve. Reuse the same `application_id` to replace in place.
+- **Always pass `version=` explicitly when redeploying.** When the `application_id` is already deployed, the worker treats the call as an update and every argument you omit is inherited from the running deployment, `version` included (`bioengine/.../manager.py:2279-2287`). So a fresh `upload_app` followed by a bare `deploy_app` uploads the new source and then redeploys the OLD version, and the result still reports success. The give-away in the worker log is `synced source from Hypha (0 downloaded)`, which is a truthful answer to the wrong question. The same inheritance applies to `disable_gpu`, `hypha_token`, `application_kwargs`, `application_env_vars` and `max_ongoing_requests`.
+- Calling `stop_app(application_id=)` first also works, because it removes the entry that makes the next call an update, but it costs a full cold start. Passing `version=` is the cheaper fix.
 - Pass only `manifest.yaml` and the Python source files. Skip tutorial and docs files.
 - The worker must be in the `chiron-platform` workspace. Verify with `server.list_services()`.
 - Do **not** pass `_rkwargs=True` to `worker.upload_app` or `worker.deploy_app`. The BioEngine worker's schema validator rejects it.
