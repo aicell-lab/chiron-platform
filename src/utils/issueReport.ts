@@ -17,8 +17,9 @@
  *    creator `*`, so a report filed over HTTP would be readable and editable
  *    by every later anonymous HTTP visitor. An unauthenticated websocket
  *    connection mints a fresh short-lived identity per connection instead.
- * 2. The alias placeholders are expanded server side, so the browser never
- *    picks the id and a reporter cannot guess or collide with another one.
+ * 2. The alias is built in the browser rather than from Hypha's server-side
+ *    placeholders, because those only expand to a unix epoch and a full UUID.
+ *    See `buildIssueAlias` for why that is safe here.
  * 3. A new artifact grants its creator `*` on itself. For an anonymous reporter
  *    that identity dies with the connection, but a signed-in reporter keeps a
  *    stable id and can therefore still edit the report they filed. Reading it
@@ -144,6 +145,54 @@ async function notifyChannel(artifactId: string): Promise<void> {
   }
 }
 
+/**
+ * The artifact alias, and therefore the id a maintainer reads in the channel
+ * notification and types into a script.
+ *
+ * `issue-<YYYYMMDD>-<HHMMSS>-<six random characters>`, all in UTC so the ids
+ * sort chronologically wherever they are listed. The date and time come from
+ * `submittedAt`, so the id and the payload can never disagree about when a
+ * report was filed.
+ *
+ * Built in the browser rather than through Hypha's `{timestamp}`/`{uuid}`
+ * alias placeholders, which expand server side but only to a unix epoch and a
+ * full 36-character UUID. Neither is readable, and the pair
+ * produced a 53 character id where this produces 28.
+ *
+ * Moving the choice into the browser costs nothing here. The suffix is drawn
+ * from `crypto.getRandomValues`, so 36^6 is roughly two billion values within
+ * any one second, and Hypha refuses a duplicate alias outright rather than
+ * overwriting, so a collision would surface to the reporter as a failed
+ * submit rather than as a lost report. Guessability does not matter either
+ * way: the collection grants no `read` and no `get_file`, so knowing an id
+ * gets an outsider nothing.
+ */
+export function buildIssueAlias(submittedAt: string): string {
+  const at = new Date(submittedAt);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  const date =
+    `${at.getUTCFullYear()}${pad(at.getUTCMonth() + 1)}${pad(at.getUTCDate())}`;
+  const time =
+    `${pad(at.getUTCHours())}${pad(at.getUTCMinutes())}${pad(at.getUTCSeconds())}`;
+
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = new Uint8Array(6);
+  // A nonce, not a secret, so falling back to Math.random where the Web Crypto
+  // API is absent costs nothing. It is absent in jsdom and in a plain Node
+  // import, and this module has to stay importable in both.
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  // Modulo over 36 from a 256-value byte is very slightly biased towards the
+  // first four letters. Irrelevant for a collision suffix, and not worth a
+  // rejection loop.
+  const suffix = Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
+
+  return `issue-${date}-${time}-${suffix}`;
+}
+
 export interface SubmitIssueReportResult {
   artifactId: string;
 }
@@ -181,7 +230,7 @@ export async function submitIssueReport(
 
     const artifact = await artifactManager.create({
       parent_id: ISSUES_COLLECTION_ID,
-      alias: 'issue-{timestamp}-{uuid}',
+      alias: buildIssueAlias(payload.submittedAt),
       // A report starts life as an open-issue. Once it has been dealt with, a
       // maintainer runs scripts/close_issue.py, which flips the type to
       // archived-issue and drops the reporter's own permissions on it. The type

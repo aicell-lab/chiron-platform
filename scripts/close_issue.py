@@ -1,7 +1,7 @@
 """Close a problem report once it has been dealt with.
 
-    python scripts/close_issue.py chiron-platform/issue-1756500000-<uuid>
-    python scripts/close_issue.py issue-1756500000-<uuid> --note "fixed in #2"
+    python scripts/close_issue.py chiron-platform/issue-20260830-221113-k3n9zq
+    python scripts/close_issue.py issue-20260830-221113-k3n9zq --note "fixed in #2"
     python scripts/close_issue.py --list
 
 Closing does two things to the artifact:

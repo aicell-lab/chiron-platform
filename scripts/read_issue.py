@@ -1,7 +1,7 @@
 """Read one problem report out of `chiron-platform/issues`.
 
-    python scripts/read_issue.py chiron-platform/issue-1756500000-<uuid>
-    python scripts/read_issue.py issue-1756500000-<uuid> --json
+    python scripts/read_issue.py chiron-platform/issue-20260830-221113-k3n9zq
+    python scripts/read_issue.py issue-20260830-221113-k3n9zq --json
 
 Downloads the report's `report.json` into `.svamp/chiron-issues/` and prints the
 context block, the reporter's description and the tail of the log buffer.
