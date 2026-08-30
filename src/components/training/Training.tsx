@@ -739,6 +739,11 @@ const Training: React.FC = () => {
   const [trainingConfigSummary, setTrainingConfigSummary] = useState({ numRounds: 5, perRoundTimeoutMinutes: 20 });
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
   const [trainingHistory, setTrainingHistory] = useState<TrainingHistory | null>(null);
+  // Pending/error state for the Training History Refresh button. Without
+  // these the button gave no feedback at all, so a click was
+  // indistinguishable from a dead control.
+  const [historyRefreshing, setHistoryRefreshing] = useState(false);
+  const [historyRefreshError, setHistoryRefreshError] = useState<string | null>(null);
 
   // Prune local pending-removal entries the moment the orchestrator confirms
   // (server pending_removal includes the svc id) so we don't double-track.
@@ -4064,24 +4069,51 @@ const Training: React.FC = () => {
                 <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="font-semibold text-gray-900 text-sm">Training History</h3>
-                    <button
-                      onClick={async () => {
-                        const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === (trainingOrchestratorId || selectedOrchestrator));
-                        if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-                        try {
-                          const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-                          const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
-                          if (history) setTrainingHistory(history);
-                        } catch { /* silent */ }
-                      }}
-                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 transition-colors"
-                      title="Refresh training history"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                      Refresh
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {historyRefreshError && (
+                        <span className="text-xs text-red-500" title={historyRefreshError}>{historyRefreshError}</span>
+                      )}
+                      <button
+                        onClick={async () => {
+                          const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === (trainingOrchestratorId || selectedOrchestrator));
+                          if (!orchestrator || orchestrator.status !== 'RUNNING') {
+                            setHistoryRefreshError('Orchestrator is not running');
+                            return;
+                          }
+                          // The refresh used to run with no visible state and
+                          // swallow its own failures, so a click looked
+                          // identical whether the call was in flight, had
+                          // returned unchanged data, or had failed outright.
+                          // Hold the pending flag for a beat past a fast
+                          // response: a spinner that appears and vanishes
+                          // within one frame reads as nothing happening,
+                          // which is the complaint this addresses.
+                          setHistoryRefreshing(true);
+                          setHistoryRefreshError(null);
+                          const startedAt = Date.now();
+                          try {
+                            const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+                            const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
+                            if (history) setTrainingHistory(history);
+                          } catch (err) {
+                            setHistoryRefreshError(extractRemoteError(err instanceof Error ? err.message : String(err)));
+                          } finally {
+                            const elapsed = Date.now() - startedAt;
+                            const settle = Math.max(0, 400 - elapsed);
+                            if (settle > 0) await new Promise(r => setTimeout(r, settle));
+                            setHistoryRefreshing(false);
+                          }
+                        }}
+                        disabled={historyRefreshing}
+                        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                        title="Refresh training history"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className={`w-3.5 h-3.5 ${historyRefreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        {historyRefreshing ? 'Refreshing…' : 'Refresh'}
+                      </button>
+                    </div>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                     {trainingHistory.training_losses?.length > 0 && (

@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { FaChevronDown, FaChevronRight } from 'react-icons/fa';
 import { DEFAULT_MODEL_FAMILY, getChironModel } from '../../config/chironModels';
+import InfoPopover from '../BioEngine/InfoPopover';
 import {
   WeightTransport,
-  WEIGHT_TRANSPORTS,
   WEIGHT_TRANSPORT_LABELS,
   readWeightTransport,
   storeWeightTransport,
@@ -471,36 +471,64 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
 
         {/* Weight transport. A run-level choice rather than a deployment one:
             the same orchestrator and trainers serve both, so switching costs a
-            restart of the run and nothing else. It is surfaced because WebRTC
-            depends on a TURN relay that is outside this platform's control,
-            and when that relay is down the operator needs a way through
-            without waiting for anyone. */}
-        <div className="mt-4">
-          <label className="block text-xs font-semibold text-gray-700 mb-1">Weight Transport</label>
-          <div className="inline-flex rounded-lg border border-gray-200 p-0.5 bg-gray-50">
-            {WEIGHT_TRANSPORTS.map((option) => (
-              <button
-                key={option}
-                type="button"
-                onClick={() => { setTransport(option); storeWeightTransport(option); }}
-                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
-                  transport === option
-                    ? 'bg-white text-gray-900 shadow-sm font-medium'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                {WEIGHT_TRANSPORT_LABELS[option].label}
-              </button>
-            ))}
-          </div>
-          <p className="mt-1 text-xs text-gray-400">{WEIGHT_TRANSPORT_LABELS[transport].hint}</p>
-          {transport === 'webrtc' && (
-            <p className="mt-1 text-xs text-gray-400">
-              No automatic fallback: if the handshake fails, the trainer sits out that round rather than
-              quietly relaying its weights through the server. Switch back to WebSocket to get through a
-              network that blocks it.
+            restart of the run and nothing else. Peer-to-peer is the normal
+            path and covers restrictive networks through the TURN relay, so
+            this switch exists for the residual case where even the relay is
+            unreachable and the operator needs a way through without waiting
+            for anyone.
+
+            Presented as a single on/off switch rather than a pair of
+            transport names. The operator's decision is whether weights
+            should avoid the server, which is a privacy question they can
+            answer; 'WebSocket vs WebRTC' asks them to translate that into
+            protocol names first. The names still appear in the popover, so
+            anyone matching this against a log or the orchestrator API can
+            find them. */}
+        <div className="mt-4 flex items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-1.5">
+              <label className="block text-xs font-semibold text-gray-700">Peer-to-Peer Weight Transfer</label>
+              <InfoPopover label="About peer-to-peer weight transfer">
+                <p className="font-semibold text-gray-800 mb-1">Peer-to-peer (WebRTC)</p>
+                <p>{WEIGHT_TRANSPORT_LABELS.webrtc.hint}</p>
+                <p className="mt-1">
+                  A direct path is used where the network allows one. Where it does not, a TURN
+                  relay forwards the encrypted packets without being able to read them, so a
+                  relayed run is exactly as private as a direct one.
+                </p>
+                <p className="mt-1">
+                  There is no automatic fallback to the server. If even the relay cannot connect,
+                  the trainer sits out that round rather than quietly sending its weights through
+                  the server. Turning this off is the way through a network that blocks all of it.
+                </p>
+                <p className="font-semibold text-gray-800 mt-3 mb-1">Off: through the server (WebSocket)</p>
+                <p>{WEIGHT_TRANSPORT_LABELS.websocket.hint}</p>
+                <p className="mt-3 text-gray-500">
+                  Either way, only model weights and scalar metrics ever leave a site. Raw data
+                  never does.
+                </p>
+              </InfoPopover>
+            </div>
+            <p className="text-xs text-gray-400 mt-0.5">
+              {transport === 'webrtc'
+                ? 'Weights travel encrypted between sites and no server can read them. Falls back to an encrypted relay where the network blocks a direct path.'
+                : 'Weights pass through the Hypha server, which can read them. Use this only where peer-to-peer cannot connect at all.'}
             </p>
-          )}
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={transport === 'webrtc'}
+            aria-label="Peer-to-peer weight transfer"
+            onClick={() => {
+              const next: WeightTransport = transport === 'webrtc' ? 'websocket' : 'webrtc';
+              setTransport(next);
+              storeWeightTransport(next);
+            }}
+            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${transport === 'webrtc' ? 'bg-emerald-500' : 'bg-gray-200'}`}
+          >
+            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ${transport === 'webrtc' ? 'translate-x-4' : 'translate-x-0'}`} />
+          </button>
         </div>
       </div>
 
@@ -508,20 +536,29 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
       <div className="mb-5 pb-5 border-b border-gray-100">
         <div className="flex items-center justify-between mb-3">
           <div>
-            <label className="block text-xs font-semibold text-gray-700">Start from Pretrained Weights</label>
+            <div className="flex items-center gap-1.5">
+              <label className="block text-xs font-semibold text-gray-700">Start from Pretrained Weights</label>
+              <InfoPopover label="About starting from pretrained weights">
+                <p>
+                  Broadcasts only the shared weights
+                  {model?.shared_weight_scope && (
+                    <> (<code className="text-gray-500">{model.shared_weight_scope}</code>)</>
+                  )}{' '}from
+                  the selected checkpoint to every trainer before round 1. Each
+                  trainer's site-local components stay local: they are not
+                  overwritten.
+                </p>
+                {hasHistory && (
+                  <p className="mt-2">
+                    This orchestrator already has training history. Enabling this
+                    also resets that history, so the next run starts from scratch.
+                  </p>
+                )}
+              </InfoPopover>
+            </div>
             <p className="text-xs text-gray-400 mt-0.5">
-              Broadcasts only the shared weights
-              {model?.shared_weight_scope && (
-                <> (<code className="text-gray-500">{model.shared_weight_scope}</code>)</>
-              )}{' '}from
-              the selected checkpoint to every trainer before round 1. Each
-              trainer's site-local components stay local: they are not
-              overwritten.
-              {hasHistory && (
-                <> Enabling this on an orchestrator with existing history
-                  also resets the orchestrator's training history so the
-                  next run starts from scratch.</>
-              )}
+              Initialise every trainer from a published checkpoint instead of
+              starting from scratch.
             </p>
           </div>
           <button

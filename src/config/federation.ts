@@ -12,18 +12,23 @@
  *  - `websocket` — weights travel through the Hypha server. Needs nothing but
  *    an outbound HTTPS path, so it works from any site that can reach the
  *    platform at all. That is what makes it the safe fallback.
- *  - `webrtc` — weights travel peer to peer over a data channel and never
- *    touch the server. This is the platform's privacy claim, but it needs the
- *    two peers to complete an ICE handshake, and for peers behind restrictive
- *    NATs that means a working TURN relay. Hypha's `turn-server/coturn`
- *    hands out `turns:turn.hypha.aicell.io:443` over TCP, which gets through
- *    egress filters that block the classic TURN ports (UDP 3478, TCP 5349).
+ *  - `webrtc` — weights travel over a DTLS-encrypted data channel between the
+ *    two peers. This is the platform's privacy claim. A direct path is used
+ *    when the network allows one, and when it does not, Hypha's
+ *    `turn-server/coturn` relays the packets from `turns:turn.hypha.aicell.io:443`
+ *    over TCP, which gets through egress filters that block the classic TURN
+ *    ports (UDP 3478, TCP 5349). TURN forwards ciphertext and never terminates
+ *    the DTLS session, so a relayed run is no less private than a direct one:
+ *    the relay cannot read a single weight. That distinction matters for the
+ *    UI copy, which must not tell an operator that peer-to-peer requires a
+ *    network permitting a direct connection. It does not.
  *
  * There is deliberately NO automatic fallback from `webrtc` to `websocket`.
- * Silently degrading would send weights through the server precisely when the
- * operator asked for them not to, so a failed handshake surfaces as an error
- * and the operator decides. This picker is that decision point: when the relay
- * is down, switch to `websocket` and start the run again.
+ * Silently degrading would put weights somewhere the server can read them
+ * precisely when the operator asked for them not to, so a failed handshake
+ * surfaces as an error and the operator decides. This picker is that decision
+ * point, and `websocket` is what it exists to reach: the escape hatch for a
+ * network that blocks even the TURN relay, not the ordinary way to run.
  */
 export type WeightTransport = 'websocket' | 'webrtc';
 
@@ -36,23 +41,26 @@ export const isWeightTransport = (value: unknown): value is WeightTransport =>
 export const WEIGHT_TRANSPORT_LABELS: Record<WeightTransport, { label: string; hint: string }> = {
   websocket: {
     label: 'WebSocket',
-    hint: 'Weights relay through the Hypha server. Works from any network that can reach the platform.',
+    hint: 'Weights pass through the Hypha server, which can read them. The fallback for a network that blocks peer-to-peer outright.',
   },
   webrtc: {
     label: 'WebRTC',
-    hint: 'Weights go peer to peer and never reach the server. Needs an ICE handshake, which some networks block.',
+    hint: 'Weights travel encrypted between the two sites, directly where the network allows it and over a relay that cannot read them where it does not.',
   },
 };
 
 /**
- * Default for a fresh browser. `websocket`, because a run that completes
- * slightly less privately beats a run that cannot start. Override at build
- * time with REACT_APP_WEIGHT_TRANSPORT.
+ * Default for a fresh browser. `webrtc`, because keeping weights away from the
+ * server is the point of the platform and the TURN relay covers the networks
+ * that cannot open a direct path, so the case where peer-to-peer genuinely
+ * cannot connect is now the exception rather than the rule. An operator on such
+ * a network turns the switch off once and the choice is persisted. Override at
+ * build time with REACT_APP_WEIGHT_TRANSPORT.
  */
 const configured = process.env.REACT_APP_WEIGHT_TRANSPORT;
 
 export const DEFAULT_WEIGHT_TRANSPORT: WeightTransport =
-  isWeightTransport(configured) ? configured : 'websocket';
+  isWeightTransport(configured) ? configured : 'webrtc';
 
 const STORAGE_KEY = 'chiron.weightTransport';
 
