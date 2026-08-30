@@ -217,6 +217,33 @@ const extractRemoteError = (msg: string): string => {
   return last || msg;
 };
 
+// Republish a polled value only when it actually changed.
+//
+// Every poll response arrives as a fresh object, so handing it straight to a
+// setter re-renders and, worse, invalidates any effect that lists the value as
+// a dependency. `list_trainers` refreshes every 10s and fed
+// `registeredTrainers`, which is a dependency of the `get_trainer_params`
+// effect, which republished `trainerParams`, which the config panel treats as
+// its cue to reload the form defaults. The operator's half-typed training
+// config was therefore wiped every 10 seconds by a poll that had returned the
+// exact same trainer list as the poll before it.
+//
+// Both payloads are deterministic (a sorted-by-construction id list, and a
+// schema plus a model block), so equality here is safe and the identity of an
+// unchanged value survives the poll.
+const sameIdList = (a: string[], b: string[]): boolean =>
+  a.length === b.length && a.every((v, i) => v === b[i]);
+
+const sameParams = (a: unknown, b: unknown): boolean => {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    // A payload that will not serialise is one we cannot compare, so treat it
+    // as changed rather than pinning the UI to a stale value.
+    return false;
+  }
+};
+
 // Dataset-card detail dialog. Lazily fetches get_dataset_card_details from
 // the chiron-manager the first time it is opened for a given (manager, dataset,
 // zarr) and caches the result via the cache map passed in. Two views are
@@ -2299,18 +2326,23 @@ const Training: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     const fetchRegisteredTrainers = async (showSpinner: boolean) => {
-      if (!selectedOrchestrator) { if (!cancelled) setRegisteredTrainers([]); return; }
+      // Every early return and every success below goes through
+      // `keepUnchanged`, so a poll that finds nothing new leaves the array
+      // identity alone. See `sameIdList` for why that matters.
+      const keepUnchanged = (next: string[]) =>
+        setRegisteredTrainers(prev => (sameIdList(prev, next) ? prev : next));
+      if (!selectedOrchestrator) { if (!cancelled) keepUnchanged([]); return; }
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
-      if (!orchestrator || orchestrator.status !== 'RUNNING') { if (!cancelled) setRegisteredTrainers([]); return; }
+      if (!orchestrator || orchestrator.status !== 'RUNNING') { if (!cancelled) keepUnchanged([]); return; }
       try {
         if (showSpinner) setIsLoadingRegisteredTrainers(true);
         const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
         const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
-        if (!cancelled) setRegisteredTrainers(registeredServiceIds);
+        if (!cancelled) keepUnchanged(registeredServiceIds);
       } catch {
         // Don't wipe the list on a transient fetch error during periodic
         // refresh — keep what we have so optimistic state survives.
-        if (showSpinner && !cancelled) setRegisteredTrainers([]);
+        if (showSpinner && !cancelled) keepUnchanged([]);
       } finally {
         if (showSpinner && !cancelled) setIsLoadingRegisteredTrainers(false);
       }
@@ -2339,7 +2371,7 @@ const Training: React.FC = () => {
         setTrainerParamsLoading(true); setTrainerParamsError(null);
         const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
         const params = await callHyphaService(orchSvcId, 'get_trainer_params', {});
-        setTrainerParams(params);
+        setTrainerParams((prev: any) => (sameParams(prev, params) ? prev : params));
       } catch (error) {
         const raw = error instanceof Error ? error.message : 'Failed to fetch parameters';
         // The orchestrator raises this whenever its client list is empty. It is

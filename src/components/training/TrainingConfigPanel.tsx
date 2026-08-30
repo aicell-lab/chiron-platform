@@ -203,6 +203,26 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
 
   // Global transformer weight artifacts always use model.pth — no file picker needed.
 
+  // Fields the operator has typed into, so a params refresh can reload the
+  // defaults for everything else without overwriting work in progress.
+  //
+  // The refresh used to be constant: `params` was republished by a 10s poll
+  // and this effect reset every field on each one, so a config took longer to
+  // fill in than the interval that wiped it. Training.tsx no longer republishes
+  // an unchanged payload, which removes that loop, but a genuine change (the
+  // operator selects a different orchestrator mid-edit) still lands here and
+  // still must not silently discard typed values.
+  const editedFitKeys = React.useRef<Set<string>>(new Set());
+  const editedEvalKeys = React.useRef<Set<string>>(new Set());
+
+  // A different model means different parameters, so anything carried over
+  // would be a value from another model's schema. Forget the edits and let the
+  // new defaults through.
+  useEffect(() => {
+    editedFitKeys.current = new Set();
+    editedEvalKeys.current = new Set();
+  }, [modelFamily]);
+
   // Initialize values with defaults when params change
   useEffect(() => {
     if (!params) return;
@@ -234,8 +254,23 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
       });
     }
     
-    setFitValues(initialFitValues);
-    setEvalValues(initialEvalValues);
+    // Defaults for untouched fields, the operator's own value for the rest.
+    // A key the schema dropped disappears either way, because the merge starts
+    // from the new defaults rather than from the previous values.
+    const merge = (
+      prev: Record<string, any>,
+      defaults: Record<string, any>,
+      edited: Set<string>
+    ): Record<string, any> => {
+      const next = { ...defaults };
+      edited.forEach(key => {
+        if (key in next) next[key] = prev[key];
+      });
+      return next;
+    };
+
+    setFitValues(prev => merge(prev, initialFitValues, editedFitKeys.current));
+    setEvalValues(prev => merge(prev, initialEvalValues, editedEvalKeys.current));
   }, [params]);
 
   // Render input field based on parameter type
@@ -370,10 +405,12 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   };
 
   const handleUpdateFitValue = (key: string, value: any) => {
+    editedFitKeys.current.add(key);
     setFitValues(prev => ({ ...prev, [key]: value }));
   };
 
   const handleUpdateEvalValue = (key: string, value: any) => {
+    editedEvalKeys.current.add(key);
     setEvalValues(prev => ({ ...prev, [key]: value }));
   };
 
