@@ -8,8 +8,8 @@ import {
   getArtifactFileUrl,
   listArtifactFiles,
   readArtifact,
-  resolveCoverUrl,
 } from '../utils/artifactApi';
+import CoverImage from '../components/models/CoverImage';
 import { useHyphaStore } from '../store/hyphaStore';
 import { ArrowPathIcon, ArrowLeftIcon, ArrowDownTrayIcon } from '@heroicons/react/24/outline';
 import { BiLoaderAlt } from 'react-icons/bi';
@@ -123,7 +123,6 @@ const ModelDetail: React.FC = () => {
   const manifest = artifact.manifest || {};
   const name = manifest.name || artifact.alias || alias || '';
   const description = manifest.description || '';
-  const cover = resolveCoverUrl(manifest.cover, artifact.id);
   const tissue = manifest.tissue as string | undefined;
   const tissues = Array.isArray(manifest.tissues)
     ? (manifest.tissues as string[])
@@ -253,12 +252,14 @@ const ModelDetail: React.FC = () => {
       </Link>
 
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-        {cover && (
+        {manifest.cover && (
           <div className="w-full bg-gray-50 flex items-center justify-center py-6 border-b border-gray-100">
-            <img
-              src={cover}
+            <CoverImage
+              cover={manifest.cover}
+              artifactId={artifact.id}
               alt={name}
               className="max-h-32 max-w-[60%] object-contain"
+              loading="eager"
             />
           </div>
         )}

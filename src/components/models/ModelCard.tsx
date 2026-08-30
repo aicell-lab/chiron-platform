@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { ArtifactRef, resolveCoverUrl } from '../../utils/artifactApi';
+import { ArtifactRef } from '../../utils/artifactApi';
+import CoverImage from './CoverImage';
 
 interface ModelCardProps {
   artifact: ArtifactRef;
@@ -33,7 +34,6 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
     ? manifest.tissues
     : undefined;
   const isGlobalTransformer: boolean = manifest.global_transformer === true;
-  const cover = resolveCoverUrl(manifest.cover, artifact.id);
   const alias = artifact.alias || aliasFromId(artifact.id);
 
   return (
@@ -42,18 +42,17 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
       className="group flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all overflow-hidden"
     >
       <div className="relative w-full overflow-hidden bg-gray-50" style={{ paddingTop: '56.25%' }}>
-        {cover ? (
-          <img
-            src={cover}
-            alt={name}
-            className="absolute inset-0 w-full h-full object-contain p-3 group-hover:scale-[1.02] transition-transform"
-            loading="lazy"
-          />
-        ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-gray-300">
-            <span className="text-4xl">🧬</span>
-          </div>
-        )}
+        <CoverImage
+          cover={manifest.cover}
+          artifactId={artifact.id}
+          alt={name}
+          className="absolute inset-0 w-full h-full object-contain p-3 group-hover:scale-[1.02] transition-transform"
+          fallback={
+            <div className="absolute inset-0 flex items-center justify-center text-gray-300">
+              <span className="text-4xl">🧬</span>
+            </div>
+          }
+        />
       </div>
 
       <div className="flex flex-col flex-grow p-4">
