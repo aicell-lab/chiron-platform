@@ -831,6 +831,14 @@ const Training: React.FC = () => {
   const [trainerParams, setTrainerParams] = useState<any>(null);
   const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
   const [trainerParamsError, setTrainerParamsError] = useState<string | null>(null);
+  // Number of add_trainer calls currently in flight. registerTrainer checks the
+  // box optimistically, which lands in registeredTrainers a few hundred ms
+  // before the orchestrator actually knows about the trainer. The parameter
+  // fetch keys on registeredTrainers, so without this gate it asks for
+  // get_trainer_params while the federation is still empty and the orchestrator
+  // answers 500 "No clients registered for federated training", which the panel
+  // renders as a hard failure of an operation that in fact succeeded.
+  const [pendingTrainerRegistrations, setPendingTrainerRegistrations] = useState(0);
 
   const [showErrorDetailModal, setShowErrorDetailModal] = useState(false);
   const [errorDetailTrainerId, setErrorDetailTrainerId] = useState<string>('');
@@ -2163,6 +2171,7 @@ const Training: React.FC = () => {
     if (!prev.includes(trainerServiceId)) {
       setRegisteredTrainers([...prev, trainerServiceId]);
     }
+    setPendingTrainerRegistrations(n => n + 1);
     (async () => {
       try {
         // NOTE: kwarg is `trainer_service_id`, NOT `service_id`. Hypha's HTTP
@@ -2184,6 +2193,8 @@ const Training: React.FC = () => {
         setErrorPopupMessage('Failed to Register Trainer');
         setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
         setShowErrorPopup(true);
+      } finally {
+        setPendingTrainerRegistrations(n => Math.max(0, n - 1));
       }
     })();
   };
@@ -2315,17 +2326,29 @@ const Training: React.FC = () => {
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
       if (!orchestrator || orchestrator.status !== 'RUNNING') { setTrainerParams(null); setTrainerParamsError('Orchestrator not running'); return; }
       if (registeredTrainers.length === 0) { setTrainerParams(null); setTrainerParamsLoading(false); setTrainerParamsError(null); return; }
+      // Hold while a registration is still on the wire. The effect re-runs when
+      // the counter falls back to zero, so the fetch happens once the
+      // orchestrator can actually answer it.
+      if (pendingTrainerRegistrations > 0) { setTrainerParamsLoading(true); setTrainerParamsError(null); return; }
       try {
         setTrainerParamsLoading(true); setTrainerParamsError(null);
         const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
         const params = await callHyphaService(orchSvcId, 'get_trainer_params', {});
         setTrainerParams(params);
       } catch (error) {
-        setTrainerParamsError(error instanceof Error ? error.message : 'Failed to fetch parameters');
+        const raw = error instanceof Error ? error.message : 'Failed to fetch parameters';
+        // The orchestrator raises this whenever its client list is empty. It is
+        // reachable outside the registration race too, when a trainer we still
+        // show as selected was dropped worker-side between polls, so translate
+        // it rather than showing the remote traceback.
+        const msg = raw.includes('No clients registered for federated training')
+          ? 'The orchestrator has no registered trainers yet. Reselect a trainer to continue.'
+          : extractRemoteError(raw);
+        setTrainerParamsError(msg);
       } finally { setTrainerParamsLoading(false); }
     };
     fetchTrainerParams();
-  }, [selectedOrchestrator, registeredTrainers]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedOrchestrator, registeredTrainers, pendingTrainerRegistrations]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const fetchTrainingHistory = async () => {
