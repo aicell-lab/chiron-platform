@@ -2874,6 +2874,44 @@ const Training: React.FC = () => {
     </span>
   );
 
+  /**
+   * The trainer service IDs that took part in the run currently on screen.
+   *
+   * `registeredTrainers` answers a different question: who is registered with
+   * the orchestrator *right now*. That is the right input while a run is being
+   * assembled, and the wrong one once it has finished. The orchestrator's ping
+   * loop unregisters a trainer it cannot reach, and it flushes the roster at
+   * the end of a session, so a run that completed normally routinely leaves an
+   * empty roster behind. Reading the roster after the fact reports "0 sites"
+   * for a federation that had several, blanks the map, and disables the very
+   * save buttons the run exists to feed.
+   *
+   * The per-round loss curves are the run's own record of who contributed, and
+   * they never regress once written. Take those as the authority and union in
+   * the live roster so a session still being assembled (history empty) is
+   * unaffected.
+   */
+  const runParticipantIds = useMemo<string[]>(() => {
+    const ids = new Set<string>([
+      ...Object.keys(trainingHistory?.client_training_losses ?? {}),
+      ...Object.keys(trainingHistory?.client_validation_losses ?? {}),
+      ...registeredTrainers,
+    ]);
+    return Array.from(ids);
+  }, [trainingHistory, registeredTrainers]);
+
+  /**
+   * Manager (worker) ID for a trainer service, from the live app list when the
+   * worker is reachable and from the persisted metadata cache when it is not.
+   * A participant whose worker has gone quiet still belongs on the map and in
+   * the site count.
+   */
+  const managerIdForTrainer = useCallback((svcId: string): string | undefined =>
+    trainers.find(t => t.serviceIds?.[0]?.websocket_service_id === svcId)?.managerId
+      ?? trainerMetaCache[svcId]?.managerId,
+    [trainers, trainerMetaCache]
+  );
+
   // Compute map workers from discovered + connected state
   const mapWorkers = useMemo<MapWorker[]>(() => {
     const appRole = (managerId: string): MapWorker['role'] => {
@@ -2888,10 +2926,10 @@ const Training: React.FC = () => {
       const selectedOrchObj = selectedOrchestrator
         ? orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator)
         : null;
+      // Participants, not the live roster: a finished run keeps its markers even
+      // after the orchestrator has flushed its registrations. See runParticipantIds.
       const registeredTrainerManagerIds = new Set(
-        trainers
-          .filter(t => { const svcId = t.serviceIds?.[0]?.websocket_service_id; return svcId && registeredTrainers.includes(svcId); })
-          .map(t => t.managerId)
+        runParticipantIds.map(managerIdForTrainer).filter((id): id is string => !!id)
       );
       const selectedManagerIds = new Set<string>();
       if (selectedOrchObj) selectedManagerIds.add(selectedOrchObj.managerId);
@@ -2952,7 +2990,7 @@ const Training: React.FC = () => {
       });
     });
     return result;
-  }, [currentStep, managers, orchestrators, trainers, registeredTrainers, selectedOrchestrator, discoveredWorkers, observedWorkspaces]);
+  }, [currentStep, managers, orchestrators, trainers, registeredTrainers, runParticipantIds, managerIdForTrainer, selectedOrchestrator, discoveredWorkers, observedWorkspaces]);
 
   // Annotate mapWorkers with active flag (depends on trainingStatus, kept separate)
   // Map trainer service ID → managerId for pulse/animation lookups
@@ -4019,15 +4057,25 @@ const Training: React.FC = () => {
               {/* Save Weights — shown when there is training history and not actively training */}
               {!isActivelyTraining && trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0) && (() => {
                 const rounds = trainingHistory.training_losses?.length ?? 0;
-                const registeredTrainerApps = trainers.filter(t =>
-                  t.serviceIds?.[0]?.websocket_service_id && registeredTrainers.includes(t.serviceIds[0].websocket_service_id)
-                );
+                // This panel describes a run that has finished, so it counts the
+                // sites that took part in it rather than the ones registered with
+                // the orchestrator at this instant. Those two diverge routinely:
+                // the roster is flushed at end of session and pruned whenever a
+                // ping is missed, which used to render a completed federation as
+                // "0 sites" and disable its save buttons. See runParticipantIds.
+                const siteCount = runParticipantIds.length;
                 // Alpha-sort so the auto-generated description is stable across polls
                 // (per-manager refreshWorkerInfo re-appends trainers to the end of state,
                 // which would otherwise shuffle the dataset list order over time).
-                const allDatasets = [...new Set(registeredTrainerApps.flatMap(t =>
-                  Object.values(t.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean)
-                ))].sort((a, b) => a.localeCompare(b));
+                // Dataset names come from the live trainer while its worker is
+                // reachable and from the persisted cache when it is not, so the
+                // description does not lose its dataset tail to a dropped poll.
+                const allDatasets = [...new Set(runParticipantIds.flatMap(svcId => {
+                  const live = trainers.find(t => t.serviceIds?.[0]?.websocket_service_id === svcId);
+                  return live
+                    ? Object.values(live.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean)
+                    : (trainerMetaCache[svcId]?.datasets ?? []);
+                }))].sort((a, b) => a.localeCompare(b));
                 // The orchestrator names the model and the subset it averages, so the
                 // description says what was actually federated rather than assuming Tabula.
                 const fedModelName = trainerParams?.model?.display_name || 'Federated model';
@@ -4038,10 +4086,11 @@ const Training: React.FC = () => {
                 // landed, so fall back to the image the trainers' own worker
                 // reports. Both can be absent, and every label below degrades
                 // to model-neutral wording rather than to Tabula's.
+                const fedManagerId = runParticipantIds.map(managerIdForTrainer).find(Boolean);
                 const fedFamily = trainerParams?.model?.family
-                  || workerImageFor(registeredTrainerApps[0]?.managerId)?.model_family;
+                  || workerImageFor(fedManagerId)?.model_family;
                 const fedModelShort = trainerParams?.model?.display_name
-                  || modelDisplayName(workerImageFor(registeredTrainerApps[0]?.managerId));
+                  || modelDisplayName(workerImageFor(fedManagerId));
                 // What FedAvg averages, and what it never touches. Every model
                 // federates a subset, so the two cards below hold genuinely
                 // different files and the wording has to say which is which.
@@ -4050,7 +4099,7 @@ const Training: React.FC = () => {
                 // The dataset list is empty whenever the trainers were redeployed after
                 // the run, so keep the ": <datasets>" tail conditional rather than
                 // leaving a dangling colon in a field the user is about to publish.
-                const globalAutoDesc = `${fedModelName}${sharedPhrase ? ` (${sharedPhrase})` : ''} · ${rounds} federated round${rounds !== 1 ? 's' : ''} · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''}${allDatasets.length ? `: ${allDatasets.join(', ')}` : ''}`;
+                const globalAutoDesc = `${fedModelName}${sharedPhrase ? ` (${sharedPhrase})` : ''} · ${rounds} federated round${rounds !== 1 ? 's' : ''} · ${siteCount} site${siteCount !== 1 ? 's' : ''}${allDatasets.length ? `: ${allDatasets.join(', ')}` : ''}`;
 
                 const SaveCard = ({ itemKey, title, subtitle, note, autoDesc, actions, checkpointPicker }: {
                   itemKey: string; title: string; subtitle: string; note?: string; autoDesc: string;
@@ -4167,7 +4216,7 @@ const Training: React.FC = () => {
                             </div>
                           </div>
                         ) : undefined}
-                        subtitle={`FedAvg result · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''} · round ${selectedGlobalRound ?? rounds}`}
+                        subtitle={`FedAvg result · ${siteCount} site${siteCount !== 1 ? 's' : ''} · round ${selectedGlobalRound ?? rounds}`}
                         note={`Shared weights only${sharedPhrase ? `: ${sharedPhrase}` : ''}. Seeds a federated run, not a standalone model.`}
                         autoDesc={globalAutoDesc}
                         actions={
@@ -4183,13 +4232,8 @@ const Training: React.FC = () => {
                         }
                       />
                       {(() => {
-                        // All service IDs that contributed to this training run (from history + registered).
-                        const historyIds = new Set([
-                          ...Object.keys(trainingHistory.client_training_losses ?? {}),
-                          ...Object.keys(trainingHistory.client_validation_losses ?? {}),
-                        ]);
-                        registeredTrainerApps.forEach(t => historyIds.add(t.serviceIds[0].websocket_service_id));
-                        return Array.from(historyIds).map(svcId => {
+                        // All service IDs that contributed to this training run.
+                        return runParticipantIds.map(svcId => {
                           // Connectivity: is the trainer app currently running?
                           const liveTrainer = trainers.find(t => t.serviceIds?.[0]?.websocket_service_id === svcId);
                           const isConnected = !!liveTrainer && liveTrainer.status === 'RUNNING';
@@ -4209,6 +4253,13 @@ const Training: React.FC = () => {
                           const offlineBadge = !isConnected
                             ? (isMgrConnected ? 'Offline' : 'Disconnected')
                             : null;
+                          // The two states mean different things and only one of
+                          // them says anything about the run. Spell that out, so
+                          // a worker that has merely gone quiet is not read as a
+                          // site that dropped out of the federation.
+                          const offlineTitle = offlineBadge === 'Offline'
+                            ? 'The trainer application is no longer running on this worker. Its contribution to the run above is unaffected.'
+                            : 'This worker is not responding, so the state of its trainer is unknown. Its contribution to the run above is unaffected. Saving becomes available again once it reconnects.';
                           const clientRounds = trainingHistory.client_training_losses?.[svcId]?.length || rounds;
                           const autoDesc = `${fedModelShort || 'Trainer'} full model (${localPhrase ? `all weights including this site's ${localPhrase}` : 'full state_dict'}) · ${clientRounds} federated round${clientRounds !== 1 ? 's' : ''}${datasetNames.length ? ` · ${datasetNames.join(', ')}` : ''}`;
                           const pubKey = `publish-${svcId}`;
@@ -4245,7 +4296,7 @@ const Training: React.FC = () => {
                                   )}
                                 </div>
                                 {offlineBadge && (
-                                  <span className={`flex-shrink-0 text-xs font-medium px-2 py-0.5 rounded-full ${offlineBadge === 'Offline' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>{offlineBadge}</span>
+                                  <span title={offlineTitle} className={`flex-shrink-0 text-xs font-medium px-2 py-0.5 rounded-full cursor-help ${offlineBadge === 'Offline' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>{offlineBadge}</span>
                                 )}
                               </div>
                               {/* Session + checkpoint picker */}
