@@ -63,7 +63,7 @@ export interface ChironModel {
  * released together from one version in the tabula repo's pyproject.toml, so
  * a release is a single edit here.
  */
-export const CHIRON_IMAGE_VERSION = '0.7.3';
+export const CHIRON_IMAGE_VERSION = '0.7.5';
 
 const image = (family: string) =>
   `ghcr.io/aicell-lab/chiron-${family}:${CHIRON_IMAGE_VERSION}`;
