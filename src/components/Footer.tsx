@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BiCube } from 'react-icons/bi';
 import ReportIssueDialog from './ReportIssueDialog';
+import { onReportIssuePrompt } from '../utils/reportIssuePrompt';
 
 // Each entry is either a link out (href) or an in-page action (onClick).
 // Report Issue is the action: it opens a dialog rather than sending the user
@@ -14,8 +15,54 @@ interface FooterLink {
   onClick?: () => void;
 }
 
+// How long the ring stays on the button. Long enough to be seen after the
+// scroll settles, short enough that it does not become part of the page.
+const HIGHLIGHT_MS = 2600;
+
 const Footer: React.FC = () => {
   const [reportOpen, setReportOpen] = useState(false);
+  const [highlighted, setHighlighted] = useState(false);
+  const [promptReason, setPromptReason] = useState<string | null>(null);
+  const reportButtonRef = useRef<HTMLButtonElement>(null);
+
+  // Draw attention to the Report Issue button when an error surface asks for
+  // it. The button sits below the fold on nearly every page, so an error
+  // banner further up has no visible route to the reporting path unless we
+  // bring the two together.
+  useEffect(() => {
+    const timers: number[] = [];
+
+    const unsubscribe = onReportIssuePrompt(({ reason }) => {
+      setPromptReason(reason);
+      setHighlighted(true);
+
+      const button = reportButtonRef.current;
+      if (button) {
+        // Only scroll when the button is actually out of view. Yanking the
+        // viewport of someone who can already see it is pure annoyance, and
+        // the ring alone is enough in that case.
+        const rect = button.getBoundingClientRect();
+        const visible = rect.top >= 0 && rect.bottom <= window.innerHeight;
+        if (!visible) {
+          button.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
+
+      timers.push(
+        window.setTimeout(() => setHighlighted(false), HIGHLIGHT_MS)
+      );
+    });
+
+    return () => {
+      unsubscribe();
+      timers.forEach(window.clearTimeout);
+    };
+  }, []);
+
+  const openReport = useCallback(() => {
+    setHighlighted(false);
+    setReportOpen(true);
+  }, []);
 
   const footerLinks: FooterLink[] = [
     {
@@ -38,7 +85,7 @@ const Footer: React.FC = () => {
     },
     {
       label: "Send us a problem report with the platform logs attached",
-      onClick: () => setReportOpen(true),
+      onClick: openReport,
       icon: "/img/bug-icon.png",
       caption: "Report Issue"
     }
@@ -47,9 +94,23 @@ const Footer: React.FC = () => {
   return (
     <footer className="w-full py-8 px-4 mt-16 bg-gray-50 border-t border-gray-200">
       <div className="max-w-7xl mx-auto">
+        {/* Raised only while a prompt is live, so the ring has a reason next to
+            it rather than appearing unexplained. */}
+        {promptReason && highlighted && (
+          <div className="max-w-2xl mx-auto mb-6 px-4 py-3 bg-red-50 border border-red-200 rounded-md text-center">
+            <p className="text-sm text-red-800">
+              Something went wrong. Send us a report and the platform logs come with it.
+            </p>
+            <p className="mt-1 text-xs text-red-700 font-mono break-words">
+              {promptReason}
+            </p>
+          </div>
+        )}
+
         {/* Links Section */}
         <div className="flex flex-wrap justify-center items-start gap-4 mb-8">
           {footerLinks.map((link, index) => {
+            const isReportIssue = link.caption === 'Report Issue';
             const figure = (
               <figure className="flex flex-col items-center">
                 <img
@@ -68,8 +129,13 @@ const Footer: React.FC = () => {
                   {link.onClick ? (
                     <button
                       type="button"
+                      ref={isReportIssue ? reportButtonRef : undefined}
                       onClick={link.onClick}
-                      className="inline-block hover:opacity-80 transition-opacity"
+                      className={`inline-block rounded-lg p-2 hover:opacity-80 transition-all ${
+                        isReportIssue && highlighted
+                          ? 'ring-4 ring-red-400 ring-offset-2 bg-red-50'
+                          : ''
+                      }`}
                     >
                       {figure}
                     </button>
@@ -78,7 +144,7 @@ const Footer: React.FC = () => {
                       href={link.href}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-block hover:opacity-80 transition-opacity"
+                      className="inline-block rounded-lg p-2 hover:opacity-80 transition-opacity"
                     >
                       {figure}
                     </a>

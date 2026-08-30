@@ -8,6 +8,7 @@ import {
   readWeightTransport,
   storeWeightTransport,
 } from '../../config/federation';
+import { promptReportIssue } from '../../utils/reportIssuePrompt';
 
 interface ParamConfig {
   type: string;
@@ -92,6 +93,16 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   hasHistory,
   onConfigChange,
 }) => {
+
+  // A failed parameter fetch replaces the whole panel with a red banner and no
+  // way forward, which is exactly the dead end the footer prompt exists for.
+  // Keyed on the rendered banner rather than on the fetch, so a failure that
+  // the caller recovers from before it reaches the screen stays silent.
+  useEffect(() => {
+    if (error) {
+      promptReportIssue(`Failed to load training parameters: ${error}`);
+    }
+  }, [error]);
 
   // The model these parameters belong to. Everything model-specific in this
   // panel (its title, the checkpoint list, the wording of what gets federated)
