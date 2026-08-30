@@ -979,10 +979,17 @@ ${bin} exec ${gpuFlag}\\
               image, which is what decides the trainer this worker can
               host. It is not an app-level setting the user changes
               later. */}
+          {/* This one select is tinted while the rest of the grid stays grey.
+              Model is the only field here that changes what the worker can do
+              rather than how much of the machine it gets, and it is easy to
+              scroll past a plain dropdown sitting among a dozen identical
+              ones. Indigo is the colour the model badge already uses on the
+              training page and the instance list, so the highlight reads as
+              "this is the model" rather than as a new accent. */}
           <div className="md:col-span-2 lg:col-span-3">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Model</label>
+            <label className="block text-sm font-medium text-indigo-900 mb-1">Model</label>
             <select value={modelFamily} onChange={(e) => setModelFamily(e.target.value as ChironModelFamily)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+              className="w-full px-3 py-2 border border-indigo-300 bg-indigo-50 text-indigo-900 font-medium rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
               {CHIRON_MODEL_FAMILIES.map(family => (
                 <option key={family} value={family}>{CHIRON_MODELS[family].displayName}</option>
               ))}

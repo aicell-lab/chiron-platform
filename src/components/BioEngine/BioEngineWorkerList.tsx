@@ -193,7 +193,7 @@ const ServiceCard: React.FC<{
           </svg>
           {service.chironImage ? (
             <span
-              className="inline-flex items-center px-2 py-0.5 bg-purple-100 text-purple-700 text-xs font-medium rounded-full"
+              className="inline-flex items-center px-2 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-100 text-xs font-medium rounded-full"
               title={service.chironImage.image_ref || undefined}
             >
               {modelDisplayName(service.chironImage)}
