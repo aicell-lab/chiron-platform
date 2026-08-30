@@ -4000,7 +4000,16 @@ const Training: React.FC = () => {
                       <h3 className="font-semibold text-gray-900 text-sm">Training in Progress</h3>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{trainingStatus.stage ? STAGE_LABELS[trainingStatus.stage] : 'Idle'}</span>
+                      {/* This block only renders while the orchestrator reports
+                          the run as running, so a null stage does not mean the
+                          federation is idle: it means the run has been accepted
+                          and has not entered round 1 yet, which covers loading
+                          the pretrained weights onto every trainer and pulling
+                          the initial parameters back off one of them. Labelling
+                          that "Idle" describes the opposite of what is
+                          happening, and on a slow first weight transfer it is
+                          the only thing the operator sees for minutes. */}
+                      <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{trainingStatus.stage ? STAGE_LABELS[trainingStatus.stage] : 'Preparing'}</span>
                       {(() => {
                         // Show the round currently in flight, not the count of
                         // completed rounds. The orchestrator already decrements
