@@ -16,7 +16,7 @@ import {
   referenceMemoryEntries,
   sharedWeightsLabel,
 } from '../../config/chironModels';
-import { DEFAULT_WEIGHT_TRANSPORT, WeightTransport } from '../../config/federation';
+import { DEFAULT_WEIGHT_TRANSPORT, WEIGHT_TRANSPORT_LABELS, WeightTransport, readWeightTransport } from '../../config/federation';
 
 const CountryFlag: React.FC<{ countryName?: string; countryCode?: string; className?: string }> = ({ countryName, countryCode, className }) => {
   const flagUrl = countryCode
@@ -172,6 +172,21 @@ const STAGE_LABELS: Record<NonNullable<TrainingStage>, string> = {
   evaluate:     'Evaluate',
   aggregation:  'Aggregation',
   distribution: 'Distribution',
+};
+
+// How long the pre-round-1 window may last before the UI stops presenting it as
+// an ordinary wait and explains what is being negotiated. Loading pretrained
+// weights and pulling the initial parameters back takes a handful of seconds on
+// a healthy federation, so a minute in means something is retrying rather than
+// progressing. The orchestrator's own bound is longer than this, deliberately:
+// this threshold changes the wording, it does not end the run.
+const PREPARING_EXPLAIN_AFTER_MS = 60_000;
+
+const formatElapsed = (ms: number): string => {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, '0')}s` : `${seconds}s`;
 };
 
 interface TrainingHistory {
@@ -790,6 +805,38 @@ const Training: React.FC = () => {
     }
     if (changed) setPendingLocalRemovals(next);
   }, [isTraining, trainingStatus?.pending_removal, pendingLocalRemovals]);
+
+  // When the current run entered the stage-less window before round 1, or null
+  // when it is not in that window.
+  //
+  // `is_running` goes true the moment the orchestrator accepts the run, but
+  // `current_stage` stays null until round 1 actually begins, and everything in
+  // between is invisible from here: the pretrained weights are loaded onto
+  // every trainer and the initial parameters are pulled back off one of them.
+  // A WebRTC transfer that cannot open its data channel is retried three times
+  // at 90s each before the round fails, so this window can legitimately last a
+  // few seconds or can be five minutes of a run that is already doomed, and an
+  // unqualified "Preparing" reads identically in both cases. Timestamp the
+  // window so the badge can show how long it has lasted and, past the point
+  // where a healthy start would have happened, say what is being waited on.
+  const [preparingSince, setPreparingSince] = useState<number | null>(null);
+
+  // The transport the current run was started with, so the pre-round-1
+  // explanation can name what is actually carrying the weights. Seeded from the
+  // operator's persisted choice, which is also what the config panel defaults
+  // to, so a run this UI did not launch still gets the right name in the
+  // overwhelmingly common case where the choice has not been changed since.
+  const [runTransport, setRunTransport] = useState<WeightTransport>(readWeightTransport);
+
+  useEffect(() => {
+    const preparing = isTraining && !!trainingStatus?.is_running && !trainingStatus?.stage;
+    // Only the transitions move this. Re-stamping on every poll would reset the
+    // clock every 2s and it would never leave zero.
+    setPreparingSince(prev => {
+      if (preparing) return prev ?? Date.now();
+      return prev === null ? prev : null;
+    });
+  }, [isTraining, trainingStatus?.is_running, trainingStatus?.stage]);
   const [registeredTrainers, setRegisteredTrainers] = useState<string[]>([]);
   const [isLoadingRegisteredTrainers, setIsLoadingRegisteredTrainers] = useState(false);
   const [isPreparingTraining, setIsPreparingTraining] = useState(false);
@@ -2632,6 +2679,7 @@ const Training: React.FC = () => {
       // config panel owns the choice; the default is only reached when a caller
       // hands us a config from before the picker existed.
       const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, transport: config.transport || DEFAULT_WEIGHT_TRANSPORT };
+      setRunTransport(trainingParams.transport);
       if (config.initial_weights) trainingParams.initial_weights = config.initial_weights;
       // Config KEYS only. fit_config and eval_config carry dataset ids and
       // data directories the operator typed in, which are theirs and never
@@ -4046,7 +4094,19 @@ const Training: React.FC = () => {
                           that "Idle" describes the opposite of what is
                           happening, and on a slow first weight transfer it is
                           the only thing the operator sees for minutes. */}
-                      <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{trainingStatus.stage ? STAGE_LABELS[trainingStatus.stage] : 'Preparing'}</span>
+                      {trainingStatus.stage ? (
+                        <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{STAGE_LABELS[trainingStatus.stage]}</span>
+                      ) : (
+                        // The elapsed time is what turns this badge from a
+                        // label into information: it is the only on-screen
+                        // difference between a run that is seconds from round 1
+                        // and one that has been retrying a weight transfer for
+                        // minutes. It ticks with the 2s status poll, which
+                        // re-renders this card anyway.
+                        <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">
+                          Preparing{preparingSince !== null ? ` \u00b7 ${formatElapsed(Date.now() - preparingSince)}` : ''}
+                        </span>
+                      )}
                       {(() => {
                         // Show the round currently in flight, not the count of
                         // completed rounds. The orchestrator already decrements
@@ -4072,6 +4132,22 @@ const Training: React.FC = () => {
                       })()}
                     </div>
                   </div>
+                  {/* A long pre-round-1 wait is the one state where the card
+                      has nothing to show and no per-trainer progress to fall
+                      back on, because no trainer has been asked to do anything
+                      yet. Say what the wait is for, and say that it is bounded,
+                      so the operator has a reason to keep waiting rather than
+                      guessing whether the run is dead. */}
+                  {!trainingStatus.stage && preparingSince !== null && Date.now() - preparingSince > PREPARING_EXPLAIN_AFTER_MS && (
+                    <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      Still setting up the first round. The pretrained weights are loaded onto every
+                      trainer and the initial parameters are transferred back over{' '}
+                      <span className="font-medium">{WEIGHT_TRANSPORT_LABELS[runTransport].label}</span>.
+                      The orchestrator retries a transfer that does not come through and ends the run
+                      with an error if it cannot complete, so this will not wait indefinitely.
+                      {runTransport === 'webrtc' && ' If it keeps failing here, the peer-to-peer channel is not opening from this network and the WebSocket transport is the fallback.'}
+                    </div>
+                  )}
                   <div className="space-y-3">
                     {Object.entries(trainingStatus.trainers_progress)
                       .sort(([a], [b]) => getTrainerDisplayName(a).localeCompare(getTrainerDisplayName(b)))
