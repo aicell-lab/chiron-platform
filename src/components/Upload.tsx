@@ -107,12 +107,12 @@ const findEmoji = (config: any, type: string, name: string): string => {
                   type === 'application' ? 'object' :
                   type === 'dataset' ? 'fruit' : null;
   
-  if (!category || !config?.id_parts?.[category]) return '🦒'; // Use giraffe emoji if not found
+  if (!category || !config?.id_parts?.[category]) return '🧬'; // DNA emoji when the name has no mapped emoji
   
   const names = config.id_parts[category];
   const emojis = config.id_parts[`${category}_emoji`];
   const index = names.indexOf(name);
-  return index >= 0 ? emojis[index] : '🦒'; // Use giraffe emoji if not found
+  return index >= 0 ? emojis[index] : '🧬'; // DNA emoji when the name has no mapped emoji
 };
 
 // Add helper to extract noun from generated ID
