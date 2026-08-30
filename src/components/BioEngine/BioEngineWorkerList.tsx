@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useHyphaStore } from '../../store/hyphaStore';
+import { ChironImageIdentity, modelDisplayName } from '../../config/chironModels';
+import { callHyphaService, listHyphaServices } from '../../utils/hyphaHttp';
 
 /**
  * The list of BioEngine workers this browser can reach, on its own route
@@ -11,6 +13,7 @@ import { useHyphaStore } from '../../store/hyphaStore';
  */
 
 const STORAGE_KEY = 'chiron-observed-workspaces';
+const CHIRON_ONLY_KEY = 'chiron-worker-list-chiron-only';
 const DEFAULT_PUBLIC_WORKSPACE = 'chiron-platform';
 
 type GeoLocation = {
@@ -33,6 +36,15 @@ type BioEngineService = {
   cluster_geo_location?: GeoLocation;
   bioengine_version?: string;
   connectionStatus?: 'ok' | 'error';
+  /**
+   * Which model this worker's container image was built for. A BioEngine
+   * worker is a general-purpose runtime and knows nothing about Chiron, so
+   * this comes from the chiron-manager application running on it, which reads
+   * the CHIRON_* variables baked into the image. Undefined means either that
+   * no chiron-manager is running (a plain BioEngine worker, useless for
+   * federated training here) or that its image predates per-model support.
+   */
+  chironImage?: ChironImageIdentity;
 };
 
 type WorkspaceStatus = 'loading' | 'loaded' | 'error';
@@ -46,6 +58,67 @@ const parseMultipleServicesFromError = (errStr: string): string[] => {
     if (!ids.includes(match[1])) ids.push(match[1]);
   }
   return ids;
+};
+
+/**
+ * Which model each worker in a workspace was built for, keyed by the worker's
+ * fully-qualified bioengine-worker service id.
+ *
+ * The BioEngine worker's own get_status() carries nothing model-related, so
+ * the answer has to come from the chiron-manager application deployed on it.
+ * One listServices call per workspace joins workers to their managers by the
+ * shared client-id prefix, then one get_worker_info per manager reads the
+ * image identity.
+ *
+ * Managers are addressed through the wildcard form
+ * `<workspace>/<workerClientId>-*:chiron-manager` rather than a pinned replica
+ * id, because Ray Serve rotates the replica suffix and a pinned lookup fails
+ * once it has. Returns an empty map on any failure: a worker whose model we
+ * could not read is reported as unknown, never as "no model".
+ */
+const fetchChironImages = async (
+  workspace: string,
+): Promise<Record<string, ChironImageIdentity>> => {
+  const stripWs = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
+  let services: any[];
+  try {
+    services = await listHyphaServices(workspace, { timeoutMs: 12000 });
+  } catch {
+    return {};
+  }
+
+  // Managers are named "<workerClientId>-<replicaId>:chiron-manager". Dedup by
+  // worker so a rotation that briefly exposes two replicas is asked once.
+  const workerClientIds = new Set<string>();
+  for (const svc of services) {
+    if (typeof svc?.id !== 'string') continue;
+    if (!svc.id.endsWith(':chiron-manager') || svc.id.includes('rtc')) continue;
+    const clientId = stripWs(svc.id).split(':')[0].split('-')[0];
+    if (clientId) workerClientIds.add(clientId);
+  }
+  if (workerClientIds.size === 0) return {};
+
+  const ids = Array.from(workerClientIds);
+  const results = await Promise.allSettled(
+    ids.map(clientId =>
+      callHyphaService<any>(
+        `${workspace}/${clientId}-*:chiron-manager`,
+        'get_worker_info',
+        {},
+        { timeoutMs: 12000 },
+      ),
+    ),
+  );
+
+  const byWorker: Record<string, ChironImageIdentity> = {};
+  results.forEach((res, i) => {
+    if (res.status !== 'fulfilled') return;
+    const identity = res.value?.worker_info?.chiron_image;
+    if (identity?.model_family) {
+      byWorker[`${workspace}/${ids[i]}:bioengine-worker`] = identity;
+    }
+  });
+  return byWorker;
 };
 
 const FEATURED_SERVICE_NAME = 'Chiron Platform BioEngine Worker';
@@ -109,6 +182,29 @@ const ServiceCard: React.FC<{
           );
         })()}
 
+        {/* Which model this worker can train. A worker image carries one
+            model's dependencies and no other's, so this is a property of the
+            worker rather than something chosen at training time. Workers with
+            no chiron-manager have no answer here and show the plain-BioEngine
+            line instead, since they cannot host a Chiron trainer at all. */}
+        <div className="mb-3 flex items-center gap-1.5 text-sm">
+          <svg className="w-4 h-4 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+          </svg>
+          {service.chironImage ? (
+            <span
+              className="inline-flex items-center px-2 py-0.5 bg-purple-100 text-purple-700 text-xs font-medium rounded-full"
+              title={service.chironImage.image_ref || undefined}
+            >
+              {modelDisplayName(service.chironImage)}
+            </span>
+          ) : (
+            <span className="text-gray-400" title="No chiron-manager is running on this worker, so it cannot host a Chiron trainer.">
+              No Chiron model
+            </span>
+          )}
+        </div>
+
         {service.bioengine_version && (
           <div className="mb-3 flex items-center gap-1.5 text-sm text-gray-500">
             <svg className="w-4 h-4 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -171,6 +267,20 @@ const BioEngineWorkerList: React.FC = () => {
     } catch { return []; }
   });
   const [workspaceInput, setWorkspaceInput] = useState('');
+  // Observed workspaces are shared with the rest of the platform and may hold
+  // plain BioEngine workers that have nothing to do with Chiron. Default to
+  // hiding those: this page exists to find a worker to train on, and one
+  // without a declared model cannot be used for that. The count of what is
+  // hidden is always shown, so nothing disappears without saying so.
+  const [chironOnly, setChironOnly] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem(CHIRON_ONLY_KEY);
+      return stored === null ? true : stored === 'true';
+    } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(CHIRON_ONLY_KEY, String(chironOnly)); } catch { /* best-effort */ }
+  }, [chironOnly]);
   const [workspaceServices, setWorkspaceServices] = useState<Record<string, BioEngineService[]>>({});
   const [workspaceStatus, setWorkspaceStatus] = useState<Record<string, WorkspaceStatus>>({});
   const [manualRefreshLoading, setManualRefreshLoading] = useState(false);
@@ -260,6 +370,10 @@ const BioEngineWorkerList: React.FC = () => {
       // Other failures mark the card with connectionStatus='error' so it
       // greys out instead of disappearing.
       if (services.length > 0) {
+        // Model identity is fetched per workspace, in parallel with the status
+        // probes, and never fails a card: an unreadable manager leaves the
+        // model unknown rather than marking the worker unreachable.
+        const chironImagesPromise = fetchChironImages(workspace);
         const statusResults = await Promise.allSettled(
           services.map(async (svc) => {
             let lastErr = null;
@@ -283,19 +397,22 @@ const BioEngineWorkerList: React.FC = () => {
             throw lastErr;
           })
         );
+        const chironImages = await chironImagesPromise;
         services = services.map((svc, i) => {
           const res = statusResults[i];
           if (res.status === 'rejected' && String(res.reason).includes('Service not found')) {
             return null; // Will be filtered out
           }
+          const chironImage = chironImages[svc.id];
           if (res.status !== 'fulfilled' || !res.value) {
-            return { ...svc, connectionStatus: 'error' as const };
+            return { ...svc, chironImage, connectionStatus: 'error' as const };
           }
           return {
             ...svc,
             geo_location: res.value.geo_location ?? undefined,
             cluster_geo_location: res.value.cluster_geo_location ?? undefined,
             bioengine_version: res.value.bioengine_version ?? undefined,
+            chironImage,
             connectionStatus: 'ok' as const,
           };
         }).filter(Boolean) as BioEngineService[];
@@ -347,6 +464,12 @@ const BioEngineWorkerList: React.FC = () => {
     });
   }, [observedWorkspaces, workspaceServices]);
 
+  const visibleServices = useMemo(
+    () => (chironOnly ? allServices.filter(s => !!s.chironImage) : allServices),
+    [allServices, chironOnly],
+  );
+  const hiddenCount = allServices.length - visibleServices.length;
+
   const isAnyLoading = observedWorkspaces.some(ws => workspaceStatus[ws] === 'loading');
 
   return (
@@ -387,7 +510,21 @@ const BioEngineWorkerList: React.FC = () => {
         <div className="bg-white/80 backdrop-blur-sm rounded-2xl shadow-sm border border-white/20 p-6 hover:shadow-md transition-all duration-200">
             {/* Workspace management */}
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-gray-700 mb-3">Observed Workspaces</h3>
+              <div className="flex items-center justify-between gap-4 mb-3">
+                <h3 className="text-sm font-semibold text-gray-700">Observed Workspaces</h3>
+                <label className="flex items-center gap-2 cursor-pointer select-none" title="Hide BioEngine workers that are not running a Chiron manager with a declared model. Those workers cannot host a Chiron trainer.">
+                  <span className="text-xs text-gray-600">Chiron workers only</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={chironOnly}
+                    onClick={() => setChironOnly(v => !v)}
+                    className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full transition-colors duration-200 ${chironOnly ? 'bg-blue-600' : 'bg-gray-300'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 mt-0.5 rounded-full bg-white shadow transform transition-transform duration-200 ${chironOnly ? 'translate-x-[1.125rem]' : 'translate-x-0.5'}`} />
+                  </button>
+                </label>
+              </div>
 
               {/* Add workspace input */}
               <form
@@ -473,7 +610,7 @@ const BioEngineWorkerList: React.FC = () => {
                     <p className="text-gray-500 text-sm">Please log in to view BioEngine instances</p>
                   </div>
                 </div>
-              ) : allServices.length === 0 && isAnyLoading ? (
+              ) : visibleServices.length === 0 && isAnyLoading ? (
                 <div className="flex justify-center items-center h-40">
                   <div className="flex flex-col items-center">
                     <img
@@ -484,19 +621,39 @@ const BioEngineWorkerList: React.FC = () => {
                     <p className="text-gray-500 text-sm mt-4 animate-pulse">Loading BioEngine instances...</p>
                   </div>
                 </div>
-              ) : allServices.length === 0 ? (
+              ) : visibleServices.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-40 text-gray-500">
                   <div className="w-20 h-20 bg-gradient-to-r from-blue-100 to-purple-100 rounded-2xl flex items-center justify-center mb-4">
                     <svg className="w-10 h-10 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
                     </svg>
                   </div>
-                  <p className="text-gray-600 font-medium mb-1">No BioEngine instances found</p>
-                  <p className="text-gray-500 text-sm">No running workers found in any observed workspace</p>
+                  {hiddenCount > 0 ? (
+                    <>
+                      <p className="text-gray-600 font-medium mb-1">No Chiron workers found</p>
+                      <p className="text-gray-500 text-sm">
+                        {hiddenCount} BioEngine worker{hiddenCount !== 1 ? 's are' : ' is'} hidden by the Chiron workers only filter
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-gray-600 font-medium mb-1">No BioEngine instances found</p>
+                      <p className="text-gray-500 text-sm">No running workers found in any observed workspace</p>
+                    </>
+                  )}
                 </div>
               ) : (
+                <>
+                {hiddenCount > 0 && (
+                  <p className="text-xs text-gray-500 mb-4">
+                    {hiddenCount} BioEngine worker{hiddenCount !== 1 ? 's' : ''} without a Chiron model {hiddenCount !== 1 ? 'are' : 'is'} hidden.{' '}
+                    <button type="button" onClick={() => setChironOnly(false)} className="text-blue-600 hover:text-blue-800 underline">
+                      Show {hiddenCount !== 1 ? 'them' : 'it'}
+                    </button>
+                  </p>
+                )}
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {allServices.map(service => (
+                  {visibleServices.map(service => (
                     <ServiceCard
                       key={service.id}
                       service={service}
@@ -505,6 +662,7 @@ const BioEngineWorkerList: React.FC = () => {
                     />
                   ))}
                 </div>
+                </>
               )}
             </div>
           </div>
