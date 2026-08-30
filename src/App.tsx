@@ -29,6 +29,20 @@ import MyModels from './pages/MyModels';
 import Landing from './pages/Landing';
 import { logger } from './utils/logger';
 
+// BioEngine builds the "Manage BioEngine worker at:" line it prints on
+// startup as `<dashboard-url>/worker?service_id=<id>` (bioengine/worker/
+// worker.py), and the setup guide sets --dashboard-url to
+// "https://chiron.aicell.io/#/worker", so the link an operator copies out of
+// their container logs arrives here. Forward it to the dashboard rather than
+// adding a second canonical URL for the same page, keeping the query string
+// the service id rides in.
+const WorkerLogLinkRedirect: React.FC = () => {
+  const location = useLocation();
+  return (
+    <Navigate to={{ pathname: '/worker/dashboard', search: location.search }} replace />
+  );
+};
+
 // Create a wrapper component that uses Router hooks
 const AppContent: React.FC = () => {
   const location = useLocation();
@@ -112,6 +126,7 @@ const AppContent: React.FC = () => {
           <Route path="/worker" element={<div className="container mx-auto px-4"><BioEngineHome /></div>} />
           <Route path="/worker/instances" element={<div className="container mx-auto px-4"><BioEngineWorkerList /></div>} />
           <Route path="/worker/dashboard" element={<div className="container mx-auto px-4"><BioEngineWorker /></div>} />
+          <Route path="/worker/worker" element={<WorkerLogLinkRedirect />} />
           <Route path="/bioengine" element={<Navigate to="/worker" replace />} />
           <Route path="/bioengine/worker" element={<Navigate to="/worker/dashboard" replace />} />
           <Route path="/orchestrator" element={<div className="container mx-auto px-4"><Orchestrator /></div>} />
