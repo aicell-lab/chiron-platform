@@ -2838,6 +2838,28 @@ const Training: React.FC = () => {
 
   const getStatusBadge = (status?: string, onClick?: () => void) => {
     const displayStatus = status || 'NOT_STARTED';
+    // The worker reports NOT_STARTED for the whole stretch between accepting a
+    // deployment and Ray Serve first listing the application, which for these
+    // apps runs to minutes. The raw state reads as "nothing is happening", and
+    // get_app_logs has nothing better to offer either: it answers with
+    // "has not been deployed yet" and an empty deployments map, which describes
+    // an app that was never started rather than one that is starting now. Show
+    // progress instead, and keep the badge inert until a real state arrives so
+    // that message is not reachable.
+    if (displayStatus === 'NOT_STARTED') {
+      return (
+        <span
+          className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700"
+          title="Waiting for the worker to start this application. Logs become available once it reaches DEPLOYING."
+        >
+          <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+          </svg>
+          Starting…
+        </span>
+      );
+    }
     const statusConfig: Record<string, { color: string; dot: string }> = {
       'NOT_STARTED': { color: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400' },
       'DEPLOYING': { color: 'bg-blue-100 text-blue-700', dot: 'bg-blue-500 animate-pulse' },
