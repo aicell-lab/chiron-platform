@@ -17,6 +17,18 @@ import { useDraftField } from '../../store/trainingConfigStore';
 const EMPTY_VALUES: Record<string, any> = {};
 const EMPTY_KEYS: string[] = [];
 
+// The next or previous power of two, never below 1. Batch size is the one
+// field where a step of one is useless: memory use roughly doubles with it and
+// the values anyone picks are 8, 16, 32 and so on. A value that is not a power
+// of two steps to the nearest one in the chosen direction, so 20 goes up to 32
+// and down to 16.
+const stepPowerOfTwo = (value: number | null, direction: 1 | -1): number => {
+  if (value === null || !Number.isFinite(value) || value < 1) return 1;
+  const exponent = Math.log2(value);
+  const next = direction > 0 ? Math.floor(exponent) + 1 : Math.ceil(exponent) - 1;
+  return Math.max(1, 2 ** next);
+};
+
 interface ParamConfig {
   type: string;
   default: any;
@@ -401,6 +413,17 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
 
     const inputValue = value === null || value === undefined ? '' : value;
 
+    // Batch size steps by doubling and halving rather than by one. Typing a
+    // value by hand is unchanged, so anything off the power-of-two ladder is
+    // still reachable.
+    const powerOfTwoStepped = key === 'batch_size';
+    const currentNumber = typeof value === 'number' ? value : null;
+    const stepBy = (direction: 1 | -1) => {
+      let next = stepPowerOfTwo(currentNumber ?? config.default ?? null, direction);
+      if (cap !== null && next > cap) next = cap;
+      onChange(key, next);
+    };
+
     return (
       <div key={key} className="mb-3">
         <div className="flex items-center gap-1.5 mb-0.5">
@@ -442,6 +465,43 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
             onChange={handleChange}
             className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
           />
+        ) : config.type === 'integer' && powerOfTwoStepped ? (
+          <div className="flex items-stretch">
+            <button
+              type="button"
+              aria-label="Halve to previous power of 2"
+              onClick={() => stepBy(-1)}
+              disabled={currentNumber !== null && currentNumber <= 1}
+              className="px-3 text-sm font-semibold text-gray-600 bg-gray-50 border border-r-0 border-gray-200 rounded-l-lg hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              −
+            </button>
+            <input
+              type="number"
+              step="1"
+              value={inputValue}
+              onChange={handleChange}
+              onKeyDown={e => {
+                // Match the +/- buttons on keyboard so arrow-stepping does not
+                // drop back to the native step of one.
+                if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+                e.preventDefault();
+                stepBy(e.key === 'ArrowUp' ? 1 : -1);
+              }}
+              max={cap ?? undefined}
+              placeholder={config.default !== null && config.default !== undefined ? String(config.default) : 'Optional'}
+              className="flex-1 min-w-0 px-3 py-2 text-sm text-center border-y border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:relative [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+            />
+            <button
+              type="button"
+              aria-label="Double to next power of 2"
+              onClick={() => stepBy(1)}
+              disabled={cap !== null && currentNumber !== null && currentNumber >= cap}
+              className="px-3 text-sm font-semibold text-gray-600 bg-gray-50 border border-l-0 border-gray-200 rounded-r-lg hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              +
+            </button>
+          </div>
         ) : config.type === 'integer' ? (
           <input
             type="number"
