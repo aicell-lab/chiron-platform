@@ -1,10 +1,14 @@
-# Demo screenshots
+# End-to-end screenshots
 
-One directory per model, written by the Playwright demo driver as it walks the
-training flow: worker list, orchestrator launch, trainer launch, registration,
-training config, training run, checkpoint save.
+One directory per model, written by the UI suite in `tests/e2e/ui` as it walks a
+complete journey: the landing page, the model hub, the account menu, My Models,
+Runs, the worker setup guide, the instance list, a worker dashboard, the
+three-step training wizard, a real federated run, the checkpoint panel and the
+Report Issue dialog.
 
-Files are numbered per run, not per stage, so a run that hits a retry produces a
-different numbering than a clean one. Read the log alongside them.
+Files are numbered in stage order within a run, so a directory reads as a
+walkthrough of that model's pass. A run that hits a retry numbers differently
+from a clean one, so read the suite's log alongside them.
 
-Override the destination with `CHIRON_SHOTS`.
+Regenerate with `python tests/e2e/ui/run_all.py`, or one model at a time with
+`--models <slug>`. Override the destination with `CHIRON_SHOTS`.
