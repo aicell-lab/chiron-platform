@@ -273,10 +273,28 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   // A different model means different parameters, so anything carried over
   // would be a value from another model's schema. Forget the edits and let the
   // new defaults through.
+  //
+  // Only a move between two *known* models counts. `params` is set to null
+  // whenever the orchestrator reports no registered trainers, and it reports
+  // none at the end of every round, so `modelFamily` drops to undefined and
+  // comes back on its own. Reading that gap as a model change wiped the
+  // record of what the operator had typed, and the next parameter refresh
+  // then merged the schema defaults straight over their values. Configuring a
+  // follow-on run from a previous checkpoint hits this every time, because
+  // the round that produced the checkpoint is also what flushed the list.
+  //
+  // The last known family lives in the draft store rather than in a ref for
+  // the same reason the values do: the panel is unmounted by a collapse or a
+  // route change, and a ref would come back empty and defeat the comparison.
+  const [lastModelFamily, setLastModelFamily] = useDraftField(scope, 'lastModelFamily', '');
   useEffect(() => {
-    setEditedFitKeys(EMPTY_KEYS);
-    setEditedEvalKeys(EMPTY_KEYS);
-  }, [modelFamily]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!modelFamily || modelFamily === lastModelFamily) return;
+    if (lastModelFamily) {
+      setEditedFitKeys(EMPTY_KEYS);
+      setEditedEvalKeys(EMPTY_KEYS);
+    }
+    setLastModelFamily(modelFamily);
+  }, [modelFamily, lastModelFamily]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Initialize values with defaults when params change
   useEffect(() => {

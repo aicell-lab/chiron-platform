@@ -29,6 +29,11 @@ export interface TrainingConfigDraft {
    *  for everything else and leaves these alone. */
   editedFitKeys: string[];
   editedEvalKeys: string[];
+  /** The model family the stored values were entered against. A genuine
+   *  switch to another model invalidates them, but the panel must be able to
+   *  tell that switch apart from the parameter schema simply being absent for
+   *  a moment, which happens routinely between runs. */
+  lastModelFamily: string;
   fitAdvancedExpanded: boolean;
   evalAdvancedExpanded: boolean;
 }
