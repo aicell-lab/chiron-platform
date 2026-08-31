@@ -38,6 +38,27 @@ interface TrainerParams {
      *  in the frontend. */
     shared_weight_scope: string;
   };
+  /**
+   * What batch size each registered trainer will actually use, reported by
+   * chiron-orchestrator 0.3.31 from the properties it cached when the trainer
+   * registered. Absent when an older orchestrator answers, in which case the
+   * batch size field stays uncapped, exactly as it was before.
+   *
+   * `max` is the largest ceiling in the federation. Asking for more than that
+   * is clamped at every site, so it is the point past which the field stops
+   * meaning anything.
+   */
+  batch_size_limits?: {
+    max: number | null;
+    min: number | null;
+    trainers: {
+      service_id: string;
+      client_name: string;
+      /** null when the trainer did not report one, which is not the same as
+       *  having no limit. Rendered as unknown rather than as unlimited. */
+      max_batch_size: number | null;
+    }[];
+  };
 }
 
 interface ArtifactEntry {
@@ -254,6 +275,18 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
       });
     }
     
+    // The schema's batch size default is written per model, not per machine,
+    // so on a small GPU it can already be above what the registered trainers
+    // will accept. Bring it down to the cap here rather than showing a number
+    // that the run would quietly reduce.
+    const cap = params.batch_size_limits?.max;
+    if (cap && typeof initialFitValues.batch_size === 'number' && initialFitValues.batch_size > cap) {
+      initialFitValues.batch_size = cap;
+    }
+    if (cap && typeof initialEvalValues.batch_size === 'number' && initialEvalValues.batch_size > cap) {
+      initialEvalValues.batch_size = cap;
+    }
+
     // Defaults for untouched fields, the operator's own value for the rest.
     // A key the schema dropped disappears either way, because the merge starts
     // from the new defaults rather than from the previous values.
@@ -273,6 +306,14 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     setEvalValues(prev => merge(prev, initialEvalValues, editedEvalKeys.current));
   }, [params]);
 
+  // The federation-wide batch size ceiling, or null when the orchestrator is
+  // too old to report one. Every trainer clamps a larger request down to its
+  // own limit, so a value above the largest limit is reduced everywhere and
+  // changes nothing. Capping the field there turns a silent reduction into a
+  // visible bound.
+  const batchSizeLimits = params?.batch_size_limits;
+  const batchSizeCap = batchSizeLimits?.max ?? null;
+
   // Render input field based on parameter type
   const renderInput = (
     key: string,
@@ -280,12 +321,19 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     value: any,
     onChange: (key: string, value: any) => void
   ) => {
+    // Only `batch_size` is bounded, and only when the orchestrator reported a
+    // ceiling. Every other field keeps the schema's own bounds.
+    const cap = key === 'batch_size' ? batchSizeCap : null;
+
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       let newValue: any = e.target.value;
-      
+
       // Type conversion based on parameter type
       if (config.type === 'integer') {
         newValue = newValue === '' ? null : parseInt(newValue, 10);
+        if (cap !== null && typeof newValue === 'number' && newValue > cap) {
+          newValue = cap;
+        }
       } else if (config.type === 'number') {
         newValue = newValue === '' ? null : parseFloat(newValue);
       } else if (config.type === 'boolean') {
@@ -303,11 +351,38 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
 
     return (
       <div key={key} className="mb-3">
-        <label className="block text-xs font-semibold text-gray-700 mb-0.5">
-          {key.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')}
-        </label>
+        <div className="flex items-center gap-1.5 mb-0.5">
+          <label className="block text-xs font-semibold text-gray-700">
+            {key.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')}
+          </label>
+          {cap !== null && batchSizeLimits && (
+            <InfoPopover label="About the batch size limit">
+              <p className="font-semibold text-gray-800 mb-1">Capped at {cap}</p>
+              <p>
+                One batch size goes to every trainer, but each one clamps it to what its own GPU
+                can hold. Above {cap} the value is reduced at every site, so it stops meaning
+                anything. Between the smallest and largest limit below, the smaller sites train in
+                smaller batches while the larger ones use the value as given.
+              </p>
+              <p className="mt-2 font-medium text-gray-700">Per trainer</p>
+              <ul className="mt-0.5 space-y-0.5">
+                {batchSizeLimits.trainers.map(t => (
+                  <li key={t.service_id} className="flex items-baseline justify-between gap-2">
+                    <span className="truncate text-gray-600">{t.client_name}</span>
+                    <span className="flex-shrink-0 font-medium text-gray-800">
+                      {t.max_batch_size ?? 'not reported'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-gray-400">
+                Each trainer's limit is set when it is deployed, in the Launch Application dialog.
+              </p>
+            </InfoPopover>
+          )}
+        </div>
         <p className="text-xs text-gray-400 mb-1.5">{config.description}</p>
-        
+
         {config.type === 'boolean' ? (
           <input
             type="checkbox"
@@ -321,6 +396,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
             step="1"
             value={inputValue}
             onChange={handleChange}
+            max={cap ?? undefined}
             placeholder={config.default !== null && config.default !== undefined ? String(config.default) : 'Optional'}
             className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
