@@ -9,6 +9,13 @@ import {
   storeWeightTransport,
 } from '../../config/federation';
 import { promptReportIssue } from '../../utils/reportIssuePrompt';
+import { useDraftField } from '../../store/trainingConfigStore';
+
+// Stable identities for the object and array fallbacks handed to
+// useDraftField. A fresh literal per render would give every consumer a new
+// reference and defeat the guards that compare them.
+const EMPTY_VALUES: Record<string, any> = {};
+const EMPTY_KEYS: string[] = [];
 
 interface ParamConfig {
   type: string;
@@ -99,6 +106,10 @@ interface TrainingConfigPanelProps {
    *  anyway pops a confirmation dialog. */
   hasHistory?: boolean;
   onConfigChange?: (numRounds: number, perRoundTimeoutMinutes: number) => void;
+  /** Which orchestrator this config belongs to. Used as the key the draft is
+   *  filed under, so switching orchestrators shows that orchestrator's own
+   *  half-filled form rather than the last one touched. */
+  configScope?: string;
 }
 
 const CHIRON_MODELS_COLLECTION = 'chiron-platform/chiron-models';
@@ -113,7 +124,12 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   isTraining,
   hasHistory,
   onConfigChange,
+  configScope,
 }) => {
+  // Everything the operator sets is filed under this key. The panel is
+  // unmounted by a parameter refresh, by collapsing the card and by leaving
+  // the page, and none of those should discard a configuration.
+  const scope = configScope || '__unscoped__';
 
   // A failed parameter fetch replaces the whole panel with a red banner and no
   // way forward, which is exactly the dead end the footer prompt exists for.
@@ -132,37 +148,42 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   const modelFamily = model?.family;
 
   // Top-level parameters
-  const [numRounds, setNumRounds] = useState(5);
-  const [perRoundTimeoutMinutes, setPerRoundTimeoutMinutes] = useState(20);
-  const [transport, setTransport] = useState<WeightTransport>(readWeightTransport);
+  const [numRounds, setNumRounds] = useDraftField(scope, 'numRounds', 5);
+  const [perRoundTimeoutMinutes, setPerRoundTimeoutMinutes] = useDraftField(scope, 'perRoundTimeoutMinutes', 20);
+  const [transport, setTransport] = useDraftField(scope, 'transport', readWeightTransport());
 
   // Pretrained weights — defaults ON for a fresh orchestrator, OFF when
   // history already exists (loading new pretrained weights would clobber
   // the previously trained shared transformer). The user can still flip it
   // back on; that path pops a confirmation dialog.
-  const [usePretrainedWeights, setUsePretrainedWeights] = useState(!hasHistory);
-  // Initial flip when the parent first reports has-history (e.g. user just
-  // selected an orchestrator that already has rounds).
+  const [usePretrainedWeights, setUsePretrainedWeights] = useDraftField(scope, 'usePretrainedWeights', !hasHistory);
+  // Flip off when the parent first reports has-history (e.g. user just
+  // selected an orchestrator that already has rounds). Only on the actual
+  // transition: the draft's own fallback already covers the initial value, and
+  // re-applying this on every mount would undo an operator who deliberately
+  // turned pretrained weights back on.
+  const prevHasHistory = React.useRef(hasHistory);
   useEffect(() => {
-    setUsePretrainedWeights(prev => (hasHistory ? false : prev));
-  }, [hasHistory]);
+    if (hasHistory && !prevHasHistory.current) setUsePretrainedWeights(false);
+    prevHasHistory.current = hasHistory;
+  }, [hasHistory]); // eslint-disable-line react-hooks/exhaustive-deps
   const [showOverwriteWarning, setShowOverwriteWarning] = useState(false);
   const [artifacts, setArtifacts] = useState<ArtifactEntry[]>([]);
   const [artifactsLoading, setArtifactsLoading] = useState(false);
   const [artifactsError, setArtifactsError] = useState<string | null>(null);
-  const [selectedArtifactId, setSelectedArtifactId] = useState<string>('');
+  const [selectedArtifactId, setSelectedArtifactId] = useDraftField(scope, 'selectedArtifactId', '');
   const [isCheckpointDropdownOpen, setIsCheckpointDropdownOpen] = useState(false);
   const [weightFiles, setWeightFiles] = useState<string[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
-  const [selectedFilePath, setSelectedFilePath] = useState<string>('');
+  const [selectedFilePath, setSelectedFilePath] = useDraftField(scope, 'selectedFilePath', '');
 
   // Parameter values
-  const [fitValues, setFitValues] = useState<Record<string, any>>({});
-  const [evalValues, setEvalValues] = useState<Record<string, any>>({});
+  const [fitValues, setFitValues] = useDraftField(scope, 'fitValues', EMPTY_VALUES);
+  const [evalValues, setEvalValues] = useDraftField(scope, 'evalValues', EMPTY_VALUES);
 
   // Accordion state
-  const [fitAdvancedExpanded, setFitAdvancedExpanded] = useState(false);
-  const [evalAdvancedExpanded, setEvalAdvancedExpanded] = useState(false);
+  const [fitAdvancedExpanded, setFitAdvancedExpanded] = useDraftField(scope, 'fitAdvancedExpanded', false);
+  const [evalAdvancedExpanded, setEvalAdvancedExpanded] = useDraftField(scope, 'evalAdvancedExpanded', false);
 
   // Notify parent of config changes for header display
   useEffect(() => {
@@ -207,9 +228,18 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
       const others = all.filter(a => !isFoundation(a)).sort(byName);
       const checkpoints = [...foundation, ...others];
       setArtifacts(checkpoints);
-      // Clear the selection when the new list is empty, otherwise a checkpoint
-      // picked for a different model would still be sent to start_training.
-      setSelectedArtifactId(checkpoints.length > 0 ? checkpoints[0].id : '');
+      // Default to the first entry, but keep a selection that is still in the
+      // list. The list is refetched whenever the panel remounts, and re-picking
+      // the default there would quietly swap the operator's checkpoint. Clear
+      // it when the list is empty, otherwise a checkpoint picked for a
+      // different model would still be sent to start_training.
+      setSelectedArtifactId(prev =>
+        checkpoints.length === 0
+          ? ''
+          : checkpoints.some(a => a.id === prev)
+            ? prev
+            : checkpoints[0].id
+      );
     } catch (e: any) {
       console.error('Failed to load pretrained checkpoints:', e);
       setArtifactsError('Failed to load pretrained checkpoints');
@@ -233,16 +263,20 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   // an unchanged payload, which removes that loop, but a genuine change (the
   // operator selects a different orchestrator mid-edit) still lands here and
   // still must not silently discard typed values.
-  const editedFitKeys = React.useRef<Set<string>>(new Set());
-  const editedEvalKeys = React.useRef<Set<string>>(new Set());
+  //
+  // Kept in the draft store alongside the values, not in a ref: a ref dies with
+  // the component, and the whole point is that an unmount must not turn typed
+  // values back into defaults on the next refresh.
+  const [editedFitKeys, setEditedFitKeys] = useDraftField(scope, 'editedFitKeys', EMPTY_KEYS);
+  const [editedEvalKeys, setEditedEvalKeys] = useDraftField(scope, 'editedEvalKeys', EMPTY_KEYS);
 
   // A different model means different parameters, so anything carried over
   // would be a value from another model's schema. Forget the edits and let the
   // new defaults through.
   useEffect(() => {
-    editedFitKeys.current = new Set();
-    editedEvalKeys.current = new Set();
-  }, [modelFamily]);
+    setEditedFitKeys(EMPTY_KEYS);
+    setEditedEvalKeys(EMPTY_KEYS);
+  }, [modelFamily]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Initialize values with defaults when params change
   useEffect(() => {
@@ -293,18 +327,18 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     const merge = (
       prev: Record<string, any>,
       defaults: Record<string, any>,
-      edited: Set<string>
+      edited: string[]
     ): Record<string, any> => {
       const next = { ...defaults };
       edited.forEach(key => {
-        if (key in next) next[key] = prev[key];
+        if (key in next && key in prev) next[key] = prev[key];
       });
       return next;
     };
 
-    setFitValues(prev => merge(prev, initialFitValues, editedFitKeys.current));
-    setEvalValues(prev => merge(prev, initialEvalValues, editedEvalKeys.current));
-  }, [params]);
+    setFitValues(prev => merge(prev, initialFitValues, editedFitKeys));
+    setEvalValues(prev => merge(prev, initialEvalValues, editedEvalKeys));
+  }, [params, editedFitKeys, editedEvalKeys]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The federation-wide batch size ceiling, or null when the orchestrator is
   // too old to report one. Every trainer clamps a larger request down to its
@@ -481,12 +515,12 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   };
 
   const handleUpdateFitValue = (key: string, value: any) => {
-    editedFitKeys.current.add(key);
+    setEditedFitKeys(prev => (prev.includes(key) ? prev : [...prev, key]));
     setFitValues(prev => ({ ...prev, [key]: value }));
   };
 
   const handleUpdateEvalValue = (key: string, value: any) => {
-    editedEvalKeys.current.add(key);
+    setEditedEvalKeys(prev => (prev.includes(key) ? prev : [...prev, key]));
     setEvalValues(prev => ({ ...prev, [key]: value }));
   };
 
@@ -519,7 +553,12 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     });
   };
 
-  if (loading) {
+  // Only while there is nothing to show. A refresh that arrives once the form
+  // is on screen must not replace it with a spinner: swapping the whole panel
+  // out mid-edit reads as the page reloading itself, and it costs the operator
+  // their place in a form that takes longer to fill in than the poll interval.
+  // The refresh is reported in the header instead, below.
+  if (loading && !params) {
     return (
       <div className="flex items-center justify-center py-8">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
@@ -547,6 +586,16 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
 
   return (
     <div>
+
+      {/* A refresh in flight over a form that is already on screen. Reported
+          here rather than by swapping the form for a spinner, so nothing the
+          operator has typed leaves the screen. */}
+      {loading && (
+        <div className="mb-3 flex items-center gap-2 text-xs text-gray-400">
+          <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-300" />
+          <span>Refreshing parameters</span>
+        </div>
+      )}
 
       {/* Which model these parameters belong to. The lists below are read from
           the registered trainer's own schema, so without this line a user

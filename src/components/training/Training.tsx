@@ -19,6 +19,7 @@ import {
   sharedWeightsLabel,
 } from '../../config/chironModels';
 import { DEFAULT_WEIGHT_TRANSPORT, WEIGHT_TRANSPORT_LABELS, WeightTransport, readWeightTransport } from '../../config/federation';
+import { RunConfig, useTrainingConfigStore } from '../../store/trainingConfigStore';
 
 const CountryFlag: React.FC<{ countryName?: string; countryCode?: string; className?: string }> = ({ countryName, countryCode, className }) => {
   const flagUrl = countryCode
@@ -167,6 +168,13 @@ interface TrainingStatus {
   stage: TrainingStage;
   trainers_progress: Record<string, { status?: string; current_batch: number; total_batches: number; progress: number; error?: string; }>;
   pending_removal?: string[];
+  /** Identifier of the run currently held by the orchestrator. */
+  run_id?: string | null;
+  /** The configuration this run was started with, reported by
+   *  chiron-orchestrator 0.3.32. Absent from an older orchestrator, in which
+   *  case a browser opening the page mid-run simply shows the schema defaults
+   *  as it did before. */
+  run_config?: RunConfig;
 }
 
 const STAGE_LABELS: Record<NonNullable<TrainingStage>, string> = {
@@ -839,6 +847,24 @@ const Training: React.FC = () => {
       return prev === null ? prev : null;
     });
   }, [isTraining, trainingStatus?.is_running, trainingStatus?.stage]);
+
+  // Restore the configuration a live run was started with.
+  //
+  // Opening the page in the middle of somebody else's run, or reloading during
+  // your own, used to show the schema defaults in the config panel while the
+  // run used entirely different values. Continuing from there silently changed
+  // the round count, the learning rate or the transport. The orchestrator
+  // reports the run's own configuration on the status poll, so seed the draft
+  // from it. The store seeds once per run_id, so an operator editing the form
+  // to prepare the next run is never overwritten by a later poll.
+  useEffect(() => {
+    if (!selectedOrchestrator) return;
+    const runId = trainingStatus?.run_id;
+    const runConfig = trainingStatus?.run_config;
+    if (!runId || !runConfig || Object.keys(runConfig).length === 0) return;
+    useTrainingConfigStore.getState().seedFromRun(selectedOrchestrator, runId, runConfig);
+  }, [selectedOrchestrator, trainingStatus?.run_id, trainingStatus?.run_config]);
+
   const [registeredTrainers, setRegisteredTrainers] = useState<string[]>([]);
   const [isLoadingRegisteredTrainers, setIsLoadingRegisteredTrainers] = useState(false);
   const [isPreparingTraining, setIsPreparingTraining] = useState(false);
@@ -4073,6 +4099,7 @@ const Training: React.FC = () => {
                   <div className="px-5 pb-5 border-t border-gray-100">
                     <div className="pt-4">
                       <TrainingConfigPanel
+                        configScope={selectedOrchestrator}
                         params={trainerParams}
                         loading={trainerParamsLoading}
                         error={trainerParamsError}
