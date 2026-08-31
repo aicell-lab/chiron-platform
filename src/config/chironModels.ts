@@ -51,6 +51,11 @@ export interface ChironModel {
   /** Measured GPU memory at a given batch size, above the trainer's idle
    *  baseline. Reference for the launch dialog's max-batch-size field. */
   referenceMemory: { batchSize: number; gb: number }[];
+  /** Tailwind classes for the model's badge. One hue per model, so a glance
+   *  at a badge is enough to tell two workers apart without reading the
+   *  label. Kept next to the display name so a new model gets its colour in
+   *  the same edit that gives it a name. */
+  badgeClass: string;
   /** Host RAM in GB the setup guide puts in `--head-memory-in-gb` for a
    *  worker on this model's image. See WORKER_RAM_GB for how it is derived. */
   workerMemoryGb: number;
@@ -116,6 +121,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
       { batchSize: 16, gb: 6 },
       { batchSize: 32, gb: 20 },
     ],
+    badgeClass: 'bg-indigo-50 text-indigo-700 border-indigo-200',
     coverUrl: '/assets/tabula.png',
   },
   scgpt: {
@@ -131,6 +137,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     // Only the batch size validated on a 24 GB RTX 3090 so far. The memory
     // curve is not measured yet, so no other sizes are quoted.
     referenceMemory: [{ batchSize: 32, gb: 0 }],
+    badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-200',
   },
   geneformer: {
     family: 'geneformer',
@@ -143,6 +150,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     sharedWeights: 'token embedding and encoder stack',
     localWeights: 'masked-LM head',
     referenceMemory: [{ batchSize: 16, gb: 0 }],
+    badgeClass: 'bg-amber-50 text-amber-700 border-amber-200',
   },
   scfoundation: {
     family: 'scfoundation',
@@ -155,6 +163,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     sharedWeights: 'value embedding, gene position embedding and encoder',
     localWeights: 'value-regression head',
     referenceMemory: [{ batchSize: 8, gb: 0 }],
+    badgeClass: 'bg-rose-50 text-rose-700 border-rose-200',
   },
 };
 
@@ -204,6 +213,17 @@ export const modelDisplayName = (
     identity.model_family
   );
 };
+
+/**
+ * Badge colours for a worker's model. A family this build does not know gets
+ * a neutral grey rather than borrowing another model's hue, so an unfamiliar
+ * badge reads as "unrecognised" instead of as the wrong model.
+ */
+export const modelBadgeClass = (
+  family: string | undefined | null
+): string =>
+  getChironModel(family)?.badgeClass ||
+  'bg-gray-100 text-gray-600 border-gray-200';
 
 /**
  * Reference memory line for the launch dialog, e.g. "8 ≈ 2 GB · 16 ≈ 6 GB".

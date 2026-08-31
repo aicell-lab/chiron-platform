@@ -6,12 +6,14 @@ import { logger } from '../../utils/logger';
 import { FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
+import InfoPopover from '../BioEngine/InfoPopover';
 import FederatedWorldMap, { MapWorker, MapConnection, MapLegend, MapLegendMode } from './FederatedWorldMap';
 import LossChart from './LossChart';
 import {
   ChironImageIdentity,
   DEFAULT_MODEL_FAMILY,
   localWeightsLabel,
+  modelBadgeClass,
   modelDisplayName,
   referenceMemoryEntries,
   sharedWeightsLabel,
@@ -4601,10 +4603,12 @@ const Training: React.FC = () => {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col max-h-[90vh]">
             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold text-gray-900">Launch Application</h3>
-                <p className="text-xs text-gray-500 mt-0.5 font-mono">{launchDialogManagerId.split('/')[1]?.split(':')[0] || launchDialogManagerId}</p>
-              </div>
+              {/* No service id here. The only identifier this dialog could
+                  show is the manager's Ray client id, which is opaque, rotates
+                  on every replica restart, and names nothing the operator
+                  chose. The worker row they clicked to get here is the
+                  context. */}
+              <h3 className="font-semibold text-gray-900">Launch Application</h3>
               <button onClick={() => { setShowLaunchDialog(false); setLaunchDialogManagerId(null); setNewTrainerDatasets([]); setLocalModelWeights(null); setSelectedWeightsPath(null); setSelectedTrainerWeightsArtifactId(null); setIsWeightsDropdownOpen(false); }} className="text-gray-400 hover:text-gray-600 p-1">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
@@ -4655,9 +4659,9 @@ const Training: React.FC = () => {
                       })()}
                     </div>
                   </div>
-                  {/* Trainer, resolved from the worker's image. Not a choice:
-                      the image carries one model's dependencies, so any other
-                      trainer would fail on import inside Ray. The manager
+                  {/* Model architecture, resolved from the worker's image. Not a
+                      choice: the image carries one model's dependencies, so any
+                      other trainer would fail on import inside Ray. The manager
                       rejects a mismatch independently. */}
                   {(() => {
                     const img = workerImageFor(launchDialogManagerId);
@@ -4677,142 +4681,52 @@ const Training: React.FC = () => {
                     }
                     return (
                       <div>
-                        <label className="block text-xs font-semibold text-gray-700 mb-1.5">Trainer</label>
-                        <div className="px-3 py-2 text-sm border border-gray-200 rounded-lg bg-gray-50">
-                          <p className="text-gray-800">{modelDisplayName(img)}</p>
-                          <p className="text-xs text-gray-500 font-mono mt-0.5 truncate">{img.trainer_artifact}</p>
+                        <div className="flex items-center gap-1.5 mb-1.5">
+                          <label className="block text-xs font-semibold text-gray-700">Model architecture</label>
+                          <InfoPopover label="About this worker's model">
+                            <p className="font-semibold text-gray-800 mb-1">Decided by the worker's image</p>
+                            <p>
+                              This worker's image ships the dependencies for one model, so it can
+                              only train that one. To train a different model, start a worker on
+                              that model's image.
+                            </p>
+                            <p className="mt-2 text-gray-500">Trainer</p>
+                            <p className="font-mono break-all text-gray-600">{img.trainer_artifact}</p>
+                            {img.image_ref && (
+                              <>
+                                <p className="mt-2 text-gray-500">Image</p>
+                                <p className="font-mono break-all text-gray-600">{img.image_ref}</p>
+                              </>
+                            )}
+                          </InfoPopover>
                         </div>
-                        <p className="text-xs text-gray-400 mt-1">
-                          Set by the worker's image{img.image_ref ? ` (${img.image_ref})` : ''}. To train a different model, run a worker on that model's image.
-                        </p>
+                        <span className={`inline-flex items-center px-2.5 py-1 text-sm font-semibold rounded-full border ${modelBadgeClass(img.model_family)}`}>
+                          {modelDisplayName(img)}
+                        </span>
                       </div>
                     );
                   })()}
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Max batch size</label>
-                    <p className="text-xs text-gray-400 -mt-1 mb-1.5">
-                      Hardware-aware upper bound for this trainer. Any session that requests a larger <code className="bg-gray-100 px-1 rounded">batch_size</code> is clamped to this value. Pick based on the worker's GPU memory.
-                    </p>
-                    {/* Reference figures for the model this worker hosts, from
-                        src/config/chironModels.ts. Measured on a 24 GB RTX 3090
-                        above the trainer's idle ~0.7 GiB baseline. Scaling is
-                        super-linear, so in-between sizes are not extrapolated.
-                        A model whose memory curve is not measured yet lists the
-                        batch sizes validated so far without a memory claim. */}
-                    {(() => {
-                      const img = workerImageFor(launchDialogManagerId);
-                      const entries = referenceMemoryEntries(img?.model_family);
-                      if (entries.length === 0) return null;
-                      const measured = entries.filter(e => e.gb > 0);
-                      return (
-                        <div className="text-xs text-gray-600 -mt-1 mb-1.5 bg-gray-50 border border-gray-200 rounded-md px-2 py-1.5">
-                          <span className="font-medium text-gray-700">
-                            {measured.length > 0 ? `${modelDisplayName(img)} reference memory:` : `${modelDisplayName(img)} validated batch sizes:`}
-                          </span>{' '}
-                          {entries.map((e, i) => (
-                            <React.Fragment key={e.batchSize}>
-                              {i > 0 && ' · '}
-                              <code className="bg-white px-1 rounded">{e.batchSize}</code>
-                              {e.gb > 0 && ` ≈ ${e.gb} GB`}
-                            </React.Fragment>
-                          ))}
-                        </div>
-                      );
-                    })()}
-                    {(() => {
-                      const cs = managers.find(m => m.serviceId === launchDialogManagerId)?.workerInfo?.cluster_status;
-                      if (!cs || !cs.total_gpu_memory || cs.total_gpu_memory <= 0) return null;
-                      const totalGiB = cs.total_gpu_memory / (1024 ** 3);
-                      const gpuCount = cs.total_gpu || 0;
-                      const perGpuGiB = gpuCount > 0 ? totalGiB / gpuCount : totalGiB;
-                      const usedGiB = (cs.used_gpu_memory || 0) / (1024 ** 3);
-                      return (
-                        <div className="text-xs text-gray-600 -mt-1 mb-1.5 bg-emerald-50 border border-emerald-100 rounded-md px-2 py-1.5">
-                          <span className="font-medium text-emerald-700">This worker:</span>{' '}
-                          {gpuCount > 0 ? `${gpuCount}× GPU, ` : ''}
-                          {totalGiB.toFixed(1)} GiB total{gpuCount > 1 ? ` (~${perGpuGiB.toFixed(1)} GiB per GPU)` : ''}
-                          {usedGiB > 0 && ` · ${usedGiB.toFixed(1)} GiB currently in use`}
-                        </div>
-                      );
-                    })()}
-                    {/* Stepping is on powers of 2 (2, 4, 8, 16, 32, 64, 128,
-                        256, 512) because GPU memory cost roughly doubles per
-                        step — see the reference strip above. Manual typing is
-                        still free-form: a user can type 29 and we accept it;
-                        clicking + then snaps up to the next power of 2 (32),
-                        - snaps down to the previous (16). */}
-                    {(() => {
-                      const MIN_BS = 1;
-                      const MAX_BS = 512;
-                      const stepUp = (n: number) => {
-                        const next = Math.pow(2, Math.floor(Math.log2(Math.max(n, 1))) + 1);
-                        return Math.min(MAX_BS, next);
-                      };
-                      const stepDown = (n: number) => {
-                        if (n <= MIN_BS) return MIN_BS;
-                        const prev = Math.pow(2, Math.ceil(Math.log2(n)) - 1);
-                        return Math.max(MIN_BS, Math.floor(prev));
-                      };
-                      const atMin = newTrainerMaxBatchSize <= MIN_BS;
-                      const atMax = newTrainerMaxBatchSize >= MAX_BS;
-                      return (
-                        <div className="flex items-stretch">
-                          <button
-                            type="button"
-                            aria-label="Halve to previous power of 2"
-                            onClick={() => setNewTrainerMaxBatchSize(stepDown(newTrainerMaxBatchSize))}
-                            disabled={atMin}
-                            className="px-3 text-sm font-semibold text-gray-600 bg-gray-50 border border-r-0 border-gray-200 rounded-l-lg hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                          >
-                            −
-                          </button>
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            pattern="[0-9]*"
-                            value={newTrainerMaxBatchSize}
-                            onChange={e => {
-                              const raw = e.target.value.replace(/\D/g, '');
-                              if (raw === '') return;
-                              const v = parseInt(raw, 10);
-                              if (Number.isFinite(v) && v >= MIN_BS) {
-                                setNewTrainerMaxBatchSize(Math.min(MAX_BS, v));
-                              }
-                            }}
-                            onKeyDown={e => {
-                              // Match the +/- buttons on keyboard so power-user
-                              // arrow-stepping doesn't drop back to ±1.
-                              if (e.key === 'ArrowUp') {
-                                e.preventDefault();
-                                setNewTrainerMaxBatchSize(stepUp(newTrainerMaxBatchSize));
-                              } else if (e.key === 'ArrowDown') {
-                                e.preventDefault();
-                                setNewTrainerMaxBatchSize(stepDown(newTrainerMaxBatchSize));
-                              }
-                            }}
-                            className="flex-1 min-w-0 px-3 py-2 text-sm text-center border-y border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:relative"
-                            placeholder="32"
-                          />
-                          <button
-                            type="button"
-                            aria-label="Double to next power of 2"
-                            onClick={() => setNewTrainerMaxBatchSize(stepUp(newTrainerMaxBatchSize))}
-                            disabled={atMax}
-                            className="px-3 text-sm font-semibold text-gray-600 bg-gray-50 border border-l-0 border-gray-200 rounded-r-lg hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                          >
-                            +
-                          </button>
-                        </div>
-                      );
-                    })()}
-                  </div>
                   {/* Pretrained weights selection — local-worker saves + full
                       chiron-models checkpoints of this worker's model */}
                   <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Pretrained weights <span className="text-gray-400 font-normal">(optional)</span></label>
-                    <p className="text-xs text-gray-400 -mt-1 mb-1.5">
-                      Loads a full checkpoint of this worker's model into the new trainer: the input embedder, the shared transformer, and the output heads. Checkpoints holding only the shared transformer can't be used here, and neither can a checkpoint from a different model.
-                    </p>
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <label className="block text-xs font-semibold text-gray-700">Pretrained weights <span className="text-gray-400 font-normal">(optional)</span></label>
+                      <InfoPopover label="About pretrained weights">
+                        <p className="font-semibold text-gray-800 mb-1">Which checkpoints fit here</p>
+                        <p>
+                          The trainer starts from a full checkpoint of this worker's model: the input
+                          embedder, the shared transformer and the output heads.
+                        </p>
+                        <p className="mt-2">
+                          A checkpoint holding only the shared transformer will not do, and neither will
+                          one from a different model. The list below is already filtered to what fits.
+                        </p>
+                        <p className="mt-2">
+                          Leave it on <span className="font-medium text-gray-800">Start fresh</span> to
+                          train from randomly initialised weights.
+                        </p>
+                      </InfoPopover>
+                    </div>
                     {isLoadingLocalWeights ? (
                       <div className="flex items-center gap-2 text-xs text-gray-400 py-2"><BiLoaderAlt className="animate-spin" size={12} /> Loading saved weights…</div>
                     ) : localModelWeights === null ? (
@@ -4903,6 +4817,146 @@ const Training: React.FC = () => {
                               </div>
                             </div>
                           )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <label className="block text-xs font-semibold text-gray-700">Max batch size</label>
+                      {/* The reference figures and this worker's GPU are the
+                          numbers you need to answer "what should I put here",
+                          but they are three blocks of small print for a field
+                          most operators set once. They live in the popover so
+                          the field itself stays one line. */}
+                      <InfoPopover label="About max batch size">
+                        <p className="font-semibold text-gray-800 mb-1">A hardware limit, not a training setting</p>
+                        <p>
+                          The batch size a session asks for is one number for the whole federation, but the
+                          sites in a federation rarely have the same GPU. Each trainer clamps the requested
+                          batch size to its own maximum, so a session that is too large for one site still
+                          runs there, just in smaller batches. Set this to what this worker's GPU can hold.
+                        </p>
+                        {(() => {
+                          const img = workerImageFor(launchDialogManagerId);
+                          const entries = referenceMemoryEntries(img?.model_family);
+                          if (entries.length === 0) return null;
+                          const measured = entries.filter(e => e.gb > 0);
+                          return (
+                            <>
+                              <p className="mt-2 font-medium text-gray-700">
+                                {measured.length > 0
+                                  ? `${modelDisplayName(img)} reference memory`
+                                  : `${modelDisplayName(img)} validated batch sizes`}
+                              </p>
+                              <p className="text-gray-600">
+                                {entries.map((e, i) => (
+                                  <React.Fragment key={e.batchSize}>
+                                    {i > 0 && ' · '}
+                                    <code className="bg-gray-100 px-1 rounded">{e.batchSize}</code>
+                                    {e.gb > 0 && ` ≈ ${e.gb} GB`}
+                                  </React.Fragment>
+                                ))}
+                              </p>
+                              {measured.length > 0 && (
+                                <p className="text-gray-400 mt-0.5">
+                                  Measured on a 24 GB RTX 3090, above the trainer's idle baseline. Scaling is
+                                  super-linear, so in-between sizes are not extrapolated.
+                                </p>
+                              )}
+                            </>
+                          );
+                        })()}
+                        {(() => {
+                          const cs = managers.find(m => m.serviceId === launchDialogManagerId)?.workerInfo?.cluster_status;
+                          if (!cs || !cs.total_gpu_memory || cs.total_gpu_memory <= 0) return null;
+                          const totalGiB = cs.total_gpu_memory / (1024 ** 3);
+                          const gpuCount = cs.total_gpu || 0;
+                          const perGpuGiB = gpuCount > 0 ? totalGiB / gpuCount : totalGiB;
+                          const usedGiB = (cs.used_gpu_memory || 0) / (1024 ** 3);
+                          return (
+                            <>
+                              <p className="mt-2 font-medium text-gray-700">This worker</p>
+                              <p className="text-gray-600">
+                                {gpuCount > 0 ? `${gpuCount}× GPU, ` : ''}
+                                {totalGiB.toFixed(1)} GiB total{gpuCount > 1 ? ` (~${perGpuGiB.toFixed(1)} GiB per GPU)` : ''}
+                                {usedGiB > 0 && ` · ${usedGiB.toFixed(1)} GiB currently in use`}
+                              </p>
+                            </>
+                          );
+                        })()}
+                      </InfoPopover>
+                    </div>
+                    <p className="text-xs text-gray-400 -mt-1 mb-1.5">
+                      The largest batch this worker's GPU can hold.
+                    </p>
+                    {/* Stepping is on powers of 2 (2, 4, 8, 16, 32, 64, 128,
+                        256, 512) because GPU memory cost roughly doubles per
+                        step — see the reference strip above. Manual typing is
+                        still free-form: a user can type 29 and we accept it;
+                        clicking + then snaps up to the next power of 2 (32),
+                        - snaps down to the previous (16). */}
+                    {(() => {
+                      const MIN_BS = 1;
+                      const MAX_BS = 512;
+                      const stepUp = (n: number) => {
+                        const next = Math.pow(2, Math.floor(Math.log2(Math.max(n, 1))) + 1);
+                        return Math.min(MAX_BS, next);
+                      };
+                      const stepDown = (n: number) => {
+                        if (n <= MIN_BS) return MIN_BS;
+                        const prev = Math.pow(2, Math.ceil(Math.log2(n)) - 1);
+                        return Math.max(MIN_BS, Math.floor(prev));
+                      };
+                      const atMin = newTrainerMaxBatchSize <= MIN_BS;
+                      const atMax = newTrainerMaxBatchSize >= MAX_BS;
+                      return (
+                        <div className="flex items-stretch">
+                          <button
+                            type="button"
+                            aria-label="Halve to previous power of 2"
+                            onClick={() => setNewTrainerMaxBatchSize(stepDown(newTrainerMaxBatchSize))}
+                            disabled={atMin}
+                            className="px-3 text-sm font-semibold text-gray-600 bg-gray-50 border border-r-0 border-gray-200 rounded-l-lg hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          >
+                            −
+                          </button>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            value={newTrainerMaxBatchSize}
+                            onChange={e => {
+                              const raw = e.target.value.replace(/\D/g, '');
+                              if (raw === '') return;
+                              const v = parseInt(raw, 10);
+                              if (Number.isFinite(v) && v >= MIN_BS) {
+                                setNewTrainerMaxBatchSize(Math.min(MAX_BS, v));
+                              }
+                            }}
+                            onKeyDown={e => {
+                              // Match the +/- buttons on keyboard so power-user
+                              // arrow-stepping doesn't drop back to ±1.
+                              if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                setNewTrainerMaxBatchSize(stepUp(newTrainerMaxBatchSize));
+                              } else if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                setNewTrainerMaxBatchSize(stepDown(newTrainerMaxBatchSize));
+                              }
+                            }}
+                            className="flex-1 min-w-0 px-3 py-2 text-sm text-center border-y border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:relative"
+                            placeholder="32"
+                          />
+                          <button
+                            type="button"
+                            aria-label="Double to next power of 2"
+                            onClick={() => setNewTrainerMaxBatchSize(stepUp(newTrainerMaxBatchSize))}
+                            disabled={atMax}
+                            className="px-3 text-sm font-semibold text-gray-600 bg-gray-50 border border-l-0 border-gray-200 rounded-r-lg hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          >
+                            +
+                          </button>
                         </div>
                       );
                     })()}
