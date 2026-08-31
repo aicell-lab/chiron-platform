@@ -3614,9 +3614,19 @@ const Training: React.FC = () => {
                               </td>
                               <td className="px-4 py-3.5">
                                 {datasetEntries.length > 0 ? (
-                                  <div className="flex flex-col gap-0.5">
+                                  // One badge per dataset. Stacked plain text
+                                  // ran together when a name itself wrapped,
+                                  // leaving no way to tell where one dataset
+                                  // ended and the next began.
+                                  <div className="flex flex-wrap gap-1">
                                     {datasetEntries.map(([dsId, ds]: [string, any]) => (
-                                      <span key={dsId} className="text-xs text-gray-600 leading-tight">{ds.name || dsId}</span>
+                                      <span
+                                        key={dsId}
+                                        className="inline-block px-2 py-0.5 text-xs text-gray-700 bg-gray-100 border border-gray-200 rounded-full leading-tight"
+                                        title={ds.name ? `${ds.name} (${dsId})` : dsId}
+                                      >
+                                        {ds.name || dsId}
+                                      </span>
                                     ))}
                                   </div>
                                 ) : isConnected ? <span className="text-gray-300 text-xs">None</span>
