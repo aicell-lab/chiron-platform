@@ -20,6 +20,7 @@ import {
 } from '../../config/chironModels';
 import { DEFAULT_WEIGHT_TRANSPORT, WEIGHT_TRANSPORT_LABELS, WeightTransport, readWeightTransport } from '../../config/federation';
 import { RunConfig, useTrainingConfigStore } from '../../store/trainingConfigStore';
+import { promptReportIssue } from '../../utils/reportIssuePrompt';
 
 const CountryFlag: React.FC<{ countryName?: string; countryCode?: string; className?: string }> = ({ countryName, countryCode, className }) => {
   const flagUrl = countryCode
@@ -175,6 +176,16 @@ interface TrainingStatus {
    *  case a browser opening the page mid-run simply shows the schema defaults
    *  as it did before. */
   run_config?: RunConfig;
+  /** Why the last run ended, when it ended badly. Reported by
+   *  chiron-orchestrator 0.3.34 and null on a run that completed its rounds or
+   *  was stopped by the operator. Absent from an older orchestrator, which
+   *  reports nothing at all about a failed run. */
+  error?: {
+    round: number;
+    type: string;
+    message: string;
+    at: string;
+  } | null;
 }
 
 const STAGE_LABELS: Record<NonNullable<TrainingStage>, string> = {
@@ -241,6 +252,15 @@ const extractRemoteError = (msg: string): string => {
   }
   return last || msg;
 };
+
+// Name the round a failure happened in, the way an operator counts rounds.
+// The orchestrator reports the round counter as it stood when the exception
+// was raised, and that counter is still 0 for anything that dies before round
+// 1 starts: fetching the initial weights from the first trainer is the usual
+// one. "Training failed in round 0" reads like a bug in the message rather
+// than a description of the run, so say what actually happened instead.
+const describeErrorRound = (round: number): string =>
+  round >= 1 ? `in round ${round}` : 'before the first round';
 
 // Republish a polled value only when it actually changed.
 //
@@ -2613,9 +2633,30 @@ const Training: React.FC = () => {
     };
     const schedule = (ms: number) => { if (!stopped) timer = setTimeout(tick, ms); };
 
-    const finish = async (svcId: string) => {
+    const finish = async (svcId: string, status?: any) => {
       setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
       stop();
+      // A run that dies mid-round reports exactly what a run that finished all
+      // its rounds reports: is_running false, stage null. Until the orchestrator
+      // started carrying the reason on the status, the page could only do what
+      // it does for a success, quietly drop back to the history view, and the
+      // operator was left to describe it as a crash with nothing to go on. Say
+      // what happened, and point at the reporting path, since a failed round is
+      // exactly the kind of thing worth a report.
+      const runError = status?.error;
+      if (runError?.message) {
+        logger.error('training', 'Run ended with an error', {
+          orchestrator: orchKey,
+          round: runError.round,
+          type: runError.type,
+          message: runError.message,
+        });
+        setErrorPopupMessage(`Training failed ${describeErrorRound(runError.round)}`);
+        setErrorPopupDetails(extractRemoteError(runError.message));
+        setErrorPopupDashboardUrl(null);
+        setShowErrorPopup(true);
+        promptReportIssue(`Training failed ${describeErrorRound(runError.round)}: ${runError.message}`);
+      }
       // Always through callHyphaService with the freshly resolved id. The
       // resume path used to call an undeclared `orchestratorService` here,
       // which threw a ReferenceError and left trainingHistory unset, and the
@@ -2657,7 +2698,7 @@ const Training: React.FC = () => {
             return next;
           });
         }
-        if (!status.is_running) { await finish(svcId); return; }
+        if (!status.is_running) { await finish(svcId, status); return; }
         // Reachable and still training. Re-enter the training view only if this
         // poll is what unlocked it, never unconditionally: the user may have
         // just pressed Stop Now, and the orchestrator still reports is_running
@@ -4267,6 +4308,31 @@ const Training: React.FC = () => {
                         </div>
                       );
                     })}
+                  </div>
+                </div>
+              )}
+
+              {/* Why the last run ended, when it ended badly. The modal raised
+                  at the moment of failure is gone as soon as it is dismissed,
+                  and it never appears at all for someone who reloads the page
+                  after the fact. This is the durable record: it stays until the
+                  next run clears the orchestrator's error, and it sits directly
+                  above the history so the truncated loss curve has an
+                  explanation next to it rather than looking like a short run. */}
+              {!isActivelyTraining && trainingStatus?.error?.message && (
+                <div className="bg-red-50 border border-red-100 rounded-2xl p-4 flex items-start gap-3">
+                  <FaTimesCircle className="text-red-500 flex-shrink-0 mt-0.5" size={16} />
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-red-800">
+                      Training stopped {describeErrorRound(trainingStatus.error.round)}
+                    </p>
+                    <p className="text-sm text-red-700 mt-1 break-words whitespace-pre-wrap">
+                      {extractRemoteError(trainingStatus.error.message)}
+                    </p>
+                    <p className="text-xs text-red-500 mt-2">
+                      Rounds completed before this point are kept, and you can continue from the
+                      last checkpoint once the cause is resolved.
+                    </p>
                   </div>
                 </div>
               )}
