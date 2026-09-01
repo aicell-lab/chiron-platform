@@ -848,6 +848,21 @@ const Training: React.FC = () => {
     });
   }, [isTraining, trainingStatus?.is_running, trainingStatus?.stage]);
 
+  // The elapsed time has to advance on its own. Reading Date.now() at render
+  // only moved it when something else re-rendered the card, so the counter
+  // stepped in twos behind the status poll and froze completely whenever that
+  // poll stalled, which is exactly the situation the operator is watching it
+  // for. Tick once a second while the window is open and stop as soon as a
+  // stage arrives, so nothing runs during a normal run.
+  const [preparingNow, setPreparingNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (preparingSince === null) return;
+    setPreparingNow(Date.now());
+    const id = window.setInterval(() => setPreparingNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [preparingSince]);
+  const preparingElapsed = preparingSince === null ? 0 : preparingNow - preparingSince;
+
   // Restore the configuration a live run was started with.
   //
   // Opening the page in the middle of somebody else's run, or reloading during
@@ -4140,10 +4155,9 @@ const Training: React.FC = () => {
                         // label into information: it is the only on-screen
                         // difference between a run that is seconds from round 1
                         // and one that has been retrying a weight transfer for
-                        // minutes. It ticks with the 2s status poll, which
-                        // re-renders this card anyway.
+                        // minutes.
                         <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">
-                          Preparing{preparingSince !== null ? ` \u00b7 ${formatElapsed(Date.now() - preparingSince)}` : ''}
+                          Preparing{preparingSince !== null ? ` \u00b7 ${formatElapsed(preparingElapsed)}` : ''}
                         </span>
                       )}
                       {(() => {
@@ -4177,7 +4191,7 @@ const Training: React.FC = () => {
                       yet. Say what the wait is for, and say that it is bounded,
                       so the operator has a reason to keep waiting rather than
                       guessing whether the run is dead. */}
-                  {!trainingStatus.stage && preparingSince !== null && Date.now() - preparingSince > PREPARING_EXPLAIN_AFTER_MS && (
+                  {!trainingStatus.stage && preparingSince !== null && preparingElapsed > PREPARING_EXPLAIN_AFTER_MS && (
                     <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                       Still setting up the first round. The pretrained weights are loaded onto every
                       trainer and the initial parameters are transferred back over{' '}
