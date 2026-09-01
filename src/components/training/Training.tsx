@@ -2719,13 +2719,21 @@ const Training: React.FC = () => {
         ]);
         if (cancelled) return;
         if (history) setTrainingHistory(history);
+        // Record the status whether or not a run is in flight. It carries the
+        // run_config that the config panel is restored from, and the
+        // orchestrator keeps reporting it after the run ends, so throwing it
+        // away here was what left a finished run's settings invisible: opening
+        // the page showed the schema defaults, and continuing from that run's
+        // checkpoint silently started from them. Everything that renders a
+        // live run is gated on isTraining rather than on this, so a finished
+        // run's status cannot put the page back into the training view.
+        if (status) setTrainingStatus(status);
         if (!status?.is_running) return; // training stopped or never started — just show history
         // Training is actively running — enter the monitoring state
         setIsTraining(true);
         setTrainingResumed(true);
         setTrainingOrchestratorId(selectedOrchestrator);
         setTrainingConfigCollapsed(true);
-        setTrainingStatus(status);
         const ids = Object.keys(status.trainers_progress ?? {});
         if (ids.length > 0) setParticipatedTrainerIds(new Set(ids));
         // The poll owns its own lifetime (see activePollRef), so this effect
