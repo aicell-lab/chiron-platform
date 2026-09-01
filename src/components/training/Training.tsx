@@ -2415,6 +2415,11 @@ const Training: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false;
+    // Same reason as the status poll below: an orchestrator app serves at most
+    // 10 concurrent requests, and a refresh that fires on a fixed interval
+    // regardless of whether the last one answered will stack calls onto an app
+    // that is already struggling and hold it there.
+    let inFlight = false;
     const fetchRegisteredTrainers = async (showSpinner: boolean) => {
       // Every early return and every success below goes through
       // `keepUnchanged`, so a poll that finds nothing new leaves the array
@@ -2424,6 +2429,8 @@ const Training: React.FC = () => {
       if (!selectedOrchestrator) { if (!cancelled) keepUnchanged([]); return; }
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
       if (!orchestrator || orchestrator.status !== 'RUNNING') { if (!cancelled) keepUnchanged([]); return; }
+      if (inFlight) return;
+      inFlight = true;
       try {
         if (showSpinner) setIsLoadingRegisteredTrainers(true);
         const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
@@ -2434,6 +2441,7 @@ const Training: React.FC = () => {
         // refresh — keep what we have so optimistic state survives.
         if (showSpinner && !cancelled) keepUnchanged([]);
       } finally {
+        inFlight = false;
         if (showSpinner && !cancelled) setIsLoadingRegisteredTrainers(false);
       }
     };
@@ -2492,21 +2500,51 @@ const Training: React.FC = () => {
   }, [selectedOrchestrator]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    // Poll the orchestrator that is actively training (not the currently viewed one)
+    // Keep the loss curves current for the orchestrator that is actively
+    // training, which is not necessarily the one being viewed.
+    //
+    // Two things here used to overload the orchestrator between them.
+    //
+    // It was a plain 2s setInterval, which fires whether or not the previous
+    // tick has answered, and it also polled get_training_status even though
+    // startTrainingStatusPoll below already does that every 3s. An orchestrator
+    // app serves at most 10 concurrent requests, so once a call took longer
+    // than the interval the browser filled the pool within seconds, every
+    // further request came back "has reached its maximum of 10 concurrent
+    // requests", and because the interval kept firing regardless the app never
+    // got a gap in which to drain. A run that was training perfectly well then
+    // reported an unreachable orchestrator across the whole page, which is what
+    // a user sees as the run having failed. It also cost the operator the run's
+    // own configuration, because the panel is restored from the run_config that
+    // rides on the status poll and no status poll ever came back.
+    //
+    // So: chain the next tick off the end of the previous one, which bounds the
+    // browser to a single in-flight request no matter how slow the orchestrator
+    // gets, and fetch only the history. The status poll below owns the status,
+    // including the failure counting and the end-of-run reconciliation, and
+    // duplicating it here only spent a second request slot on the one call that
+    // is already the slowest.
     if (!trainingOrchestratorId || !isTraining) return;
-    const fetchHistoryPeriodically = async () => {
+
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const POLL_MS = 2000;
+
+    const tick = async () => {
+      if (stopped) return;
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === trainingOrchestratorId);
-      if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-      try {
-        const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-        const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
-        if (history) setTrainingHistory(history);
-        const status = await callHyphaService<any>(orchSvcId, 'get_training_status', {});
-        if (status) setTrainingStatus(status);
-      } catch { /* silent */ }
+      if (orchestrator && orchestrator.status === 'RUNNING') {
+        try {
+          const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+          const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
+          if (!stopped && history) setTrainingHistory(history);
+        } catch { /* silent */ }
+      }
+      if (!stopped) timer = setTimeout(tick, POLL_MS);
     };
-    const historyInterval = setInterval(fetchHistoryPeriodically, 2000);
-    return () => clearInterval(historyInterval);
+
+    timer = setTimeout(tick, POLL_MS);
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
   }, [isTraining, trainingOrchestratorId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Mirror of `orchestrators` so the status poll below can re-read it from
