@@ -41,7 +41,14 @@ const ModelGrid: React.FC<ModelGridProps> = ({
         const s = a.manifest?.status;
         return s !== 'in_review' && s !== 'request_deletion';
       });
+      // What a visitor can use comes before what is on the way, and within
+      // each group the order is alphabetical. Only architecture cards carry
+      // `chiron.status`, so this is alphabetical as before for checkpoints.
+      const rank = (a: ArtifactRef) =>
+        a.manifest?.chiron?.status === 'coming-soon' ? 1 : 0;
       const sorted = visible.sort((a, b) => {
+        const byStatus = rank(a) - rank(b);
+        if (byStatus !== 0) return byStatus;
         const an = (a.manifest?.name || a.alias || '').toLowerCase();
         const bn = (b.manifest?.name || b.alias || '').toLowerCase();
         return an.localeCompare(bn);
