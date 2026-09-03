@@ -1,0 +1,10 @@
+# The image builds use the repo root as their build context, because chiron-base
+# installs worker/ and stages worker/docker/patches/. Everything else in this
+# repository is website source, and node_modules alone is 1.4 GB, so an
+# unfiltered context would be sent to the daemon on every build.
+#
+# Allow-list rather than deny-list: exclude everything, then add back the one
+# directory the Dockerfiles copy from. A new top-level directory is then excluded
+# by default instead of silently joining the context.
+*
+!worker/

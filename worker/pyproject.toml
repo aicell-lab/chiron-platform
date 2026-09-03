@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chiron-platform"
+version = "0.7.8"
+description = "Worker-side components of the Chiron platform"
+readme = "README.md"
+requires-python = ">=3.11"
+# Deliberately empty. Every pin lives in requirements.txt or in its own
+# Dockerfile layer so the image caches sensibly and so a version bump is one
+# reviewable line rather than a resolver run. See worker/docker/README.md.
+dependencies = []
+
+[project.license]
+text = "MIT"
+
+[tool.setuptools.packages.find]
+include = ["chiron*"]
