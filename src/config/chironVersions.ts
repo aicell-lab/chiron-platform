@@ -35,24 +35,47 @@
 export interface VersionFloor {
   minimum: string;
   reason: string;
+  /**
+   * What the user has to do to get past this floor.
+   *
+   * `bump-tag`, the default, is the ordinary case: the same compose file on a
+   * newer tag. `regenerate` is for a floor that also changed something else in
+   * the compose file, where editing the tag alone leaves a worker that starts
+   * and then misbehaves. Setting it makes the UI ask for a fresh file from the
+   * setup guide instead.
+   */
+  action?: 'bump-tag' | 'regenerate';
 }
 
 /**
  * Image versions the setup wizard offers, newest first. The wizard's default is
- * the first entry. All Chiron images are built and released together from one
- * version in the tabula repo, so a release adds one string here.
+ * the first entry.
+ *
+ * The Chiron images are built in two repositories, chiron-base and the scGPT,
+ * Geneformer and scFoundation images in chiron-platform and chiron-tabula in the
+ * tabula repository, but they carry one version and are released together, so a
+ * release adds one string here.
+ *
+ * Nothing below MIN_IMAGE_VERSION belongs in this list. Offering a version the
+ * same build then badges as out of date is a contradiction the user cannot act
+ * on.
  */
-export const CHIRON_IMAGE_VERSIONS = ['0.7.7'];
+export const CHIRON_IMAGE_VERSIONS = ['0.7.8'];
 
 /** Version the wizard writes into a new worker's compose file. */
 export const CURRENT_IMAGE_VERSION = CHIRON_IMAGE_VERSIONS[0];
 
 export const MIN_IMAGE_VERSION: VersionFloor = {
-  minimum: '0.7.7',
+  minimum: '0.7.8',
   reason:
-    'Images before 0.7.7 ship an older hypha-rpc whose peer connection never ' +
-    'completes when the two sides are in different workspaces, so the first ' +
-    'weight transfer of a federated run hangs with no error.',
+    'The data server moved out of the Tabula package and is started as ' +
+    '`python -m chiron.datasets` from 0.7.8 on. A compose file written for an ' +
+    'older image still runs the old command, which no longer exists in the ' +
+    'image, so the data server never starts and the worker sees no datasets.',
+  // Not `bump-tag`. The command inside the compose file changed too, so a user
+  // who edits only the tag gets a worker that comes up healthy and then reports
+  // an empty data directory.
+  action: 'regenerate',
 };
 
 /**
@@ -160,6 +183,23 @@ export const imageTooOld = (
   if (!version || !isBelowFloor(version, MIN_IMAGE_VERSION)) return undefined;
   return { version, floor: MIN_IMAGE_VERSION };
 };
+
+/**
+ * The one sentence telling a user how to get a worker past an image floor, for
+ * the places that have room for a sentence and nothing more: badge tooltips and
+ * disabled-button titles.
+ *
+ * Kept here rather than written out at each call site, because the two variants
+ * say opposite things and a stale copy of the wrong one would send a user down
+ * an upgrade path that leaves their worker broken. The launch dialog renders the
+ * same choice as markup, since it can afford to show the tag itself.
+ */
+export const imageUpgradeInstruction = (floor: VersionFloor): string =>
+  floor.action === 'regenerate'
+    ? 'Generate a new compose file from the worker setup guide and restart the ' +
+      'worker on it. Changing only the image tag is not enough for this upgrade.'
+    : `Change the image tag in the worker's compose file to ${floor.minimum} or ` +
+      'newer, then restart the worker.';
 
 /**
  * Whether a deployed application is too old to use, and why. `undefined` means

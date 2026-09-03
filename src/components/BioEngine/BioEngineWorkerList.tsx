@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useHyphaStore } from '../../store/hyphaStore';
 import { ChironImageIdentity, modelDisplayName } from '../../config/chironModels';
-import { imageTooOld } from '../../config/chironVersions';
+import { imageTooOld, imageUpgradeInstruction } from '../../config/chironVersions';
 import { callHyphaService, listHyphaServices } from '../../utils/hyphaHttp';
 
 /**
@@ -209,7 +209,7 @@ const ServiceCard: React.FC<{
                 return (
                   <span
                     className="inline-flex items-center px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-100 text-xs font-medium rounded-full"
-                    title={`Running ${outdated.version}, and Chiron needs ${outdated.floor.minimum} or newer. ${outdated.floor.reason}`}
+                    title={`Running ${outdated.version}, and Chiron needs ${outdated.floor.minimum} or newer. ${outdated.floor.reason} ${imageUpgradeInstruction(outdated.floor)}`}
                   >
                     Update to {outdated.floor.minimum}
                   </span>

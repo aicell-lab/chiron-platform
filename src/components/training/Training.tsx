@@ -19,7 +19,7 @@ import {
   referenceMemoryEntries,
   sharedWeightsLabel,
 } from '../../config/chironModels';
-import { appTooOld, imageTooOld, VersionFloor } from '../../config/chironVersions';
+import { appTooOld, imageTooOld, imageUpgradeInstruction, VersionFloor } from '../../config/chironVersions';
 import { DEFAULT_WEIGHT_TRANSPORT, WEIGHT_TRANSPORT_LABELS, WeightTransport, readWeightTransport } from '../../config/federation';
 import { RunConfig, useTrainingConfigStore } from '../../store/trainingConfigStore';
 import { promptReportIssue } from '../../utils/reportIssuePrompt';
@@ -3791,7 +3791,7 @@ const Training: React.FC = () => {
                                         {workerImageOutdated && (
                                           <span
                                             className="inline-block px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-50 text-amber-700 border border-amber-100"
-                                            title={`Running ${workerImageOutdated.version}, and Chiron needs ${workerImageOutdated.floor.minimum} or newer. ${workerImageOutdated.floor.reason}`}
+                                            title={`Running ${workerImageOutdated.version}, and Chiron needs ${workerImageOutdated.floor.minimum} or newer. ${workerImageOutdated.floor.reason} ${imageUpgradeInstruction(workerImageOutdated.floor)}`}
                                           >
                                             Update to {workerImageOutdated.floor.minimum}
                                           </span>
@@ -4908,24 +4908,38 @@ const Training: React.FC = () => {
                       );
                     }
                     // The image reports a model but is older than the platform
-                    // supports. Say which version to move to and where the tag
-                    // lives, because the fix is a one-line edit in the compose
-                    // file the setup guide generated, not a UI action.
+                    // supports. The fix is in the compose file the setup guide
+                    // generated, not in the UI, so say exactly which edit.
+                    //
+                    // Which edit depends on the floor. Most floors need only a
+                    // newer tag. A floor marked `regenerate` also changed
+                    // something else in that file, and telling the user to bump
+                    // the tag would leave them with a worker that starts and
+                    // then misbehaves, so ask for a fresh file instead.
                     const outdated = workerImageOutdatedFor(launchDialogManagerId);
                     if (outdated) {
+                      const regenerate = outdated.floor.action === 'regenerate';
                       return (
                         <div className="text-xs bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800">
                           <p className="font-semibold mb-1">
                             This worker's image is out of date ({outdated.version})
                           </p>
                           <p>{outdated.floor.reason}</p>
-                          <p className="mt-2">
-                            Change the image tag in this worker's compose file to{' '}
-                            <code className="bg-amber-100 px-1 rounded">
-                              {imageRepository(img.model_family)}:{outdated.floor.minimum}
-                            </code>{' '}
-                            or newer, then restart the worker.
-                          </p>
+                          {regenerate ? (
+                            <p className="mt-2">
+                              Generate a new compose file for this worker from the setup
+                              guide and restart it on that file. Changing only the image tag
+                              is not enough for this upgrade: the file itself changed.
+                            </p>
+                          ) : (
+                            <p className="mt-2">
+                              Change the image tag in this worker's compose file to{' '}
+                              <code className="bg-amber-100 px-1 rounded">
+                                {imageRepository(img.model_family)}:{outdated.floor.minimum}
+                              </code>{' '}
+                              or newer, then restart the worker.
+                            </p>
+                          )}
                           <Link to="/worker" className="inline-block mt-2 underline hover:text-amber-900">
                             Open the worker setup guide
                           </Link>
@@ -5218,7 +5232,7 @@ const Training: React.FC = () => {
                     !workerImageFor(launchDialogManagerId)?.trainer_artifact
                       ? "This worker's image does not declare a model, so there is no trainer to deploy"
                       : workerImageOutdatedFor(launchDialogManagerId)
-                        ? `This worker's image is older than Chiron supports. Restart it on ${workerImageOutdatedFor(launchDialogManagerId)!.floor.minimum} or newer.`
+                        ? `This worker's image is older than Chiron supports. ${imageUpgradeInstruction(workerImageOutdatedFor(launchDialogManagerId)!.floor)}`
                         : undefined
                   } className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                     {isCreatingTrainerFor(launchDialogManagerId) ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Trainer ({newTrainerDatasets.length} dataset{newTrainerDatasets.length !== 1 ? 's' : ''})</>}

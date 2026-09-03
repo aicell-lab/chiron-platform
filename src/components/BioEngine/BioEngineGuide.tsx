@@ -376,7 +376,7 @@ const BioEngineGuide: React.FC<BioEngineGuideProps> = ({ onScrollToWorkers }) =>
       - HOME=/home
       - TZ=${timezone || 'UTC'}
     command: >
-      python -m tabula.datasets
+      python -m chiron.datasets
       --data-dir /data
     restart: unless-stopped
     healthcheck:
@@ -487,7 +487,7 @@ ${bin} pull ${sif} ${image}`;
 ${bin} exec \\
   ${bindStr} \\
   --env HOME=/home \\
-  ${sif} python -m tabula.datasets${dataDirArg} &
+  ${sif} python -m chiron.datasets${dataDirArg} &
 DATA_SERVER_PID=$!
 
 # Wait for data server health check
@@ -704,7 +704,7 @@ ${bin} exec ${gpuFlag}\\
       <p className="text-sm font-medium text-gray-800 mt-3 mb-1">What the data&#8209;server precomputes</p>
       <ul className="text-sm text-gray-700 list-disc list-inside space-y-1">
         <li>Ranks genes by per-dataset over-dispersion and keeps the 1,200 most variable.</li>
-        <li>Discretises every cell into 50 quantile bins and pre-cuts a <code className="bg-white/60 px-1 rounded">tabula_binned</code> layer of shape <code className="bg-white/60 px-1 rounded">(n_cells, 1200)</code>, which is what <strong>Tabula</strong> trains on.</li>
+        <li>Discretises every cell into 50 quantile bins and pre-cuts a <code className="bg-white/60 px-1 rounded">chiron_binned</code> layer of shape <code className="bg-white/60 px-1 rounded">(n_cells, 1200)</code>, which is what <strong>Tabula</strong> trains on.</li>
         <li>The other models read the counts themselves and do their own encoding. Cell- and gene-level quality control is left to whatever you applied upstream.</li>
       </ul>
 
