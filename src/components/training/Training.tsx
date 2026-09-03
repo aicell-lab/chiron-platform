@@ -12,12 +12,14 @@ import LossChart from './LossChart';
 import {
   ChironImageIdentity,
   DEFAULT_MODEL_FAMILY,
+  imageRepository,
   localWeightsLabel,
   modelBadgeClass,
   modelDisplayName,
   referenceMemoryEntries,
   sharedWeightsLabel,
 } from '../../config/chironModels';
+import { appTooOld, imageTooOld, VersionFloor } from '../../config/chironVersions';
 import { DEFAULT_WEIGHT_TRANSPORT, WEIGHT_TRANSPORT_LABELS, WeightTransport, readWeightTransport } from '../../config/federation';
 import { RunConfig, useTrainingConfigStore } from '../../store/trainingConfigStore';
 import { promptReportIssue } from '../../utils/reportIssuePrompt';
@@ -138,6 +140,9 @@ interface OrchestratorApp {
   status: string;
   serviceIds: any[];
   artifactId: string;
+  /** Artifact version the app was deployed from, checked against the floor in
+   *  chironVersions.ts. Absent on a manager too old to report it. */
+  version?: string;
   displayName?: string;
   applicationId?: string;
   isBusy?: boolean;
@@ -152,6 +157,8 @@ interface TrainerApp {
   serviceIds: any[];
   datasets: Record<string, any>;
   artifactId: string;
+  /** See OrchestratorApp.version. */
+  version?: string;
   displayName?: string;
   applicationId?: string;
   isBusy?: boolean;
@@ -702,6 +709,18 @@ const Training: React.FC = () => {
         ? managers.find(m => m.serviceId === managerId)?.workerInfo?.worker_info?.chiron_image
         : undefined,
     [managers]
+  );
+
+  /**
+   * Whether a worker is running an image older than the platform supports,
+   * and the reason to show if so. Undefined means the image is current, or
+   * carries a tag that cannot be read as a version (see chironVersions.ts,
+   * which never treats an unreadable version as too old).
+   */
+  const workerImageOutdatedFor = useCallback(
+    (managerId: string | null | undefined) =>
+      imageTooOld(workerImageFor(managerId)?.image_ref),
+    [workerImageFor]
   );
 
   const [connectingWorkspace, setConnectingWorkspace] = useState<string | null>(null);
@@ -1492,6 +1511,7 @@ const Training: React.FC = () => {
     status: s.status,
     serviceIds: normalizeServiceIds(s.service_ids),
     artifactId: s.artifact_id || 'chiron-platform/chiron-orchestrator',
+    version: s.version || undefined,
     displayName: s.display_name,
     applicationId: appId,
     isBusy: s.is_busy ?? false,
@@ -1508,6 +1528,7 @@ const Training: React.FC = () => {
     // not report one, say so rather than guessing at Tabula: this worker may
     // be running any of the four models.
     artifactId: s.artifact_id || 'unknown trainer',
+    version: s.version || undefined,
     displayName: s.display_name,
     applicationId: appId,
     isBusy: s.is_busy ?? false,
@@ -3172,6 +3193,43 @@ const Training: React.FC = () => {
     [trainers, trainerMetaCache]
   );
 
+  /**
+   * Why the selected federation cannot start a run, when the reason is the
+   * deployment rather than the form. Today that is only an app older than the
+   * platform's floor. An app that reports no version, or one this build has no
+   * floor for, is never blocked (see src/config/chironVersions.ts).
+   *
+   * Checked here rather than inside the config panel because the panel is
+   * handed parameters, not deployments, and the versions live on the app rows
+   * the manager reports.
+   */
+  const runBlockedReason = useMemo<{ title: string; detail: string } | null>(() => {
+    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    const outdated: { name: string; version: string; floor: VersionFloor }[] = [];
+    const orchOld = appTooOld(orchestrator?.artifactId, orchestrator?.version);
+    if (orchestrator && orchOld) {
+      outdated.push({ name: orchestrator.displayName || 'Orchestrator', ...orchOld });
+    }
+    // Only the trainers actually registered with this orchestrator take part in
+    // the run, so a stale trainer parked on some other worker does not block it.
+    trainers.forEach(t => {
+      const isRegistered = t.serviceIds?.some((sid: any) => registeredTrainers.includes(sid?.websocket_service_id));
+      if (!isRegistered) return;
+      const old = appTooOld(t.artifactId, t.version);
+      if (old) outdated.push({ name: t.displayName || 'Trainer', ...old });
+    });
+    if (outdated.length === 0) return null;
+    const first = outdated[0];
+    const others = outdated.length > 1 ? ` (and ${outdated.length - 1} more)` : '';
+    return {
+      title: `${first.name} is older than Chiron supports${others}`,
+      detail:
+        `${first.name} is running ${first.version}, and this run needs ` +
+        `${first.floor.minimum} or newer. ${first.floor.reason} ` +
+        `Redeploy it from Launch Application, choosing version ${first.floor.minimum} or later.`,
+    };
+  }, [orchestrators, trainers, selectedOrchestrator, registeredTrainers]);
+
   // Compute map workers from discovered + connected state
   const mapWorkers = useMemo<MapWorker[]>(() => {
     const appRole = (managerId: string): MapWorker['role'] => {
@@ -3706,6 +3764,12 @@ const Training: React.FC = () => {
                           // one poll, so an unreachable worker shows neither
                           // the badge nor the outdated notice.
                           const workerImage = manager?.workerInfo?.worker_info?.chiron_image;
+                          // A worker can be out of date in two different ways,
+                          // and they need different fixes: an image from before
+                          // per-model support reports no model at all, while a
+                          // newer but still under-floor image reports its model
+                          // correctly and is simply too old to run against.
+                          const workerImageOutdated = imageTooOld(workerImage?.image_ref);
 
                           const isHighlighted = highlightedWorkerIds.includes(worker.serviceId);
                           return (
@@ -3717,11 +3781,21 @@ const Training: React.FC = () => {
                                     <p className="font-medium text-gray-900 leading-tight">{worker.name}</p>
                                     <p className="text-xs text-gray-400 font-mono">{worker.workspace}</p>
                                     {isConnected && (workerImage ? (
-                                      <span
-                                        className="inline-block mt-1 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-indigo-50 text-indigo-700 border border-indigo-100"
-                                        title={workerImage.image_ref ? `Image: ${workerImage.image_ref}` : undefined}
-                                      >
-                                        {modelDisplayName(workerImage)}
+                                      <span className="inline-flex flex-wrap items-center gap-1 mt-1">
+                                        <span
+                                          className="inline-block px-1.5 py-0.5 text-[10px] font-semibold rounded bg-indigo-50 text-indigo-700 border border-indigo-100"
+                                          title={workerImage.image_ref ? `Image: ${workerImage.image_ref}` : undefined}
+                                        >
+                                          {modelDisplayName(workerImage)}
+                                        </span>
+                                        {workerImageOutdated && (
+                                          <span
+                                            className="inline-block px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-50 text-amber-700 border border-amber-100"
+                                            title={`Running ${workerImageOutdated.version}, and Chiron needs ${workerImageOutdated.floor.minimum} or newer. ${workerImageOutdated.floor.reason}`}
+                                          >
+                                            Update to {workerImageOutdated.floor.minimum}
+                                          </span>
+                                        )}
                                       </span>
                                     ) : (
                                       <span
@@ -4211,6 +4285,7 @@ const Training: React.FC = () => {
                         isTraining={isActivelyTraining}
                         hasHistory={!!trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0)}
                         onConfigChange={(numRounds, perRoundTimeoutMinutes) => setTrainingConfigSummary({ numRounds, perRoundTimeoutMinutes })}
+                        blockedReason={runBlockedReason}
                       />
                     </div>
                   </div>
@@ -4832,6 +4907,31 @@ const Training: React.FC = () => {
                         </div>
                       );
                     }
+                    // The image reports a model but is older than the platform
+                    // supports. Say which version to move to and where the tag
+                    // lives, because the fix is a one-line edit in the compose
+                    // file the setup guide generated, not a UI action.
+                    const outdated = workerImageOutdatedFor(launchDialogManagerId);
+                    if (outdated) {
+                      return (
+                        <div className="text-xs bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800">
+                          <p className="font-semibold mb-1">
+                            This worker's image is out of date ({outdated.version})
+                          </p>
+                          <p>{outdated.floor.reason}</p>
+                          <p className="mt-2">
+                            Change the image tag in this worker's compose file to{' '}
+                            <code className="bg-amber-100 px-1 rounded">
+                              {imageRepository(img.model_family)}:{outdated.floor.minimum}
+                            </code>{' '}
+                            or newer, then restart the worker.
+                          </p>
+                          <Link to="/worker" className="inline-block mt-2 underline hover:text-amber-900">
+                            Open the worker setup guide
+                          </Link>
+                        </div>
+                      );
+                    }
                     return (
                       <div>
                         <div className="flex items-center gap-1.5 mb-1.5">
@@ -5114,7 +5214,13 @@ const Training: React.FC = () => {
                       );
                     })()}
                   </div>
-                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainerFor(launchDialogManagerId) || newTrainerDatasets.length === 0 || !workerImageFor(launchDialogManagerId)?.trainer_artifact} title={workerImageFor(launchDialogManagerId)?.trainer_artifact ? undefined : "This worker's image does not declare a model, so there is no trainer to deploy"} className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainerFor(launchDialogManagerId) || newTrainerDatasets.length === 0 || !workerImageFor(launchDialogManagerId)?.trainer_artifact || !!workerImageOutdatedFor(launchDialogManagerId)} title={
+                    !workerImageFor(launchDialogManagerId)?.trainer_artifact
+                      ? "This worker's image does not declare a model, so there is no trainer to deploy"
+                      : workerImageOutdatedFor(launchDialogManagerId)
+                        ? `This worker's image is older than Chiron supports. Restart it on ${workerImageOutdatedFor(launchDialogManagerId)!.floor.minimum} or newer.`
+                        : undefined
+                  } className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                     {isCreatingTrainerFor(launchDialogManagerId) ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Trainer ({newTrainerDatasets.length} dataset{newTrainerDatasets.length !== 1 ? 's' : ''})</>}
                   </button>
                 </div>

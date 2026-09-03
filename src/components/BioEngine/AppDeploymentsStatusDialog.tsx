@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ErrorDialog from './ErrorDialog';
+import { appTooOld } from '../../config/chironVersions';
 
 interface AppDeploymentsStatusDialogProps {
   isOpen: boolean;
@@ -618,7 +619,25 @@ const AppDeploymentsStatusDialog: React.FC<AppDeploymentsStatusDialogProps> = ({
             <div className="p-4 rounded-lg border border-gray-200 bg-gray-50">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
                 <div><span className="font-medium text-gray-700">Status:</span> <span className="text-gray-900">{status?.status || 'UNKNOWN'}</span></div>
-                <div><span className="font-medium text-gray-700">Version:</span> <span className="text-gray-900">{status?.version || 'N/A'}</span></div>
+                <div>
+                  <span className="font-medium text-gray-700">Version:</span>{' '}
+                  <span className="text-gray-900">{status?.version || 'N/A'}</span>
+                  {/* Same floor as the deployment card, repeated here because
+                      this dialog is where a maintainer lands when an app is
+                      misbehaving. */}
+                  {(() => {
+                    const outdated = appTooOld(status?.artifact_id, status?.version);
+                    if (!outdated) return null;
+                    return (
+                      <span
+                        className="ml-2 px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200"
+                        title={`${outdated.floor.reason} Redeploy from Launch Application, choosing ${outdated.floor.minimum} or newer.`}
+                      >
+                        Update to {outdated.floor.minimum}
+                      </span>
+                    );
+                  })()}
+                </div>
                 <div><span className="font-medium text-gray-700">Message:</span> <span className="text-gray-900">{status?.message || '-'}</span></div>
                 <div><span className="font-medium text-gray-700">Last Updated By:</span> <span className="text-gray-900">{status?.last_updated_by || '-'}</span></div>
               </div>

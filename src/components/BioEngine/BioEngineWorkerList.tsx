@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useHyphaStore } from '../../store/hyphaStore';
 import { ChironImageIdentity, modelDisplayName } from '../../config/chironModels';
+import { imageTooOld } from '../../config/chironVersions';
 import { callHyphaService, listHyphaServices } from '../../utils/hyphaHttp';
 
 /**
@@ -192,12 +193,29 @@ const ServiceCard: React.FC<{
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
           </svg>
           {service.chironImage ? (
-            <span
-              className="inline-flex items-center px-2 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-100 text-xs font-medium rounded-full"
-              title={service.chironImage.image_ref || undefined}
-            >
-              {modelDisplayName(service.chironImage)}
-            </span>
+            <>
+              <span
+                className="inline-flex items-center px-2 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-100 text-xs font-medium rounded-full"
+                title={service.chironImage.image_ref || undefined}
+              >
+                {modelDisplayName(service.chironImage)}
+              </span>
+              {/* An image older than the platform supports. Shown next to the
+                  model rather than replacing it: the worker does run this
+                  model, it just runs a version Chiron cannot work with. */}
+              {(() => {
+                const outdated = imageTooOld(service.chironImage?.image_ref);
+                if (!outdated) return null;
+                return (
+                  <span
+                    className="inline-flex items-center px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-100 text-xs font-medium rounded-full"
+                    title={`Running ${outdated.version}, and Chiron needs ${outdated.floor.minimum} or newer. ${outdated.floor.reason}`}
+                  >
+                    Update to {outdated.floor.minimum}
+                  </span>
+                );
+              })()}
+            </>
           ) : (
             <span className="text-gray-400" title="No chiron-manager is running on this worker, so it cannot host a Chiron trainer.">
               No Chiron model

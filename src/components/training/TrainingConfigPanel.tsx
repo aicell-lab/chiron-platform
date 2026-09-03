@@ -126,6 +126,12 @@ interface TrainingConfigPanelProps {
    *  filed under, so switching orchestrators shows that orchestrator's own
    *  half-filled form rather than the last one touched. */
   configScope?: string;
+  /** Why this run cannot be started, when something about the deployment
+   *  itself rules it out rather than anything the user typed. Today that is an
+   *  app older than the platform's floor (see src/config/chironVersions.ts).
+   *  The form stays visible and editable, because the fix is on the worker and
+   *  the user should still be able to see what they had configured. */
+  blockedReason?: { title: string; detail: string } | null;
 }
 
 const CHIRON_MODELS_COLLECTION = 'chiron-platform/chiron-models';
@@ -150,6 +156,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   hasHistory,
   onConfigChange,
   configScope,
+  blockedReason,
 }) => {
   // Everything the operator sets is filed under this key. The panel is
   // unmounted by a parameter refresh, by collapsing the card and by leaving
@@ -1004,10 +1011,18 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
         setEvalAdvancedExpanded
       )}
 
+      {blockedReason && (
+        <div className="text-xs bg-amber-50 border border-amber-200 rounded-xl p-3 text-amber-800">
+          <p className="font-semibold mb-1">{blockedReason.title}</p>
+          <p>{blockedReason.detail}</p>
+        </div>
+      )}
+
       {/* Start button */}
       <button
         onClick={handleStartTraining}
-        disabled={isPreparingTraining || isTraining}
+        disabled={isPreparingTraining || isTraining || !!blockedReason}
+        title={blockedReason ? blockedReason.title : undefined}
         className="w-full bg-emerald-600 text-white px-4 py-3 rounded-xl hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-semibold text-sm shadow-sm transition-all"
       >
         {isPreparingTraining ? (
