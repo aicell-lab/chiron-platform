@@ -15,20 +15,23 @@ All commands assume the `tabula` repo is checked out at `../tabula/` (sibling of
 git clone https://github.com/aicell-lab/tabula ../tabula
 ```
 
+The shared dependency floor lives in this repo, at `worker/requirements.txt`, because it is what `chiron-base` installs. The tabula repo has none of its own.
+
 ```bash
 conda create -n tabula python=3.11 -y && conda activate tabula
 pip install torch==1.13.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
 MAX_JOBS=4 pip install flash-attn==2.3.5 --no-build-isolation
 pip install anndata==0.12.6
 pip install "git+https://github.com/aicell-lab/bioengine.git@375dadf#egg=bioengine[datasets,worker]"
-pip install -r ../tabula/requirements.txt && pip install -e ../tabula/
+pip install -r worker/requirements.txt && pip install -e ../tabula/
 ```
 
 ## Running a local worker
 
 ```bash
-# Dataset server (standalone)
-python -m tabula.datasets --data-dir /path/to/data
+# Dataset server (standalone). From the chiron-platform worker package, not
+# from tabula: `pip install -e worker/` in this repo, or use a Chiron image.
+python -m chiron.datasets --data-dir /path/to/data
 
 # BioEngine Worker that auto-loads chiron-manager
 python -m bioengine.worker \
@@ -49,7 +52,9 @@ unset HYPHA_TOKEN && docker compose down worker-tabula && docker compose up -d w
 
 ## Per-model worker images
 
-One image per model, each carrying that model's dependencies and hosting that model's trainer only. Built from `../tabula/docker/` (see its README for the layer order and the image identity contract), all released together under a single version tag.
+One image per model, each carrying that model's dependencies and hosting that model's trainer only, all released together under a single version tag.
+
+The builds are split across two repositories. `chiron-base` and the scGPT, Geneformer and scFoundation images are built here, from `worker/docker/`, with `scripts/publish_docker_image.sh`. `chiron-tabula` is built in the tabula repo, from `docker/tabula/`, against the `chiron-base` published from here, and stays there until Tabula ships as a pip package. All five push to `ghcr.io/aicell-lab/chiron-*`, because GHCR authorises a push against the organisation rather than against the repository the build ran in. `worker/docker/README.md` has the layer order, the image identity contract and the four-step release procedure across the two repos.
 
 The platform guarantees **Tabula**. The other three images are built and published, and their trainer artifacts exist, but the setup wizard will not start a worker on them and their architecture cards on `#/models` are marked coming soon. They are brought online one at a time, in the order scGPT, Geneformer, scFoundation, each as its own pair of PRs. A maintainer can still run one by hand.
 
