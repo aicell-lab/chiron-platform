@@ -4,7 +4,7 @@ description: Single entry point for an AI agent working on the Chiron platform. 
 compatibility: Designed for Claude Code, Gemini CLI, or any agent that can read a URL, call Hypha RPC, and execute Python.
 metadata:
   author: chiron-platform
-  version: "1.1"
+  version: "1.2"
   sub-skills:
     - apps/explore-tabula-models.md
     - apps/chiron-manager.md
@@ -49,23 +49,25 @@ See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
 
 Before generating any launch command, gather the environment yourself rather than asking the user to guess.
 
-**Pick the model first.** A worker's container image decides which model it can train: it carries that model's dependencies and hosts that model's trainer, and no other. Ask the user which model they want to train and launch the matching image.
+**Tabula is the model to launch.** A worker's container image decides which model it can train: it carries that model's dependencies and hosts that model's trainer, and no other. Chiron guarantees Tabula today. scGPT, Geneformer and scFoundation are being brought online one at a time, in that order, and appear on [chiron.aicell.io/#/models](https://chiron.aicell.io/#/models) as architectures that are coming. The setup wizard lists them but will not start a worker on one, so do not generate a launch command for them either. If the user asks for one of the three, say it is coming and offer Tabula.
 
-| Model | Image | Trainer artifact |
-|-------|-------|------------------|
-| Tabula | `ghcr.io/aicell-lab/chiron-tabula:<version>` | `chiron-platform/tabula-trainer` |
-| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` |
-| Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` |
-| scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` |
+| Model | Image | Trainer artifact | Status |
+|-------|-------|------------------|--------|
+| Tabula | `ghcr.io/aicell-lab/chiron-tabula:<version>` | `chiron-platform/tabula-trainer` | Supported |
+| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` | Coming soon |
+| Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` | Coming soon |
+| scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` | Coming soon |
 
-A site that wants to train two models runs two workers, one per image. Every image declares its identity in `CHIRON_MODEL_FAMILY`, `CHIRON_MODEL_NAME`, `CHIRON_TRAINER_ARTIFACT` and `CHIRON_IMAGE_REF`, which the manager reports as `worker_info.chiron_image` and the Chiron UI shows as the worker's model badge. `create_trainer` defaults to `CHIRON_TRAINER_ARTIFACT` and refuses any trainer artifact declaring a different `model_family`. A worker on an image that predates this contract reports no `chiron_image` and cannot deploy a trainer at all, so the fix is to pull a current image. The setup wizard at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker) has a model selector that fills the right image in for you.
+A site that wants to train two models runs two workers, one per image. Every image declares its identity in `CHIRON_MODEL_FAMILY`, `CHIRON_MODEL_NAME`, `CHIRON_TRAINER_ARTIFACT` and `CHIRON_IMAGE_REF`, which the manager reports as `worker_info.chiron_image` and the Chiron UI shows as the worker's model badge. `create_trainer` defaults to `CHIRON_TRAINER_ARTIFACT` and refuses any trainer artifact declaring a different `model_family`. A worker on an image that predates this contract reports no `chiron_image` and cannot deploy a trainer at all, so the fix is to pull a current image. The setup wizard at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker) picks the image from the selected model, and lets the user choose only which version of it to run. There is no free-text image field: an image the platform cannot reason about is the one thing that turns a clear "your worker is out of date" into a confusing failure minutes into a run.
+
+**The platform rejects images and apps that are too old.** Chiron declares a minimum worker image version and a minimum version per Chiron application, each with the reason it was raised. A worker or an application below the floor is badged out of date in the UI, the action that depends on it is disabled, and the message names the version to move to. Pulling the newest image version the wizard offers, and deploying applications at their newest version, keeps a site clear of this. A tag Chiron cannot read as a version, such as `latest` or a digest pin, is never treated as too old.
 
 **Detect the host environment.** Run these checks and only ask the user when a check fails or is ambiguous:
 
 - **Operating system**: `uname -srm` (Linux/macOS) or `systeminfo` (Windows). Linux is the supported target; macOS and Windows work through Docker Desktop but cannot pass `--gpus all`.
 - **Container runtime**: probe `docker --version`, `podman --version`, `singularity --version`, `apptainer --version` in that order and pick the first that responds. If more than one is installed, ask the user which to use. Docker is the default in the browser wizard.
 - **GPU and CUDA**: `nvidia-smi --query-gpu=name,memory.total --format=csv` lists the GPUs and their memory. No NVIDIA driver means CPU-only mode (training will be unusably slow but the worker still boots).
-- **Compute headroom**: `nproc` for CPU cores and `free -h` (Linux) or equivalent for RAM. The wizard defaults to 4 CPU and 1 GPU. RAM depends on the model, because Ray admits an application only if its declared memory fits the head node's budget and a worker holds the manager (1 GB), the orchestrator (8 GB) and the trainer at once: **30 GB for Tabula and scGPT, 40 GB for Geneformer, 48 GB for scFoundation**. A worker started with less comes up healthy and then refuses its trainer with `Insufficient resources`. The wizard fills the right figure in when you pick the model.
+- **Compute headroom**: `nproc` for CPU cores and `free -h` (Linux) or equivalent for RAM. The wizard defaults to 4 CPU and 1 GPU. RAM depends on the model, because Ray admits an application only if its declared memory fits the head node's budget and a worker holds the manager (1 GB), the orchestrator (8 GB) and the trainer at once: **30 GB for Tabula**, and later 30 GB for scGPT, 40 GB for Geneformer and 48 GB for scFoundation. A worker started with less comes up healthy and then refuses its trainer with `Insufficient resources`. The wizard fills the right figure in when you pick the model.
 
 **Ask the user for what you cannot detect:**
 
@@ -124,6 +126,8 @@ manager = await server.get_service(managers[0]["id"])
 **Authentication.** Set the `HYPHA_TOKEN` environment variable from a token issued for the `chiron-platform` workspace. The browser flow at [hypha.aicell.io](https://hypha.aicell.io) issues tokens. Read-only methods (`get_worker_info`, `get_datasets_info`, `list_trainers`, etc.) are accessible to any authenticated user. Write methods (`create_orchestrator`, `create_trainer`, `start_training`, `save_*_weights`) enforce ownership via the `caller_id` and `owner_id` parameters; see [apps/chiron-manager.md § Permissions](apps/chiron-manager.md).
 
 **Model Hub collection.** Every published checkpoint, whether shared-weights-only (orchestrator save) or full (trainer save), lives in `chiron-platform/chiron-models`. The artifact manifest carries a `global_transformer` boolean flag that distinguishes the two, and a `model_family` slug saying which model it belongs to. A checkpoint only loads into its own model, so the UI offers each worker the checkpoints of its family alone. Checkpoints published before `model_family` existed are all Tabula. See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
+
+**Architecture cards.** `chiron-platform/chiron-architectures` holds one card per model, aliased by family, and is what the Models page lists above the checkpoints. A card says whether the platform supports that model yet, which trainer artifact and image repository belong to it, and where the model's base weights come from, either a Hypha artifact or a remote URL with a checksum. The trainer reads the card each time it loads base weights, so the card is the current answer to "what does this model start from" and an upstream checkpoint moving is a card edit rather than a new release. The collection is read-only to everyone but the platform maintainers, because a card names a source that runs on other institutions' hardware.
 
 ## Reporting a problem
 

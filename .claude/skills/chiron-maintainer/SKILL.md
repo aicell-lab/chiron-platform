@@ -51,20 +51,34 @@ unset HYPHA_TOKEN && docker compose down worker-tabula && docker compose up -d w
 
 One image per model, each carrying that model's dependencies and hosting that model's trainer only. Built from `../tabula/docker/` (see its README for the layer order and the image identity contract), all released together under a single version tag.
 
-| Model | Image | Trainer artifact | Validated batch size | Trainer RAM | Worker `--head-memory-in-gb` |
-|-------|-------|------------------|----------------------|-------------|------------------------------|
-| Tabula | `ghcr.io/aicell-lab/chiron-tabula:<version>` | `chiron-platform/tabula-trainer` | 32 (about 20 GB on a 24 GB RTX 3090, 16 is about 6 GB, 8 is about 2 GB) | 16 GiB | 30 |
-| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` | 32 | 16 GiB | 30 |
-| Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` | 16 | 24 GiB | 40 |
-| scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` | 8 | 32 GiB | 48 |
+The platform guarantees **Tabula**. The other three images are built and published, and their trainer artifacts exist, but the setup wizard will not start a worker on them and their architecture cards on `#/models` are marked coming soon. They are brought online one at a time, in the order scGPT, Geneformer, scFoundation, each as its own pair of PRs. A maintainer can still run one by hand.
+
+| Model | Image | Trainer artifact | Status | Validated batch size | Trainer RAM | Worker `--head-memory-in-gb` |
+|-------|-------|------------------|--------|----------------------|-------------|------------------------------|
+| Tabula | `ghcr.io/aicell-lab/chiron-tabula:<version>` | `chiron-platform/tabula-trainer` | Supported | 32 (about 20 GB on a 24 GB RTX 3090, 16 is about 6 GB, 8 is about 2 GB) | 16 GiB | 30 |
+| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` | Coming soon | 32 | 16 GiB | 30 |
+| Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` | Coming soon | 16 | 24 GiB | 40 |
+| scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` | Coming soon | 8 | 32 GiB | 48 |
 
 The batch sizes other than Tabula's come from the four-model probe runs on a 24 GB RTX 3090 and are the sizes that ran, not measured memory curves.
 
 The head memory figure is a hard gate, not a hint. Ray admits an application only if its declared `memory` still fits the head node's budget, and a worker has to hold the manager (1 GiB), the orchestrator on the coordinating site (8 GiB) and the trainer at once. A worker started with less comes up healthy and then refuses the trainer with `Insufficient resources for application '<name>'`. The setup guide picks the right figure from the selected model (`WORKER_RAM_GB` in `src/config/chironModels.ts`); a hand-written command line has to pick it from this table.
 
-Each image bakes in `CHIRON_MODEL_FAMILY`, `CHIRON_MODEL_NAME`, `CHIRON_TRAINER_ARTIFACT` and `CHIRON_IMAGE_REF`. `chiron-manager` reads them from its own environment, reports them as `worker_info.chiron_image`, defaults `create_trainer` to the declared artifact, and refuses any trainer whose manifest declares a different `model_family`. The frontend mirror of the image refs is `src/config/chironModels.ts`, whose `CHIRON_IMAGE_VERSION` must be bumped when a new image set is published.
+Each image bakes in `CHIRON_MODEL_FAMILY`, `CHIRON_MODEL_NAME`, `CHIRON_TRAINER_ARTIFACT` and `CHIRON_IMAGE_REF`. `chiron-manager` reads them from its own environment, reports them as `worker_info.chiron_image`, defaults `create_trainer` to the declared artifact, and refuses any trainer whose manifest declares a different `model_family`. The frontend mirror of the image repositories is `src/config/chironModels.ts`. The versions live next to it in `src/config/chironVersions.ts`: publishing a new image set adds its version to the front of `CHIRON_IMAGE_VERSIONS`, which is the list the setup wizard offers and whose first entry the wizard defaults to. The wizard derives the image from the selected model and version and has no free-text image field, so an image reference the UI can produce is always a repository from the registry plus a version from that list.
+
+`chironVersions.ts` also holds the floors: `MIN_IMAGE_VERSION` and `MIN_APP_VERSIONS`, each a minimum plus the reason it was raised, which the UI shows verbatim. Raise a floor when an API changed shape or a bug was fixed the platform cannot work around, not on every release, and remember that a floor naming an app version can only ship after that version exists in the workspace. A version string the parser cannot read (`latest`, a digest pin, a locally built tag) is deliberately never treated as too old, so a maintainer on a development image is not locked out.
 
 Legacy `ghcr.io/aicell-lab/tabula:<version>` images carry no identity variables. A worker on one shows as an outdated image in the UI and cannot deploy a trainer.
+
+## Architecture cards
+
+`chiron-platform/chiron-architectures` holds one card per model, aliased `tabula`, `scgpt`, `geneformer` and `scfoundation`. The cards are what `#/models` shows above the published checkpoints, and each one carries a `chiron` block with the model's status, its trainer artifact, its image repository and, where the model has one, a `base_weights` source. `scripts/bootstrap_architectures.py` creates the collection and the four cards and is safe to re-run.
+
+The collection is read-only to everyone but a workspace admin (`{"*": "r+"}`), unlike `chiron-models` which is `{"*": "rw+"}`. That difference is the point: a card names the source every worker downloads its base weights from, so write access to a card is write access to what runs on other institutions' hardware.
+
+`base_weights` takes either an `artifact_id` plus `file_path`, or a `url` plus an optional `sha256`. The trainer resolves the card on every load, so moving an upstream checkpoint is a card edit and needs no app release and no worker restart. Declare the `sha256` whenever the source is a URL: it is the only thing tying that URL to the bytes that were reviewed, and the trainer refuses to train on a mismatch rather than continuing. A card with no `base_weights` block means that model has no agreed starting checkpoint yet, and the config panel falls back to the published checkpoints.
+
+Flipping a model from coming soon to supported is two edits that go together: `chiron.status` on its card, and `status` for that family in `src/config/chironModels.ts`.
 
 ## Uploading and deploying BioEngine apps
 
