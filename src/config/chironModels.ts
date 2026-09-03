@@ -15,6 +15,8 @@
  * trainer artifact. Nothing else in the frontend changes.
  */
 
+import { CURRENT_IMAGE_VERSION } from './chironVersions';
+
 export type ChironModelFamily =
   | 'tabula'
   | 'scgpt'
@@ -28,7 +30,19 @@ export interface ChironModel {
   displayName: string;
   /** One-line description, shown next to the model in the setup wizard. */
   summary: string;
-  /** Image the setup wizard suggests. A running worker reports its own. */
+  /** Whether the platform supports training this model today. A `coming-soon`
+   *  model is still listed everywhere, because hiding it would make the
+   *  roadmap invisible, but the setup wizard will not start a worker on it.
+   *  Mirrors `chiron.status` on the model's card in
+   *  `chiron-platform/chiron-architectures`, and the two are changed together
+   *  when a model becomes available. */
+  status: 'available' | 'coming-soon';
+  /** Image repository, without a tag. The version comes from
+   *  `src/config/chironVersions.ts`, so an image reference is always a
+   *  repository this file knows plus a version that file offers. */
+  imageRepository: string;
+  /** Image the setup wizard suggests at the current version. A running worker
+   *  reports its own. */
   image: string;
   /** Trainer this model's image hosts. Shown as wizard copy only, the value
    *  actually deployed comes from the worker's CHIRON_TRAINER_ARTIFACT. */
@@ -63,15 +77,19 @@ export interface ChironModel {
   coverUrl?: string;
 }
 
-/**
- * Version tag of the per-model image set. All Chiron images are built and
- * released together from one version in the tabula repo's pyproject.toml, so
- * a release is a single edit here.
- */
-export const CHIRON_IMAGE_VERSION = '0.7.5';
+/** Repository for a model's image, without a tag. */
+export const imageRepository = (family: string) =>
+  `ghcr.io/aicell-lab/chiron-${family}`;
 
-const image = (family: string) =>
-  `ghcr.io/aicell-lab/chiron-${family}:${CHIRON_IMAGE_VERSION}`;
+/**
+ * Full image reference at a given version. The version list and the minimum
+ * supported version live in `chironVersions.ts`, which is the single file a
+ * release edits.
+ */
+export const imageRef = (family: string, version: string) =>
+  `${imageRepository(family)}:${version}`;
+
+const image = (family: string) => imageRef(family, CURRENT_IMAGE_VERSION);
 
 /**
  * Host RAM a worker needs, per model.
@@ -105,6 +123,8 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     displayName: 'Tabula',
     summary:
       'Tabular transformer over genes, trained by masked value reconstruction. The model Chiron was built around.',
+    status: 'available',
+    imageRepository: imageRepository('tabula'),
     image: image('tabula'),
     trainerArtifactId: 'chiron-platform/tabula-trainer',
     workerMemoryGb: WORKER_RAM_GB.tabula,
@@ -129,6 +149,8 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     displayName: 'scGPT',
     summary:
       'Generative transformer over gene tokens and binned expression values, trained by masked value prediction.',
+    status: 'coming-soon',
+    imageRepository: imageRepository('scgpt'),
     image: image('scgpt'),
     trainerArtifactId: 'chiron-platform/scgpt-trainer',
     workerMemoryGb: WORKER_RAM_GB.scgpt,
@@ -144,6 +166,8 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     displayName: 'Geneformer',
     summary:
       'BERT over rank-value-encoded gene tokens, trained by masked language modelling.',
+    status: 'coming-soon',
+    imageRepository: imageRepository('geneformer'),
     image: image('geneformer'),
     trainerArtifactId: 'chiron-platform/geneformer-trainer',
     workerMemoryGb: WORKER_RAM_GB.geneformer,
@@ -157,6 +181,8 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     displayName: 'scFoundation',
     summary:
       "Read-depth-aware transformer over a cell's expressed genes, trained by masked value regression. Its checkpoint is fetched at runtime under each site's own licence grant.",
+    status: 'coming-soon',
+    imageRepository: imageRepository('scfoundation'),
     image: image('scfoundation'),
     trainerArtifactId: 'chiron-platform/scfoundation-trainer',
     workerMemoryGb: WORKER_RAM_GB.scfoundation,
