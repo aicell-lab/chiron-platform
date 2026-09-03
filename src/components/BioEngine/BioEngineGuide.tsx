@@ -8,7 +8,12 @@ import {
   CHIRON_MODEL_FAMILIES,
   DEFAULT_MODEL_FAMILY,
   ChironModelFamily,
+  imageRef,
 } from '../../config/chironModels';
+import {
+  CHIRON_IMAGE_VERSIONS,
+  CURRENT_IMAGE_VERSION,
+} from '../../config/chironVersions';
 
 type OSType = 'linux' | 'macos' | 'windows';
 type ContainerRuntimeType = 'docker' | 'podman' | 'singularity' | 'apptainer';
@@ -202,14 +207,16 @@ const BioEngineGuide: React.FC<BioEngineGuideProps> = ({ onScrollToWorkers }) =>
   const [clientId, setClientId] = useState('');
   const [gpuIndices, setGpuIndices] = useState('');
   const [modelFamily, setModelFamily] = useState<ChironModelFamily>(DEFAULT_MODEL_FAMILY);
-  const [customImage, setCustomImage] = useState('');
+  const [imageVersion, setImageVersion] = useState(CURRENT_IMAGE_VERSION);
   const [platformOverride, setPlatformOverride] = useState('');
 
-  // The image the selected model resolves to, and the one actually used, which
-  // the Container Image override in Advanced Options can replace.
+  // The image is fully derived: the model decides the repository, the version
+  // select decides the tag. There is deliberately no free-text override. An
+  // arbitrary image produces a worker whose model, trainer and API version the
+  // platform cannot reason about, and every field on this page that depends on
+  // the model would then be guessing.
   const selectedModel = CHIRON_MODELS[modelFamily];
-  const modelImage = selectedModel.image;
-  const effectiveImage = customImage || modelImage;
+  const effectiveImage = imageRef(modelFamily, imageVersion);
 
   // Each model's trainer declares its own RAM ceiling, and Ray refuses to
   // deploy an app that does not fit the head node's budget, so the Memory
@@ -987,13 +994,40 @@ ${bin} exec ${gpuFlag}\\
               training page and the instance list, so the highlight reads as
               "this is the model" rather than as a new accent. */}
           <div className="md:col-span-2 lg:col-span-3">
-            <label className="block text-sm font-medium text-indigo-900 mb-1">Model</label>
-            <select value={modelFamily} onChange={(e) => setModelFamily(e.target.value as ChironModelFamily)}
-              className="w-full px-3 py-2 border border-indigo-300 bg-indigo-50 text-indigo-900 font-medium rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
-              {CHIRON_MODEL_FAMILIES.map(family => (
-                <option key={family} value={family}>{CHIRON_MODELS[family].displayName}</option>
-              ))}
-            </select>
+            <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4">
+              <div>
+                <label className="block text-sm font-medium text-indigo-900 mb-1">Model</label>
+                {/* All four are listed so the roadmap is visible, but only the
+                    ones the platform guarantees can be picked. Hiding the other
+                    three would leave a user with no way to know they are
+                    coming. */}
+                <select value={modelFamily} onChange={(e) => setModelFamily(e.target.value as ChironModelFamily)}
+                  className="w-full px-3 py-2 border border-indigo-300 bg-indigo-50 text-indigo-900 font-medium rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                  {CHIRON_MODEL_FAMILIES.map(family => {
+                    const model = CHIRON_MODELS[family];
+                    const unavailable = model.status !== 'available';
+                    return (
+                      <option key={family} value={family} disabled={unavailable}>
+                        {model.displayName}{unavailable ? ' (coming soon)' : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-indigo-900 mb-1">Image Version</label>
+                {/* The repository is fixed by the model. This picks the tag,
+                    which is the only part of the image a user chooses. */}
+                <select value={imageVersion} onChange={(e) => setImageVersion(e.target.value)}
+                  className="w-full px-3 py-2 border border-indigo-300 bg-indigo-50 text-indigo-900 font-medium rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                  {CHIRON_IMAGE_VERSIONS.map(version => (
+                    <option key={version} value={version}>
+                      {version}{version === CURRENT_IMAGE_VERSION ? ' (latest)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
             <p className="text-xs text-gray-500 mt-1">
               {selectedModel.summary}
             </p>
@@ -1004,7 +1038,12 @@ ${bin} exec ${gpuFlag}\\
             </p>
             <p className="text-xs text-gray-500 mt-1">
               Image: <code className="bg-gray-100 px-0.5 rounded">{effectiveImage}</code>
-              {customImage && ' (overridden in Advanced Options)'}
+            </p>
+            <p className="text-xs text-gray-500 mt-1">
+              Tabula is the model the platform guarantees today. scGPT, Geneformer
+              and scFoundation are in preparation and will be enabled one at a
+              time. See the <a href="#/models" className="text-blue-600 hover:underline">model page</a> for
+              what each one is.
             </p>
           </div>
 
@@ -1261,16 +1300,11 @@ ${bin} exec ${gpuFlag}\\
               </div>
             )}
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Container Image</label>
-              <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={customImage} onChange={(e) => setCustomImage(e.target.value)}
-                placeholder={modelImage}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
-              <p className="text-xs text-gray-500 mt-1">
-                Overrides the image chosen by the Model selector above. Leave empty for {selectedModel.displayName}'s image ({modelImage}).
-                An override must still be an image built for {selectedModel.displayName}, otherwise the worker cannot host its trainer.
-              </p>
-            </div>
+            {/* There is no Container Image field here. The image follows from
+                the Model and Image Version selects above, which is what keeps
+                the rest of this page honest: the memory default, the trainer
+                artifact and the API version the platform expects are all
+                derived from that one reference. */}
 
             {/* Platform override — compose only */}
             {isComposeRuntime() && (
