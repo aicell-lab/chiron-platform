@@ -2699,13 +2699,20 @@ const Training: React.FC = () => {
         // One line per round or stage change, not one per poll: at a 3s cadence
         // an unfiltered status log would fill the whole buffer with a single
         // run and push out everything that led up to it.
-        const stageKey = `${status?.current_round ?? '-'}/${status?.stage ?? '-'}/${status?.is_running}`;
+        // `current_training_round` and `target_round`, which is what
+        // get_training_status returns and what the progress bar below already
+        // reads. This log used to ask for `current_round` and `num_rounds`,
+        // names the orchestrator has never sent, so every entry recorded the
+        // round as undefined and the key collapsed to the stage alone. The one
+        // reader of these lines is a Report Issue attachment, where the round a
+        // run reached is the first thing anyone looks for.
+        const stageKey = `${status?.current_training_round ?? '-'}/${status?.stage ?? '-'}/${status?.is_running}`;
         if (stageKey !== lastStageKey) {
           lastStageKey = stageKey;
           logger.info('training', 'Round status', {
             orchestrator: orchKey,
-            round: status?.current_round,
-            total_rounds: status?.num_rounds,
+            round: status?.current_training_round,
+            total_rounds: status?.target_round,
             stage: status?.stage,
             is_running: status?.is_running,
           });
