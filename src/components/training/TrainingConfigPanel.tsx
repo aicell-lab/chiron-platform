@@ -83,6 +83,10 @@ interface TrainerParams {
 interface ArtifactEntry {
   id: string;
   alias: string;
+  /** True for the architecture card's base weights rather than a published
+   *  checkpoint. The card is not a checkpoint: it names where the base weights
+   *  live, and the trainer follows that pointer when the run starts. */
+  isBaseWeights?: boolean;
   manifest: {
     name?: string;
     global_transformer?: boolean;
@@ -125,6 +129,15 @@ interface TrainingConfigPanelProps {
 }
 
 const CHIRON_MODELS_COLLECTION = 'chiron-platform/chiron-models';
+
+/**
+ * Where a model's architecture card lives. The card carries
+ * `chiron.base_weights`, which is the maintained answer to "what does this
+ * model start from". It is read on every fetch rather than baked into this
+ * build, so a checkpoint that moves upstream is a card edit and nothing has to
+ * be released or restarted.
+ */
+const architectureCardId = (family: string) => `chiron-platform/${family}`;
 
 const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
   params,
@@ -229,6 +242,36 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
       // selection. Tissue-specific full models and shared-weights-only saves
       // come after, each group sorted alphabetically by manifest name for
       // predictability.
+      // The architecture card's base weights, when it declares any. This is
+      // the entry the platform maintains: the trainer resolves the card at
+      // load time, so whatever the card points at today is what the run uses.
+      let baseWeightsEntry: ArtifactEntry | null = null;
+      try {
+        const card = await artifactManager.read({
+          artifact_id: architectureCardId(family),
+          _rkwargs: true,
+        });
+        const declared = card?.manifest?.chiron?.base_weights;
+        if (declared) {
+          baseWeightsEntry = {
+            id: card.id,
+            alias: card.alias || family,
+            isBaseWeights: true,
+            manifest: {
+              name:
+                declared.label ||
+                `${card.manifest?.name || family} base weights`,
+              model_family: family,
+            },
+          };
+        }
+      } catch (e) {
+        // No card, or the collection is unreachable. The foundation pin below
+        // is the same weights by a less maintainable route, so the picker
+        // degrades to what it offered before cards existed.
+        console.warn('Could not read the architecture card for', family, e);
+      }
+
       const foundationAlias = getChironModel(family)?.foundationAlias;
       const isFoundation = (a: ArtifactEntry) =>
         !!foundationAlias &&
@@ -236,9 +279,17 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
       const byName = (a: ArtifactEntry, b: ArtifactEntry) =>
         (a.manifest?.name || a.alias || a.id).localeCompare(b.manifest?.name || b.alias || b.id);
       const all = ((result || []) as ArtifactEntry[]).filter(a => familyOf(a) === family);
-      const foundation = all.filter(isFoundation);
+      // With a card in hand the foundation checkpoint is dropped from the
+      // list: the card already points at it, and offering both would be two
+      // entries for the same weights, only one of which follows an upstream
+      // move.
+      const foundation = baseWeightsEntry ? [] : all.filter(isFoundation);
       const others = all.filter(a => !isFoundation(a)).sort(byName);
-      const checkpoints = [...foundation, ...others];
+      const checkpoints = [
+        ...(baseWeightsEntry ? [baseWeightsEntry] : []),
+        ...foundation,
+        ...others,
+      ];
       setArtifacts(checkpoints);
       // Default to the first entry, but keep a selection that is still in the
       // list. The list is refetched whenever the panel remounts, and re-picking
@@ -847,8 +898,9 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
               </p>
             ) : (() => {
               const selected = artifacts.find(a => a.id === selectedArtifactId);
-              const fullModels = artifacts.filter(a => a.manifest?.global_transformer !== true);
-              const globalTransformers = artifacts.filter(a => a.manifest?.global_transformer === true);
+              const baseWeights = artifacts.filter(a => a.isBaseWeights);
+              const fullModels = artifacts.filter(a => !a.isBaseWeights && a.manifest?.global_transformer !== true);
+              const globalTransformers = artifacts.filter(a => !a.isBaseWeights && a.manifest?.global_transformer === true);
               const fmt = (a: ArtifactEntry) => {
                 const datasets = a.manifest?.datasets?.map(d => d.name).join(', ') || '';
                 const rounds = a.manifest?.num_rounds;
@@ -875,6 +927,19 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
                   {isCheckpointDropdownOpen && (
                     <div className="mt-1 border border-gray-200 rounded-lg overflow-hidden">
                       <div className="max-h-64 overflow-y-auto divide-y divide-gray-50" onWheel={e => e.stopPropagation()}>
+                        {baseWeights.length > 0 && (
+                          <>
+                            <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">Base Weights</div>
+                            {baseWeights.map(a => (
+                              <button key={a.id} type="button"
+                                onClick={() => { setSelectedArtifactId(a.id); setIsCheckpointDropdownOpen(false); }}
+                                className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedArtifactId === a.id ? 'bg-emerald-50' : ''}`}>
+                                <p className="text-sm text-gray-800">{a.manifest?.name || a.alias}</p>
+                                <p className="text-xs text-gray-500 mt-0.5">What this model starts from, before any federated training</p>
+                              </button>
+                            ))}
+                          </>
+                        )}
                         {fullModels.length > 0 && (
                           <>
                             <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">Full Tabula Models</div>
