@@ -22,10 +22,10 @@ Every Chiron trainer must expose the following methods through Hypha RPC. Names,
 
 | Method | Signature | Purpose |
 |---|---|---|
-| `get_properties` | `() -> Dict[str, str | int]` | Static metadata. Include the model `artifact_id` plus any cached metric summaries. |
+| `get_properties` | `() -> Dict[str, Any]` | Static metadata. Include the model `artifact_id`, cached metric summaries, and the `hyperparameters` declaration described below, which is how your model's knobs reach the training form. |
 | `get_parameters` | `() -> Dict[str, Union[List[np.ndarray], str]]` | Current shared-transformer parameters as a list of numpy arrays plus the ordered key list. The orchestrator broadcasts this in round 1 to seed other trainers. Set `arbitrary_types_allowed=True` on the `@schema_method` decorator. |
 | `get_transformer_keys` | `() -> List[str]` | Ordered list of shared transformer `state_dict` keys. Used by the orchestrator to verify federation consistency before round 1. |
-| `start_fit` | see signature below | Train one local epoch. Non-blocking; returns `{"status": "started", "message": "..."}`. |
+| `start_fit` | see signature below | Train one local epoch. Non-blocking; returns `{"status": "started", "message": "..."}`. The signature is fixed and identical for every Chiron trainer. |
 | `get_fit_status` | `() -> dict` | Poll fit progress: status, `current_batch`, `total_batches`, `result` (final loss + updated parameters when status is `completed`). |
 | `start_evaluate` | see signature below | Evaluate one local epoch on the validation split. |
 | `get_evaluate_status` | `() -> dict` | Same shape as `get_fit_status` but for the eval task. |
@@ -37,19 +37,48 @@ Every Chiron trainer must expose the following methods through Hypha RPC. Names,
 
 #### `start_fit` signature
 
+This signature is the same for every Chiron trainer and yours must match it exactly. Nothing in it is model-specific, which is the point: a caller, a script or a UI screen proven against one trainer works against yours without a change.
+
 ```python
 async def start_fit(
     parameters: List[np.ndarray],   # current global parameters from FedAvg
-    batch_size: int,
-    learning_rate: float,
-    server_round: int,
-    orchestrator_service_id: str,   # must match self._registered_orch
-    session_id: str,                # opaque per-session token
-    # ...any model-specific hyperparameters you want exposed to the orchestrator's fit_config...
+    batch_size: Optional[int] = None,        # None means "use your model's own"
+    config: Optional[Dict[str, Any]] = None, # your model's hyperparameters
     limit_train_batches: Optional[int] = None,
+    server_round: int = 1,
+    orchestrator_service_id: str = ...,      # must match self._registered_orch
+    session_id: str = "",                    # opaque per-session token
 ) -> Dict[str, Union[bool, str]]:
     ...
 ```
+
+`start_evaluate` is the same with `limit_val_batches` in place of `limit_train_batches`.
+
+Your model's learning rate, masking ratio, loss weights and anything else you want an operator to set all go in `config`, and you say what may go there by reporting a `hyperparameters` block from `get_properties`:
+
+```python
+"hyperparameters": {
+    "fit": {
+        "learning_rate": {
+            "type": "number", "default": 1e-4,
+            "description": "Learning rate to use for training",
+            "advanced": False,
+        },
+        "mask_ratio": {
+            "type": "number", "default": 0.15,
+            "description": "Fraction of each cell's values hidden and scored",
+            "advanced": True,
+        },
+    },
+    "evaluate": {},
+}
+```
+
+`type` is a JSON Schema type name (`number`, `integer`, `boolean`, `string`). `advanced` decides which of the training form's two groups the input lands in and nothing else. The orchestrator serves this block through `get_trainer_params()` and the form renders one input per entry, so a knob you declare here is a knob an operator can set, with no orchestrator or UI change.
+
+Resolve `config` against those defaults when the round starts, and reject a key you did not declare rather than ignoring it. Nothing upstream can catch that typo for you: every trainer accepts the same `config` argument, so as far as the wire is concerned any key is valid.
+
+An empty `evaluate` declaration means evaluation reuses whatever the fit half of the round set, which is what most models want.
 
 Returns immediately (non-blocking). The actual training runs in a background `asyncio.Task` or Ray task. The orchestrator polls `get_fit_status` to learn when it is done. When `status == "completed"`, the result dict must contain:
 
@@ -176,6 +205,20 @@ class MyFoundationModelTrainer:
             "model_family": "my-foundation-model",
             "display_name": "My Foundation Model",
             "shared_weight_scope": "the shared transformer trunk",
+            # What a round runs at when the caller sends no batch_size, and
+            # what the training form offers as the hyperparameter inputs.
+            "default_batch_size": 32,
+            "hyperparameters": {
+                "fit": {
+                    "learning_rate": {
+                        "type": "number",
+                        "default": 1e-4,
+                        "description": "Learning rate to use for training",
+                        "advanced": False,
+                    },
+                },
+                "evaluate": {},
+            },
         }
 
     @schema_method
@@ -197,21 +240,34 @@ class MyFoundationModelTrainer:
     async def start_fit(
         self,
         parameters: List[np.ndarray],
-        batch_size: int = 32,
-        learning_rate: float = 1e-4,
-        server_round: int = 0,
-        orchestrator_service_id: str = Field(...),
-        session_id: str = Field(...),
+        batch_size: Optional[int] = None,
+        config: Optional[Dict[str, Any]] = None,
         limit_train_batches: Optional[int] = None,
+        server_round: int = 1,
+        orchestrator_service_id: str = Field(...),
+        session_id: str = "",
     ) -> Dict[str, Union[bool, str]]:
         if self._registered_orch != orchestrator_service_id:
             raise PermissionError("Orchestrator service id mismatch.")
         if self._fit_task and not self._fit_task.done():
             raise RuntimeError("A fit task is already in progress.")
+        # Your declared defaults, with the caller's config over the top. An
+        # undeclared key is an error: nothing upstream can catch it, because
+        # every trainer takes the same config argument.
+        hparams = dict(self.FIT_DEFAULTS)
+        for name, value in (config or {}).items():
+            if name not in hparams:
+                raise ValueError(f"Unknown fit hyperparameter {name!r}.")
+            hparams[name] = value
         self._load_transformer_parameters(parameters)
         self._fit_status = {"status": "running", "current_batch": 0, "total_batches": 0}
         self._fit_task = asyncio.create_task(
-            self._run_fit(batch_size, learning_rate, limit_train_batches, server_round)
+            self._run_fit(
+                batch_size or self.DEFAULT_BATCH_SIZE,
+                hparams,
+                limit_train_batches,
+                server_round,
+            )
         )
         return {"status": "started", "message": f"Round {server_round} fit started."}
 
@@ -381,7 +437,7 @@ When porting another foundation model, plan for these differences:
 - **Dataset-server contract.** The Chiron data server pre-cuts every zarr to `(n_cells, 1200)` and exposes `layers/chiron_binned` (`layers/tabula_binned` on datasets prepared before image 0.7.8, which readers still accept). If your model expects a different cell representation (raw counts, log1p, scGPT-style ranked sequences, Geneformer-style ranked tokens), either consume the zarr directly via raw `X` or rerun preprocessing inside your trainer. Avoid both at once.
 - **What counts as "shared transformer weights" for FedAvg.** Tabula federates only the `transformer.*` keys, keeping the embedder and projection heads local. Your model must have a clear shared-vs-local key split, expressed through `get_transformer_keys()`. If your model has no local components (single global model), return every key.
 - **`in_feature` / sequence length.** Tabula's data server reads `in_feature=1200` from `tabula/framework.yaml`. If your model has a different sequence length, either ship a model-specific data server alongside your trainer or document an alternative dataset-server contract.
-- **Federated objectives.** The Tabula objective is `contrastive_scale * L_contrast + reconstruction_scale * L_recon`. Your `fit_config` schema can expose entirely different hyperparameters; the orchestrator passes through whatever you declare.
+- **Federated objectives.** The Tabula objective is `contrastive_scale * L_contrast + reconstruction_scale * L_recon`. Yours can expose entirely different hyperparameters. The orchestrator passes through whatever your `get_properties` declares, without knowing what any of it means.
 - **Embedder reuse.** Tabula's federated mode trains tissue-specific embedders locally. If your model has no notion of a per-site embedder, `save_model_weights` and `save_global_weights` collapse to publishing the same set of keys.
 
 ## What to test before federating

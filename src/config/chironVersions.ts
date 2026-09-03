@@ -91,19 +91,48 @@ export const MIN_APP_VERSIONS: Record<string, VersionFloor> = {
       'mismatched trainer from being deployed onto it.',
   },
   'chiron-orchestrator': {
-    minimum: '0.3.34',
+    minimum: '0.4.0',
     reason:
-      'Earlier orchestrators bound none of their peer-connection calls and ' +
-      'reported nothing when a round failed, so a crashed run was ' +
-      'indistinguishable from a finished one.',
+      'Every Chiron trainer now takes its model\'s hyperparameters as one ' +
+      'config argument, so the platform can drive any of them the same way. ' +
+      'An orchestrator below 0.4.0 still sends each setting as its own ' +
+      'argument, which a current trainer rejects at the first round.',
   },
+  // The four trainers moved to the shared API in the same release, so they
+  // share a floor and a reason. They are listed separately rather than
+  // collapsed, because a floor is keyed by artifact alias and the next reason
+  // to raise one will not apply to all four at once.
   'tabula-trainer': {
-    minimum: '0.5.6',
+    minimum: '0.6.0',
     reason:
-      'A model\'s base weights are now named by its architecture card, and ' +
-      'only a trainer from 0.5.6 knows to follow that card to the weights ' +
-      'themselves. An older one looks for a checkpoint file on the card and ' +
-      'fails at the start of the run.',
+      'From 0.6.0 a trainer takes its model\'s hyperparameters as one config ' +
+      'argument and publishes the same API as every other Chiron trainer. An ' +
+      'older one expects each setting as its own argument and fails at the ' +
+      'first round of a run started by a current orchestrator.',
+  },
+  'scgpt-trainer': {
+    minimum: '0.2.0',
+    reason:
+      'From 0.2.0 a trainer takes its model\'s hyperparameters as one config ' +
+      'argument and publishes the same API as every other Chiron trainer. An ' +
+      'older one expects each setting as its own argument and fails at the ' +
+      'first round of a run started by a current orchestrator.',
+  },
+  'geneformer-trainer': {
+    minimum: '0.2.0',
+    reason:
+      'From 0.2.0 a trainer takes its model\'s hyperparameters as one config ' +
+      'argument and publishes the same API as every other Chiron trainer. An ' +
+      'older one expects each setting as its own argument and fails at the ' +
+      'first round of a run started by a current orchestrator.',
+  },
+  'scfoundation-trainer': {
+    minimum: '0.2.0',
+    reason:
+      'From 0.2.0 a trainer takes its model\'s hyperparameters as one config ' +
+      'argument and publishes the same API as every other Chiron trainer. An ' +
+      'older one expects each setting as its own argument and fails at the ' +
+      'first round of a run started by a current orchestrator.',
   },
 };
 

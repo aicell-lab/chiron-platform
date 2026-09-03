@@ -35,7 +35,9 @@ Trainers usually self-register through their own `register_to_orchestrator` meth
 
 Returns the fit and evaluate parameter schemas (Flower-style `fit_config` / `eval_config` dictionaries) that every registered trainer expects, plus a `model` block naming which model they belong to. Call this before `start_training` to see what knobs you can pass and what their defaults are.
 
-The schemas are read live from the registered trainer's own `start_fit` / `start_evaluate` signature, so each model reports its own knobs. The Tabula trainer's `fit_config` includes `batch_size`, `learning_rate`, `corruption_rate`, `contrastive_scale`, `reconstruction_scale`, `temperature`, and `limit_train_batches`, and its `eval_config` includes `batch_size` and `limit_val_batches`. Do not assume those names for another model.
+Every Chiron trainer publishes the same `start_fit` / `start_evaluate` signature, so the call you make is the same whatever model is loaded. What differs is the model's own hyperparameters, which each trainer declares for itself and reports through `get_properties`, and which this method passes on to you. The Tabula trainer's `fit` schema includes `batch_size`, `learning_rate`, `corruption_rate`, `contrastive_scale`, `reconstruction_scale`, `temperature` and `limit_train_batches`, and its `evaluate` schema includes `batch_size` and `limit_val_batches`. Do not assume those names for another model: call this method and read what came back.
+
+Each schema is split into `standard` and `advanced`, and each entry carries a `type`, a `default` and a `description`. `batch_size` has no `default` because the fallback is the model's own, reported separately in `batch_size_limits`.
 
 ```python
 {
