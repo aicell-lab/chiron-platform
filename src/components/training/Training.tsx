@@ -2065,6 +2065,40 @@ const Training: React.FC = () => {
     && !!error.bodyText?.includes(`Service not found: ${serviceId}`);
 
   /**
+   * Watch an orchestrator for half a minute and report whether a run appeared.
+   *
+   * Returns true the moment one does, false only if the orchestrator answered
+   * every probe and said no to all of them, and undefined if it left any probe
+   * unanswered. Callers use this to check a suspicion against the
+   * orchestrator's own account, so a wrong "no" would be worse than admitting
+   * we do not know.
+   *
+   * The whole window matters. This is called after a request we cannot see the
+   * end of, so at the moment of the failure the request may still be on its way
+   * to the app, and even once it lands the orchestrator takes a moment to
+   * accept the session. Asking once and believing the first "no" would report a
+   * run as failed a second or two before it started, which is the exact false
+   * verdict this exists to prevent.
+   */
+  const RUN_PROBE_ATTEMPTS = 6;
+  const RUN_PROBE_INTERVAL_MS = 5000;
+  const orchestratorIsRunning = async (orchSvcId: string): Promise<boolean | undefined> => {
+    let unanswered = 0;
+    for (let attempt = 1; attempt <= RUN_PROBE_ATTEMPTS; attempt++) {
+      try {
+        const status = await callHyphaService<any>(orchSvcId, 'get_training_status', {}, { timeoutMs: 15000 });
+        if (normalizeStatusPayload(status)?.is_running) return true;
+      } catch {
+        unanswered += 1;
+      }
+      if (attempt < RUN_PROBE_ATTEMPTS) {
+        await new Promise(resolve => setTimeout(resolve, RUN_PROBE_INTERVAL_MS));
+      }
+    }
+    return unanswered > 0 ? undefined : false;
+  };
+
+  /**
    * Poll the manager until an app appears that was not there when the deploy
    * was fired, or until the window runs out.
    *
@@ -3210,10 +3244,37 @@ const Training: React.FC = () => {
         eval_config_keys: Object.keys(config.eval_config || {}),
       });
       // start_training runs the whole session server-side and only returns when
-      // done — fire-and-forget with a generous timeout (just shy of an hour).
-      callHyphaService(orchSvcId, 'start_training', trainingParams, { timeoutMs: 3_600_000 }).catch((error: Error) => {
+      // done, so this is fire-and-forget with a generous timeout (just shy of
+      // an hour).
+      callHyphaService(orchSvcId, 'start_training', trainingParams, { timeoutMs: 3_600_000 }).catch(async (error: Error) => {
+        // A lost response is not a failed run. start_training only returns
+        // once the whole session is over, and the orchestrator runs it whether
+        // or not the browser is still listening, so an error arriving in the
+        // first moments is the request being dropped, not the run refusing to
+        // start. Taking it at face value tore the page out of the monitoring
+        // view and reported "Training Failed" over a federation that went on
+        // to finish its rounds and produce checkpoints.
+        //
+        // So ask the orchestrator before saying anything, and give it the half
+        // minute it needs to answer honestly. The request may still be in
+        // flight when the browser gives up on it, the orchestrator takes a
+        // moment to accept the session once it lands, and the same routing
+        // wobble that dropped the request can 404 the first status calls too.
+        if (isTransportFailure(error) || isUnroutable(error, orchSvcId)) {
+          const running = await orchestratorIsRunning(orchSvcId);
+          if (running !== false) {
+            // Running, or still unreachable and we cannot honestly say
+            // otherwise. Either way the status poll started below is the one
+            // that knows, so leave the verdict to it.
+            logger.warn('training', 'Lost the start_training response, leaving the run to the status poll', {
+              orchestrator: launchedFrom,
+              orchestratorAnswered: running === true,
+            }, error);
+            return;
+          }
+        }
         logger.error('training', 'Training run failed', { orchestrator: launchedFrom }, error);
-        setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true);
+        setErrorPopupMessage('Training Failed'); setErrorPopupDetails(extractRemoteError(error.message)); setShowErrorPopup(true);
         setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
       });
       startTrainingStatusPoll(launchedFrom);
