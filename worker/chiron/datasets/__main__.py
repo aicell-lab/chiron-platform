@@ -319,6 +319,103 @@ For detailed documentation, visit: https://github.com/aicell-lab/bioengine-worke
     return parser
 
 
+class _SparseX:
+    """A compressed sparse ``X``, read from the store's own three arrays.
+
+    Carries the attribute names scipy's sparse matrices use, so anything that
+    duck-types on ``format`` / ``data`` / ``indices`` / ``indptr`` works against
+    it unchanged. Holding it costs the stored values, not cells times genes.
+    """
+
+    def __init__(self, group) -> None:
+        self.shape = tuple(int(v) for v in group.attrs["shape"])
+        encoding = str(group.attrs.get("encoding-type", "csr_matrix"))
+        self.format = "csc" if encoding.startswith("csc") else "csr"
+        self.data = np.asarray(group["data"][:])
+        self.indices = np.asarray(group["indices"][:])
+        self.indptr = np.asarray(group["indptr"][:]).astype(np.int64)
+
+
+def _open_x(root, zarr_path: Path, logger):
+    """Read ``X`` out of an opened store, or None if it cannot be read.
+
+    Deliberately not via ``anndata.read_zarr``. Binning writes its layer at the
+    width of the selected panel, which on a full gene panel is far narrower
+    than ``var``, and anndata refuses to load a layer whose shape disagrees
+    with ``var``. Going through it would mean a store could be prepared once
+    and then never re-read, so raising any version below would silently do
+    nothing on exactly the datasets that matter. Nothing here wants the
+    dataframe machinery anndata exists to provide.
+
+    Args:
+        root: the opened zarr group.
+        zarr_path: only for log messages.
+        logger: the caller's logger.
+
+    Returns:
+        A :class:`_SparseX`, a 2D numpy array for a dense store, or None.
+    """
+    if "X" not in root:
+        logger.warning(f"{zarr_path.name}: no X in the store")
+        return None
+
+    x = root["X"]
+    try:
+        if isinstance(x, zarr.Group):
+            return _SparseX(x)
+        return np.asarray(x[:])
+    except Exception as e:
+        logger.warning(f"{zarr_path.name}: cannot read X: {e}")
+        return None
+
+
+def _select_columns_dense(X, mask: np.ndarray) -> np.ndarray:
+    """The selected columns of ``X`` as a dense array, ``(n_cells, mask.sum())``.
+
+    Only the selected panel is materialised, so the width is the panel's and
+    not the store's. Rows are filled a block at a time, because the row index
+    of every stored value is one int64 per value and on a large store that
+    array on its own is larger than the result.
+
+    Args:
+        X: a :class:`_SparseX` or a dense 2D array.
+        mask: boolean array over the store's genes.
+
+    Returns:
+        2D array of ``X``'s dtype.
+    """
+    if not isinstance(X, _SparseX):
+        return np.asarray(X)[:, mask]
+
+    n_rows, n_cols = X.shape
+    picked = np.flatnonzero(mask)
+    out = np.zeros((n_rows, len(picked)), dtype=X.data.dtype)
+
+    if X.format == "csc":
+        # A column is one contiguous run, so take the selected ones directly.
+        for position, column in enumerate(picked):
+            lo, hi = int(X.indptr[column]), int(X.indptr[column + 1])
+            out[X.indices[lo:hi], position] = X.data[lo:hi]
+        return out
+
+    # CSR. -1 marks a gene that was not selected.
+    remap = np.full(n_cols, -1, dtype=np.int64)
+    remap[picked] = np.arange(len(picked))
+    block = 8192
+    for start in range(0, n_rows, block):
+        stop = min(n_rows, start + block)
+        lo, hi = int(X.indptr[start]), int(X.indptr[stop])
+        if hi <= lo:
+            continue
+        columns = remap[X.indices[lo:hi]]
+        keep = columns >= 0
+        rows = np.repeat(
+            np.arange(start, stop), np.diff(X.indptr[start : stop + 1])
+        )
+        out[rows[keep], columns[keep]] = X.data[lo:hi][keep]
+    return out
+
+
 def _compute_per_cell_binning(X, n_bins: int = BINNING_N_BINS) -> np.ndarray:
     """Equal-frequency per-cell quantile binning into n_bins discrete levels.
 
@@ -385,24 +482,22 @@ def _ensure_binning(zarr_path: Path, logger) -> bool:
         )
         return False
 
-    try:
-        adata = ad.read_zarr(zarr_path)
-    except Exception as e:
-        logger.warning(f"{zarr_path.name}: cannot read as AnnData for binning: {e}")
+    X = _open_x(root, zarr_path, logger)
+    if X is None:
         return False
-    if adata.n_obs == 0 or adata.n_vars == 0:
+    if X.shape[0] == 0 or X.shape[1] == 0:
         return False
 
-    selected_mask = root["var"][selected_key][:]
+    selected_mask = np.asarray(root["var"][selected_key][:], dtype=np.bool_)
     if not selected_mask.any():
         logger.warning(
             f"{zarr_path.name}: HVG selection is empty; binning skipped"
         )
         return False
 
-    # All cells, top-n_selected genes. Densification happens inside
-    # _compute_per_cell_binning if X is sparse.
-    sub_X = adata[:, selected_mask].X
+    # All cells, top-n_selected genes. Only the selected panel is made dense,
+    # so the working copy is as wide as the panel and not as wide as the store.
+    sub_X = _select_columns_dense(X, selected_mask)
     binned = _compute_per_cell_binning(sub_X, n_bins=BINNING_N_BINS)
 
     layers_group = root["layers"] if "layers" in root else root.create_group("layers")
@@ -543,22 +638,18 @@ def _ensure_hvg_rank(zarr_path: Path, logger) -> bool:
     if has_rank and existing_version == HVG_VERSION and has_selected:
         return False  # already ranked at the current version
 
-    # Load X (or X_binned fallback) into memory. AnnData's read_zarr handles the
-    # var/obs dataframe metadata properly; pulling X via raw zarr also works but
-    # would need the same densify logic.
-    try:
-        adata = ad.read_zarr(zarr_path)
-    except Exception as e:
-        logger.warning(f"{zarr_path.name}: cannot read as AnnData for HVG: {e}")
+    X = _open_x(root, zarr_path, logger)
+    if X is None:
         return False
 
-    if adata.n_vars == 0:
+    n_vars = int(X.shape[1])
+    if n_vars == 0:
         return False
 
     # Per-gene over-dispersion (variance / mean) across the full expression
     # matrix. Whatever cell- or gene-level filtering the site operator wants
     # to apply is expected upstream of the data-server.
-    score = _compute_hvg_score(adata.X)
+    score = _compute_hvg_score(X)
 
     # rank 0 = most variable, n_vars-1 = least
     rank = (-score).argsort().argsort().astype(np.int32)
@@ -586,8 +677,8 @@ def _ensure_hvg_rank(zarr_path: Path, logger) -> bool:
     # the pre-cut binned layer. Picks the top-n_selected genes by rank, where
     # n_selected = min(MODEL_IN_FEATURE, n_vars). All-zero genes have score 0
     # and the highest rank values, so they are deprioritised naturally.
-    n_selected = int(min(MODEL_IN_FEATURE, adata.n_vars))
-    selected_mask = np.zeros(adata.n_vars, dtype=np.bool_)
+    n_selected = int(min(MODEL_IN_FEATURE, n_vars))
+    selected_mask = np.zeros(n_vars, dtype=np.bool_)
     if n_selected > 0:
         selected_mask = (rank < n_selected).astype(np.bool_)
     sel_arr = var_group.create_array(
