@@ -269,6 +269,71 @@ const extractRemoteError = (msg: string): string => {
 const describeErrorRound = (round: number): string =>
   round >= 1 ? `in round ${round}` : 'before the first round';
 
+// Rewrite `workspace/client:app` as `workspace/*:app`.
+//
+// A Hypha service id names both the app and the client process currently
+// serving it. Ray Serve restarts a replica whenever its health check misses,
+// and the replica comes back registered under a fresh client id, so every id
+// the page is holding stops resolving. The page then reads a run it was
+// following as gone: polls 404, the failure counter fills up, and the training
+// view is abandoned while the run itself carries on and finishes normally.
+//
+// Hypha accepts `*` in the client position and resolves it to whichever client
+// currently serves that app. App instance names are unique per deployment, so
+// the wildcard names exactly the same app whenever it names anything at all.
+// The orchestrator already addresses trainers this way
+// (`_client_agnostic_service_id` in apps/chiron_orchestrator/orchestrator.py);
+// this is the frontend half of the same fix.
+//
+// An id that does not carry both separators is returned untouched, so an
+// unexpected shape degrades to today's exact-match behaviour rather than
+// becoming a malformed address.
+const clientAgnosticServiceId = (serviceId: string): string => {
+  const slash = serviceId.indexOf('/');
+  if (slash < 0) return serviceId;
+  const workspace = serviceId.slice(0, slash);
+  const rest = serviceId.slice(slash + 1);
+  const colon = rest.indexOf(':');
+  if (colon < 0) return serviceId;
+  return `${workspace}/*:${rest.slice(colon + 1)}`;
+};
+
+// Rewrite the keys of a service-id-keyed dict to their client-agnostic form.
+//
+// The orchestrator keys `trainers_progress` and the per-client loss series by
+// whichever trainer id it was registered under. Those ids are normalised on
+// arrival for the same reason the page's own are: a trainer that restarts
+// mid-run would otherwise appear as a second participant, splitting its loss
+// curve and dropping its pin off the federation map. Normalising both sides
+// also means an orchestrator that still echoes the pinned form keeps matching.
+const keyByAgnosticServiceId = <T,>(
+  dict: Record<string, T> | undefined | null,
+): Record<string, T> | undefined => {
+  if (!dict) return dict ?? undefined;
+  const out: Record<string, T> = {};
+  for (const [key, value] of Object.entries(dict)) {
+    out[clientAgnosticServiceId(key)] = value;
+  }
+  return out;
+};
+
+// The two orchestrator payloads that carry trainer ids, normalised on arrival
+// so nothing downstream ever holds a client-pinned id. Both are typed loosely
+// because every call site fetches them as `any`.
+const normalizeStatusPayload = (status: any): any =>
+  status && typeof status === 'object'
+    ? { ...status, trainers_progress: keyByAgnosticServiceId(status.trainers_progress) ?? {} }
+    : status;
+
+const normalizeHistoryPayload = (history: any): any =>
+  history && typeof history === 'object'
+    ? {
+        ...history,
+        client_training_losses: keyByAgnosticServiceId(history.client_training_losses),
+        client_validation_losses: keyByAgnosticServiceId(history.client_validation_losses),
+      }
+    : history;
+
 // Republish a polled value only when it actually changed.
 //
 // Every poll response arrives as a fresh object, so handing it straight to a
@@ -944,7 +1009,11 @@ const Training: React.FC = () => {
   }>>(() => {
     try {
       const raw = localStorage.getItem(TRAINER_META_CACHE_KEY);
-      return raw ? JSON.parse(raw) : {};
+      // Keys are trainer service ids, and a cache written before those were
+      // normalised holds client-pinned ones. Rewrite on load so a returning
+      // user's Save Weights panel still finds the names and locations of
+      // participants whose worker has since gone quiet.
+      return raw ? (keyByAgnosticServiceId(JSON.parse(raw)) ?? {}) : {};
     } catch { return {}; }
   });
   useEffect(() => {
@@ -1136,7 +1205,12 @@ const Training: React.FC = () => {
       urlSelectionAppliedRef.current = true;
       return;
     }
-    const match = orchestrators.find(o => o.serviceIds?.[0]?.websocket_service_id === wsid);
+    // The page now writes the client-agnostic form into ?orchestrator_id=, but
+    // a link shared or bookmarked before that carries a client-pinned id, and
+    // the client it names is long gone. Compare in the agnostic form so an old
+    // deep link still resolves to the orchestrator it was pointing at.
+    const target = clientAgnosticServiceId(wsid);
+    const match = orchestrators.find(o => o.serviceIds?.[0]?.websocket_service_id === target);
     if (match) {
       setSelectedOrchestrator(`${match.managerId}::${match.appId}`);
       setCurrentStep(initialUrlStepRef.current ?? 2);
@@ -1480,10 +1554,24 @@ const Training: React.FC = () => {
   // single object of the same shape (newer shape). Normalise to an array so
   // downstream code can always do `serviceIds[0]?.websocket_service_id` and
   // `serviceIds.forEach(...)` without crashing.
+  //
+  // Both ids are also rewritten to their client-agnostic form here rather than
+  // at each of the thirty-odd places that read them, so no part of the page can
+  // hold an address that a replica restart invalidates. See
+  // clientAgnosticServiceId.
   const normalizeServiceIds = (sids: any): any[] => {
-    if (Array.isArray(sids)) return sids;
-    if (sids && typeof sids === 'object') return [sids];
-    return [];
+    const asArray = Array.isArray(sids) ? sids : sids && typeof sids === 'object' ? [sids] : [];
+    return asArray.map((sid: any) => {
+      if (!sid || typeof sid !== 'object') return sid;
+      const next = { ...sid };
+      if (typeof next.websocket_service_id === 'string') {
+        next.websocket_service_id = clientAgnosticServiceId(next.websocket_service_id);
+      }
+      if (typeof next.webrtc_service_id === 'string') {
+        next.webrtc_service_id = clientAgnosticServiceId(next.webrtc_service_id);
+      }
+      return next;
+    });
   };
 
   // Pull CHIRON_DEPLOYED_BY / CHIRON_DEPLOYED_BY_EMAIL out of the app's
@@ -1532,7 +1620,12 @@ const Training: React.FC = () => {
     displayName: s.display_name,
     applicationId: appId,
     isBusy: s.is_busy ?? false,
-    registeredOrchestratorId: s.registered_orchestrator_id ?? undefined,
+    // Normalised so it still matches an orchestrator's own serviceIds after
+    // either side has restarted a replica, and whichever form the trainer
+    // recorded at registration time.
+    registeredOrchestratorId: s.registered_orchestrator_id
+      ? clientAgnosticServiceId(s.registered_orchestrator_id)
+      : undefined,
     ...extractOwner(s),
   });
 
@@ -2171,7 +2264,7 @@ const Training: React.FC = () => {
       (async () => {
         let history: any = null;
         try {
-          history = await callHyphaService(orchSvcId, 'get_training_history', {}, { timeoutMs: 15000 });
+          history = normalizeHistoryPayload(await callHyphaService(orchSvcId, 'get_training_history', {}, { timeoutMs: 15000 }));
         } catch {
           // No history endpoint or the call failed — fall through to the
           // generic confirm body below.
@@ -2594,7 +2687,7 @@ const Training: React.FC = () => {
       try {
         if (showSpinner) setIsLoadingRegisteredTrainers(true);
         const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-        const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
+        const registeredServiceIds = (await callHyphaService<string[]>(orchSvcId, 'list_trainers', {})).map(clientAgnosticServiceId);
         if (!cancelled) keepUnchanged(registeredServiceIds);
       } catch {
         // Don't wipe the list on a transient fetch error during periodic
@@ -2652,7 +2745,7 @@ const Training: React.FC = () => {
       if (!orchestrator || orchestrator.status !== 'RUNNING') return;
       try {
         const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-        const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
+        const history = normalizeHistoryPayload(await callHyphaService<any>(orchSvcId, 'get_training_history', {}));
         if (history) setTrainingHistory(history);
       } catch { /* no history yet */ }
     };
@@ -2696,7 +2789,7 @@ const Training: React.FC = () => {
       if (orchestrator && orchestrator.status === 'RUNNING') {
         try {
           const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-          const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
+          const history = normalizeHistoryPayload(await callHyphaService<any>(orchSvcId, 'get_training_history', {}));
           if (!stopped && history) setTrainingHistory(history);
         } catch { /* silent */ }
       }
@@ -2802,7 +2895,7 @@ const Training: React.FC = () => {
       // which threw a ReferenceError and left trainingHistory unset, and the
       // Save Weights panel needs that history to render at all.
       try {
-        const history = await callHyphaService<any>(svcId, 'get_training_history', {});
+        const history = normalizeHistoryPayload(await callHyphaService<any>(svcId, 'get_training_history', {}));
         if (history) setTrainingHistory(history);
       } catch { /* curves stay as last polled */ }
     };
@@ -2812,7 +2905,7 @@ const Training: React.FC = () => {
       const svcId = resolveOrchSvcId(orchKey);
       if (!svcId) { onFailure(); return; }
       try {
-        const status = await callHyphaService<any>(svcId, 'get_training_status', {});
+        const status = normalizeStatusPayload(await callHyphaService<any>(svcId, 'get_training_status', {}));
         if (stopped) return;
         failures = 0; unreachableSince = 0;
         // One line per round or stage change, not one per poll: at a 3s cadence
@@ -2902,8 +2995,8 @@ const Training: React.FC = () => {
     const checkOngoingTraining = async () => {
       try {
         const [status, history] = await Promise.all([
-          callHyphaService<any>(orchSvcId, 'get_training_status', {}),
-          callHyphaService<any>(orchSvcId, 'get_training_history', {}).catch(() => null),
+          callHyphaService<any>(orchSvcId, 'get_training_status', {}).then(normalizeStatusPayload),
+          callHyphaService<any>(orchSvcId, 'get_training_history', {}).then(normalizeHistoryPayload).catch(() => null),
         ]);
         if (cancelled) return;
         if (history) setTrainingHistory(history);
@@ -2940,7 +3033,7 @@ const Training: React.FC = () => {
     setIsPreparingTraining(true);
     try {
       const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-      const currentTrainers = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
+      const currentTrainers = (await callHyphaService<string[]>(orchSvcId, 'list_trainers', {})).map(clientAgnosticServiceId);
       if (currentTrainers.length === 0) throw new Error('No trainers available. Please select at least one trainer.');
       const launchedFrom = selectedOrchestrator!;
       setIsPreparingTraining(false); setIsTraining(true); setTrainingResumed(false); setTrainingOrchestratorId(launchedFrom); setTrainingConfigCollapsed(true);
@@ -4567,7 +4660,7 @@ const Training: React.FC = () => {
                           const startedAt = Date.now();
                           try {
                             const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-                            const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
+                            const history = normalizeHistoryPayload(await callHyphaService<any>(orchSvcId, 'get_training_history', {}));
                             if (history) setTrainingHistory(history);
                           } catch (err) {
                             setHistoryRefreshError(extractRemoteError(err instanceof Error ? err.message : String(err)));
