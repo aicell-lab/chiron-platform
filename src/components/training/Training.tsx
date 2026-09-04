@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useHyphaStore } from '../../store/hyphaStore';
-import { callHyphaService, listHyphaServices } from '../../utils/hyphaHttp';
+import { callHyphaService, listHyphaServices, HyphaHttpError } from '../../utils/hyphaHttp';
 import { logger } from '../../utils/logger';
 import { FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
@@ -2046,6 +2046,25 @@ const Training: React.FC = () => {
   };
 
   /**
+   * Whether Hypha could not route the call to the service we addressed.
+   *
+   * An app's service takes a moment to become resolvable after the worker
+   * reports the deployment RUNNING, and it can briefly stop resolving again
+   * when a replica restarts. In that window Hypha answers every call to it
+   * with a 404 whose body reads "Service not found: <the id we asked for>".
+   * Like a dropped request, this means the app never saw the call, so it is
+   * never evidence that the app refused anything.
+   *
+   * Matched against the id we addressed rather than on the phrase alone: an
+   * app can legitimately report that some *other* service is missing, and
+   * that is a real answer from a reachable app, not a routing miss.
+   */
+  const isUnroutable = (error: unknown, serviceId: string): boolean =>
+    error instanceof HyphaHttpError
+    && error.status === 404
+    && !!error.bodyText?.includes(`Service not found: ${serviceId}`);
+
+  /**
    * Poll the manager until an app appears that was not there when the deploy
    * was fired, or until the window runs out.
    *
@@ -2642,29 +2661,61 @@ const Training: React.FC = () => {
     }
     setPendingTrainerRegistrations(n => n + 1);
     (async () => {
-      try {
-        // NOTE: kwarg is `trainer_service_id`, NOT `service_id`. Hypha's HTTP
-        // gateway reserves `service_id` for the URL path placeholder.
-        await callHyphaService(orchestratorServiceId, 'add_trainer', {
-          trainer_service_id: trainerServiceId,
-          orchestrator_service_id: orchestratorServiceId,
-        }, { timeoutMs: 30000 });
-        logger.info('training', 'Registered trainer', {
-          orchestratorServiceId,
-          trainerServiceId,
-        });
-      } catch (error) {
-        logger.error('training', 'Failed to register trainer', {
-          orchestratorServiceId,
-          trainerServiceId,
-        }, error);
-        setRegisteredTrainers(prev);
-        setErrorPopupMessage('Failed to Register Trainer');
-        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-        setShowErrorPopup(true);
-      } finally {
-        setPendingTrainerRegistrations(n => Math.max(0, n - 1));
+      // A freshly deployed orchestrator is reported RUNNING slightly before
+      // its service resolves, and this is the first thing the user clicks
+      // afterwards, so ticking the box in that window used to raise a
+      // full-screen modal quoting a Python KeyError for a federation that was
+      // seconds away from working. Give the routing time to settle before
+      // deciding anything, on the two failures that mean the orchestrator
+      // never saw the call. A refusal from the orchestrator itself is a real
+      // answer and still fails on the first try.
+      const ATTEMPTS = 4;
+      const RETRY_DELAY_MS = 5000;
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+        try {
+          // NOTE: kwarg is `trainer_service_id`, NOT `service_id`. Hypha's HTTP
+          // gateway reserves `service_id` for the URL path placeholder.
+          await callHyphaService(orchestratorServiceId, 'add_trainer', {
+            trainer_service_id: trainerServiceId,
+            orchestrator_service_id: orchestratorServiceId,
+          }, { timeoutMs: 30000 });
+          logger.info('training', 'Registered trainer', {
+            orchestratorServiceId,
+            trainerServiceId,
+            attempt,
+          });
+          setPendingTrainerRegistrations(n => Math.max(0, n - 1));
+          return;
+        } catch (error) {
+          lastError = error;
+          const retryable = isUnroutable(error, orchestratorServiceId) || isTransportFailure(error);
+          if (!retryable || attempt === ATTEMPTS) break;
+          logger.warn('training', 'Could not reach the orchestrator to register a trainer, retrying', {
+            orchestratorServiceId,
+            trainerServiceId,
+            attempt,
+          }, error);
+          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+        }
       }
+      logger.error('training', 'Failed to register trainer', {
+        orchestratorServiceId,
+        trainerServiceId,
+      }, lastError);
+      setRegisteredTrainers(prev);
+      const unreachable = isUnroutable(lastError, orchestratorServiceId) || isTransportFailure(lastError);
+      setErrorPopupMessage(unreachable ? 'Could Not Reach the Orchestrator' : 'Failed to Register Trainer');
+      setErrorPopupDetails(
+        unreachable
+          ? 'The orchestrator did not answer, so this trainer was not added to the ' +
+            'federation. It may still be starting up. Wait a moment and tick the box ' +
+            'again, or check the orchestrator on the Setup step.\n\n' +
+            (lastError instanceof Error ? lastError.message : String(lastError ?? ''))
+          : extractRemoteError(lastError instanceof Error ? lastError.message : 'Unknown error')
+      );
+      setShowErrorPopup(true);
+      setPendingTrainerRegistrations(n => Math.max(0, n - 1));
     })();
   };
 
