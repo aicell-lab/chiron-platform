@@ -1821,6 +1821,78 @@ const Training: React.FC = () => {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /**
+   * Whether an error means the request never reached the worker, as opposed to
+   * the worker having considered it and refused.
+   *
+   * The distinction matters because `create_orchestrator` and `create_trainer`
+   * submit a deploy that then runs to completion on the worker whether or not
+   * the browser is still listening. A dropped response therefore says nothing
+   * about whether the deploy happened, and the two cases need opposite advice:
+   * one is "this failed, look at why", the other is "your app is probably
+   * coming up, wait".
+   *
+   * Matching on message text is unpleasant but it is what the transports give
+   * us. Hypha surfaces a browser fetch failure and a websocket drop as plain
+   * Errors with no code, and a worker-side rejection arrives as the remote
+   * traceback, which never contains these phrases. Getting it wrong in the
+   * false-positive direction costs one extra worker poll and a differently
+   * worded modal, so the list leans inclusive.
+   */
+  const isTransportFailure = (error: unknown): boolean => {
+    const message = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase();
+    return [
+      'failed to fetch',       // Chrome, fetch rejected before a response
+      'load failed',           // Safari's wording for the same thing
+      'networkerror',          // Firefox
+      'network changed',       // ERR_NETWORK_CHANGED, the one seen on europa
+      'err_network',
+      'err_connection',
+      'err_internet_disconnected',
+      'connection closed',
+      'connection lost',
+      'websocket',
+      'timed out',
+      'timeout',
+      'aborted',
+    ].some(needle => message.includes(needle));
+  };
+
+  /**
+   * Poll the manager until an app appears that was not there when the deploy
+   * was fired, or until the window runs out.
+   *
+   * Calls `get_worker_info` directly rather than going through
+   * `refreshWorkerInfo`, which returns immediately while this manager holds
+   * the mutation lock, and the lock is still held here.
+   *
+   * Assumes any newly listed app is the one we just asked for. Two people
+   * deploying to the same worker in the same 90 s could in principle make us
+   * adopt someone else's app, but the cost of that is a suppressed error
+   * modal, against the certainty of showing a false one every time a request
+   * drops.
+   */
+  const waitForDeployedApp = async (
+    managerId: string,
+    kind: 'orchestrators_status' | 'trainers_status',
+    knownAppIds: Set<string>,
+  ): Promise<string | null> => {
+    // Six attempts fifteen seconds apart. A trainer deploy is given 180 s by
+    // the RPC itself, but the call we are recovering from was submitted, so
+    // what remains is the worker bringing the app up far enough to list it,
+    // which it does within a few seconds of accepting the deploy.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 15000));
+      try {
+        const workerInfo: WorkerInfo = await callHyphaService(managerId, 'get_worker_info', {}, { timeoutMs: 10000 });
+        const appIds = Object.keys(workerInfo[kind] || {});
+        const fresh = appIds.find(appId => !knownAppIds.has(appId) && !isRecentlyDeleted(appId));
+        if (fresh) return fresh;
+      } catch { /* the poll can drop for the same reason the deploy did */ }
+    }
+    return null;
+  };
+
   // Optimistic deploy: close the dialog immediately, drop a NOT_STARTED placeholder
   // into local state, and fire the long-running create_* RPC in the background. The
   // manager lock is acquired *synchronously* before the optimistic update so the
@@ -1844,6 +1916,10 @@ const Training: React.FC = () => {
     // turned the placeholder into a real app row.
     if (orchestrators.some(o => o.managerId === managerId && o.appId.startsWith('pending-'))) return;
     mutatingManagersRef.current.add(managerId);
+    // Snapshot the apps this manager already has, so that if the create call's
+    // response is lost we can tell a deploy that went through from one that
+    // never started. Taken before the placeholder is added.
+    const knownAppIds = new Set(orchestrators.filter(o => o.managerId === managerId).map(o => o.appId));
     logger.info('training', 'Creating orchestrator', { managerId });
     setCreatingOrchestratorMgrs(prev => ({ ...prev, [managerId]: true }));
     // Close UI immediately
@@ -1882,10 +1958,31 @@ const Training: React.FC = () => {
         const ownerEmail = (user?.email as string | undefined) || undefined;
         await callManagerCompat(managerId, 'create_orchestrator', { token: applicationToken, owner_id: ownerId, owner_email: ownerEmail }, ['owner_email'], { timeoutMs: 120000 });
       } catch (error) {
-        setOrchestrators(prev => prev.filter(o => o.appId !== pendingAppId));
-        setErrorPopupMessage('Failed to Create Orchestrator');
-        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-        setShowErrorPopup(true);
+        // A lost response is not a failed deploy. Give the worker a chance to
+        // list the orchestrator before saying anything, otherwise the user
+        // reads "failed", clicks Launch again, and ends up with two.
+        const adopted = isTransportFailure(error)
+          ? await waitForDeployedApp(managerId, 'orchestrators_status', knownAppIds)
+          : null;
+        if (adopted) {
+          // Leave the placeholder in place. The refresh below sees a real
+          // entry for this manager and drops the placeholder in the same tick.
+          logger.info('training', 'Adopted orchestrator after a dropped create call', { managerId, appId: adopted });
+        } else {
+          setOrchestrators(prev => prev.filter(o => o.appId !== pendingAppId));
+          const dropped = isTransportFailure(error);
+          setErrorPopupMessage(dropped ? 'Could Not Reach the Worker' : 'Failed to Create Orchestrator');
+          setErrorPopupDetails(
+            dropped
+              ? 'The request did not reach the worker, so it is not certain whether the ' +
+                'orchestrator was created. The worker was checked for the next minute and a half ' +
+                'and reported none, so it most likely never started. Check the worker page ' +
+                'before launching again, in case one appears late.\n\n' +
+                extractRemoteError(error instanceof Error ? error.message : 'Unknown error')
+              : extractRemoteError(error instanceof Error ? error.message : 'Unknown error')
+          );
+          setShowErrorPopup(true);
+        }
       } finally {
         // Hold the loading-spinner state on the Start Orchestrator button
         // for an extra 10 s after the deploy resolves. The manager's
@@ -1929,6 +2026,9 @@ const Training: React.FC = () => {
     // refresh has reconciled the placeholder into the real app row.
     if (trainers.some(t => t.managerId === managerId && t.appId.startsWith('pending-'))) return;
     mutatingManagersRef.current.add(managerId);
+    // See createOrchestrator: the apps this manager has before we ask for
+    // another, so a dropped response can be told apart from a failed deploy.
+    const knownAppIds = new Set(trainers.filter(t => t.managerId === managerId).map(t => t.appId));
     setCreatingTrainerMgrs(prev => ({ ...prev, [managerId]: true }));
     // Snapshot user-input state before clearing the form
     const datasetsArg = newTrainerDatasets;
@@ -1979,10 +2079,29 @@ const Training: React.FC = () => {
         if (pretrainedArtifactArg) trainerParams.pretrained_weights_artifact = { artifact_id: pretrainedArtifactArg, file_path: 'model.pth' };
         await callManagerCompat(managerId, 'create_trainer', trainerParams, ['owner_email'], { timeoutMs: 180000 });
       } catch (error) {
-        setTrainers(prev => prev.filter(t => t.appId !== pendingAppId));
-        setErrorPopupMessage('Failed to Create Trainer');
-        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-        setShowErrorPopup(true);
+        // See createOrchestrator. This is the call the report was filed
+        // against: the trainer deploy is the longest one the page makes, so it
+        // is the likeliest to have its response dropped.
+        const adopted = isTransportFailure(error)
+          ? await waitForDeployedApp(managerId, 'trainers_status', knownAppIds)
+          : null;
+        if (adopted) {
+          logger.info('training', 'Adopted trainer after a dropped create call', { managerId, appId: adopted });
+        } else {
+          setTrainers(prev => prev.filter(t => t.appId !== pendingAppId));
+          const dropped = isTransportFailure(error);
+          setErrorPopupMessage(dropped ? 'Could Not Reach the Worker' : 'Failed to Create Trainer');
+          setErrorPopupDetails(
+            dropped
+              ? 'The request did not reach the worker, so it is not certain whether the ' +
+                'trainer was created. The worker was checked for the next minute and a half ' +
+                'and reported none, so it most likely never started. Check the worker page ' +
+                'before launching again, in case one appears late.\n\n' +
+                extractRemoteError(error instanceof Error ? error.message : 'Unknown error')
+              : extractRemoteError(error instanceof Error ? error.message : 'Unknown error')
+          );
+          setShowErrorPopup(true);
+        }
       } finally {
         // Hold the Start Trainer button's spinner state for 10 s after the
         // deploy resolves, matching the manager's _CREATE_DEDUPE_WINDOW_S.
