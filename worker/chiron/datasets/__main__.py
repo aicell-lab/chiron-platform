@@ -123,6 +123,90 @@ def _drop_legacy_key(root, container: str, name: str) -> None:
         except Exception:
             pass
 
+
+# AnnData encodes var/ as a dataframe, and a dataframe group lists its columns
+# in a `column-order` attribute. Arrays written into var/ by raw zarr calls are
+# not in that list, and each column is also expected to carry the two encoding
+# attributes below. Without both, `adata.var` does not show the column at all:
+# the data is on disk and invisible to anyone who opens the store the ordinary
+# way. These are the values AnnData's own writer uses for a plain numeric or
+# boolean column.
+_ANNDATA_COLUMN_ENCODING = {
+    "encoding-type": "array",
+    "encoding-version": "0.2.0",
+}
+
+
+def _register_var_columns(root, names, logger) -> bool:
+    """Make raw arrays under var/ visible as columns of `adata.var`.
+
+    The trainer reads these through raw zarr access and does not need them
+    registered, which is why they were written as standalone arrays. But that
+    left every prepared dataset with an HVG mask that nobody could see from
+    anndata, so inspecting a dataset outside Chiron meant reaching into the
+    zarr by hand.
+
+    Registers whichever of `names` is present, under its current or pre-rename
+    name, and returns True only when something actually changed, so the
+    conversion loop can skip the metadata rewrite on the common no-op pass.
+    """
+    if "var" not in root:
+        return False
+    var_group = root["var"]
+    order = list(var_group.attrs.get("column-order", []))
+    registered = []
+
+    for name in names:
+        key = _find_key(root, "var", name)
+        if key is None:
+            continue
+        column = var_group[key]
+        changed = False
+        for attr, value in _ANNDATA_COLUMN_ENCODING.items():
+            if column.attrs.get(attr) != value:
+                column.attrs[attr] = value
+                changed = True
+        if key not in order:
+            order.append(key)
+            changed = True
+        if changed:
+            registered.append(key)
+
+    if registered:
+        var_group.attrs["column-order"] = order
+        logger.info("registered var columns: " + ", ".join(registered))
+    return bool(registered)
+
+
+def _ensure_var_columns_visible(zarr_path: Path, logger) -> bool:
+    """Pipeline step: register the HVG arrays as var columns.
+
+    Separate from `_ensure_hvg_rank` rather than folded into it, because the
+    ranking is idempotent on HVG_VERSION and every dataset already prepared is
+    at the current version. Folding this in would fix new datasets only and
+    leave every existing one unreadable, for a change that costs no recompute.
+    """
+    try:
+        root = zarr.open_group(str(zarr_path), mode="a")
+    except Exception as e:
+        logger.warning(f"Cannot open {zarr_path.name} to register var columns: {e}")
+        return False
+
+    if not _register_var_columns(
+        root, (HVG_RANK_KEY, HVG_SCORE_KEY, HVG_SELECTED_KEY), logger
+    ):
+        return False
+
+    try:
+        zarr.consolidate_metadata(root.store)
+    except Exception as e:
+        logger.warning(
+            f"{zarr_path.name}: consolidate_metadata failed after registering var "
+            f"columns, so anndata readers may still not see the HVG mask: {e}"
+        )
+    return True
+
+
 # The HVG ranking is written into each zarr's var/ group so the trainer
 # and the Chiron UI can both reason about gene variability. The rank covers
 # all n_vars genes, computed on the full expression matrix. On top of the
@@ -425,9 +509,10 @@ def _ensure_hvg_rank(zarr_path: Path, logger) -> bool:
     # rank 0 = most variable, n_vars-1 = least
     rank = (-score).argsort().argsort().astype(np.int32)
 
-    # Direct zarr writes into var/. We use create_array so the arrays are
-    # standalone (not registered in var's pandas-dataframe column index) —
-    # the trainer reads them via raw zarr access, which is exactly what we want.
+    # Direct zarr writes into var/, because the trainer reads these through raw
+    # zarr access. `_ensure_var_columns_visible` then registers them in var's
+    # dataframe column index, in a step of its own so that datasets already
+    # ranked at the current HVG_VERSION get registered without a recompute.
     rank_arr = var_group.create_array(
         HVG_RANK_KEY,
         shape=rank.shape,
@@ -794,6 +879,7 @@ def convert_anndata_to_zarr(data_dir: str, log_file: str = None):
         for zarr_path in sorted(dataset_dir.glob("*.zarr")):
             for fn, label in (
                 (_ensure_hvg_rank,      "HVG ranking"),
+                (_ensure_var_columns_visible, "var column registration"),
                 (_ensure_hvg_histogram, "HVG histogram"),
                 (_ensure_binning,       "value binning"),
                 (_ensure_umap_embedding, "UMAP embedding"),
