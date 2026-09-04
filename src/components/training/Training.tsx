@@ -248,7 +248,48 @@ interface OrchestratorInfoModalData { status?: string; artifactId?: string; }
 interface TrainerInfoModalData { appId: string; status?: string; datasets: Record<string, any>; artifactId?: string; }
 type InfoModalData = ManagerInfoModalData | OrchestratorInfoModalData | TrainerInfoModalData;
 
+/**
+ * The one remote failure a user can act on without reading Python: the worker
+ * had no room for the app.
+ *
+ * A worker refuses the deployment with a ValueError naming a Ray-generated
+ * codename and a dict of raw byte counts, which arrives here inside an HTTP
+ * error body. Shown as-is it is a wall of JSON that never says the one thing
+ * that matters, which is that the worker is full. Restate it, then keep the
+ * original underneath so nothing is hidden from a maintainer reading over the
+ * user's shoulder.
+ *
+ * Returns null for anything that is not this failure, so every other error
+ * keeps its existing treatment.
+ */
+const describeResourceShortage = (msg: string): string | null => {
+  if (!/Insufficient resources/i.test(msg)) return null;
+  const wanted: string[] = [];
+  const cpus = msg.match(/'num_cpus':\s*([\d.]+)/);
+  if (cpus && Number(cpus[1]) > 0) {
+    wanted.push(`${cpus[1]} CPU${Number(cpus[1]) === 1 ? '' : 's'}`);
+  }
+  const memory = msg.match(/'memory':\s*(\d+)/);
+  if (memory && Number(memory[1]) > 0) {
+    wanted.push(`${(Number(memory[1]) / 1e9).toFixed(1)} GB of memory`);
+  }
+  const vram = msg.match(/'VRAM_MB':\s*([\d.]+)/);
+  if (vram && Number(vram[1]) > 0) {
+    wanted.push(`${(Number(vram[1]) / 1024).toFixed(1)} GB of GPU memory`);
+  }
+  const asked = wanted.length ? ` It asked for ${wanted.join(', ')}.` : '';
+  return (
+    'The worker does not have enough free capacity to start this ' +
+    `application.${asked} Remove an application you no longer need from the ` +
+    'Setup step to free its share, or restart the worker with a larger ' +
+    'memory or GPU allowance.\n\n' +
+    msg
+  );
+};
+
 const extractRemoteError = (msg: string): string => {
+  const resources = describeResourceShortage(msg);
+  if (resources) return resources;
   if (!msg.includes('Traceback')) return msg;
   const lines = msg.split('\n');
   let last = '';
@@ -811,6 +852,20 @@ const Training: React.FC = () => {
   const [orchestrators, setOrchestrators] = useState<OrchestratorApp[]>([]);
   const [trainers, setTrainers] = useState<TrainerApp[]>([]);
   const [selectedOrchestrator, setSelectedOrchestrator] = useState<string | null>(null);
+
+  // Apps that are up and healthy but belong to someone else. Step 2 can only
+  // offer apps this user deployed, so these are the difference between "there
+  // is nothing running" and "there is nothing running that you may use", two
+  // situations with different answers, which the empty states used to report
+  // with the same sentence.
+  const othersRunningOrchestrators = useMemo(
+    () => orchestrators.filter(o => o.status === 'RUNNING' && !isOwnedByMe(o)).length,
+    [orchestrators, isOwnedByMe]
+  );
+  const othersRunningTrainers = useMemo(
+    () => trainers.filter(t => t.status === 'RUNNING' && !isOwnedByMe(t)).length,
+    [trainers, isOwnedByMe]
+  );
 
   const [showCreateOrchestrator, setShowCreateOrchestrator] = useState(false);
   const [showCreateTrainer, setShowCreateTrainer] = useState(false);
@@ -4185,8 +4240,28 @@ const Training: React.FC = () => {
                     {orchestrators.filter(o => o.status === 'RUNNING' && isOwnedByMe(o)).length === 0 ? (
                       <div className="text-center py-8 text-gray-400">
                         <FaClock className="mx-auto mb-2 opacity-40" size={24} />
-                        <p className="text-sm">No running orchestrators</p>
-                        <p className="text-xs mt-1">Launch one from the Setup step</p>
+                        {/* An orchestrator somebody else started is filtered out
+                            of this list but is still shown, dimmed, on the Setup
+                            step. Saying only "none running" contradicts that,
+                            and the advice that follows it sends the user to
+                            launch a second one onto a worker whose memory the
+                            first one already holds. Name the reason instead. */}
+                        {othersRunningOrchestrators > 0 ? (
+                          <>
+                            <p className="text-sm">No orchestrator you can use</p>
+                            <p className="text-xs mt-1 max-w-xs mx-auto">
+                              {othersRunningOrchestrators === 1
+                                ? 'One orchestrator is running here, started by another user.'
+                                : `${othersRunningOrchestrators} orchestrators are running here, all started by other users.`}
+                              {' '}Launch your own from the Setup step, or ask them to share theirs.
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-sm">No running orchestrators</p>
+                            <p className="text-xs mt-1">Launch one from the Setup step</p>
+                          </>
+                        )}
                       </div>
                     ) : (
                       orchestrators
@@ -4267,8 +4342,26 @@ const Training: React.FC = () => {
                           {selectedOrchestrator && connectedRunningTrainers.length === 0 && remoteRegisteredSvcIds.length === 0 && (
                             <div className="text-center py-8 text-gray-400">
                               <FaClock className="mx-auto mb-2 opacity-40" size={24} />
-                              <p className="text-sm">No running trainers</p>
-                              <p className="text-xs mt-1">Launch trainers from the Setup step</p>
+                              {/* Same reasoning as the orchestrator panel above:
+                                  a trainer another user started is dimmed on the
+                                  Setup step but absent here, so an unexplained
+                                  "none" reads as a contradiction. */}
+                              {othersRunningTrainers > 0 ? (
+                                <>
+                                  <p className="text-sm">No trainer you can use</p>
+                                  <p className="text-xs mt-1 max-w-xs mx-auto">
+                                    {othersRunningTrainers === 1
+                                      ? 'One trainer is running here, started by another user.'
+                                      : `${othersRunningTrainers} trainers are running here, all started by other users.`}
+                                    {' '}Launch your own from the Setup step, or ask them to share theirs.
+                                  </p>
+                                </>
+                              ) : (
+                                <>
+                                  <p className="text-sm">No running trainers</p>
+                                  <p className="text-xs mt-1">Launch trainers from the Setup step</p>
+                                </>
+                              )}
                             </div>
                           )}
                           {selectedOrchestrator && connectedRunningTrainers.map(trainer => {
