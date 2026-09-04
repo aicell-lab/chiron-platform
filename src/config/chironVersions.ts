@@ -59,8 +59,12 @@ export interface VersionFloor {
  * Nothing below MIN_IMAGE_VERSION belongs in this list. Offering a version the
  * same build then badges as out of date is a contradiction the user cannot act
  * on.
+ *
+ * The gap at 0.7.9 is deliberate. That number was published from
+ * chiron-platform only, so there is no chiron-tabula:0.7.9 for a worker to run,
+ * and a version is offerable only once all five images carry it.
  */
-export const CHIRON_IMAGE_VERSIONS = ['0.7.8'];
+export const CHIRON_IMAGE_VERSIONS = ['0.7.10', '0.7.8'];
 
 /** Version the wizard writes into a new worker's compose file. */
 export const CURRENT_IMAGE_VERSION = CHIRON_IMAGE_VERSIONS[0];
