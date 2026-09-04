@@ -994,40 +994,23 @@ ${bin} exec ${gpuFlag}\\
               training page and the instance list, so the highlight reads as
               "this is the model" rather than as a new accent. */}
           <div className="md:col-span-2 lg:col-span-3">
-            <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4">
-              <div>
-                <label className="block text-sm font-medium text-indigo-900 mb-1">Model</label>
-                {/* All four are listed so the roadmap is visible, but only the
-                    ones the platform guarantees can be picked. Hiding the other
-                    three would leave a user with no way to know they are
-                    coming. */}
-                <select value={modelFamily} onChange={(e) => setModelFamily(e.target.value as ChironModelFamily)}
-                  className="w-full px-3 py-2 border border-indigo-300 bg-indigo-50 text-indigo-900 font-medium rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                  {CHIRON_MODEL_FAMILIES.map(family => {
-                    const model = CHIRON_MODELS[family];
-                    const unavailable = model.status !== 'available';
-                    return (
-                      <option key={family} value={family} disabled={unavailable}>
-                        {model.displayName}{unavailable ? ' (coming soon)' : ''}
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-indigo-900 mb-1">Image Version</label>
-                {/* The repository is fixed by the model. This picks the tag,
-                    which is the only part of the image a user chooses. */}
-                <select value={imageVersion} onChange={(e) => setImageVersion(e.target.value)}
-                  className="w-full px-3 py-2 border border-indigo-300 bg-indigo-50 text-indigo-900 font-medium rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                  {CHIRON_IMAGE_VERSIONS.map(version => (
-                    <option key={version} value={version}>
-                      {version}{version === CURRENT_IMAGE_VERSION ? ' (latest)' : ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
+            <label className="block text-sm font-medium text-indigo-900 mb-1">Model</label>
+            {/* All four are listed so the roadmap is visible, but only the
+                ones the platform guarantees can be picked. Hiding the other
+                three would leave a user with no way to know they are
+                coming. */}
+            <select value={modelFamily} onChange={(e) => setModelFamily(e.target.value as ChironModelFamily)}
+              className="w-full px-3 py-2 border border-indigo-300 bg-indigo-50 text-indigo-900 font-medium rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
+              {CHIRON_MODEL_FAMILIES.map(family => {
+                const model = CHIRON_MODELS[family];
+                const unavailable = model.status !== 'available';
+                return (
+                  <option key={family} value={family} disabled={unavailable}>
+                    {model.displayName}{unavailable ? ' (coming soon)' : ''}
+                  </option>
+                );
+              })}
+            </select>
             <p className="text-xs text-gray-500 mt-1">
               {selectedModel.summary}
             </p>
@@ -1300,11 +1283,36 @@ ${bin} exec ${gpuFlag}\\
               </div>
             )}
 
-            {/* There is no Container Image field here. The image follows from
-                the Model and Image Version selects above, which is what keeps
-                the rest of this page honest: the memory default, the trainer
-                artifact and the API version the platform expects are all
-                derived from that one reference. */}
+            {/* There is no Container Image field here, only a version. The
+                repository follows from the Model select above, which is what
+                keeps the rest of this page honest: the memory default, the
+                trainer artifact and the API version the platform expects are
+                all derived from that one reference.
+
+                The version sits under Advanced Options rather than next to
+                Model because the two are not the same kind of choice. Picking
+                a model decides what the worker can train and every user has to
+                make that call. The version defaults to the newest release and
+                is only ever changed to reproduce an earlier run or to stay on
+                a known-good tag, so it belongs with the other fields a user
+                touches when they already know why. */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Image Version</label>
+              <select value={imageVersion} onChange={(e) => setImageVersion(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                {CHIRON_IMAGE_VERSIONS.map(version => (
+                  <option key={version} value={version}>
+                    {version}{version === CURRENT_IMAGE_VERSION ? ' (latest)' : ''}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                Tag of the {selectedModel.displayName} image this worker runs. Defaults to the newest
+                release. Older versions are listed only while the platform still supports them, so a
+                version that disappears from this list is one this build can no longer talk to.
+              </p>
+            </div>
+
 
             {/* Platform override — compose only */}
             {isComposeRuntime() && (
