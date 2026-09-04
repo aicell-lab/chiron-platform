@@ -11,6 +11,7 @@ import FederatedWorldMap, { MapWorker, MapConnection, MapLegend, MapLegendMode }
 import LossChart from './LossChart';
 import {
   ChironImageIdentity,
+  datasetIncompatibleReason,
   DEFAULT_MODEL_FAMILY,
   imageRepository,
   localWeightsLabel,
@@ -1337,6 +1338,44 @@ const Training: React.FC = () => {
       a => (a.manifest?.model_family || DEFAULT_MODEL_FAMILY) === family
     );
   }, [chironModelArtifacts, launchDialogManagerId, workerImageFor]);
+
+  /**
+   * Datasets on the worker this dialog is aimed at, and for each one the
+   * reason the worker's model cannot read it, when there is one.
+   *
+   * Built from `datasetsInfo` rather than from `workerInfo.datasets`, because
+   * only the enriched payload carries `zarr_files` and therefore the column
+   * names the check needs. It arrives one RPC after the bare manifests, so
+   * until it does every dataset reads as compatible, which is the same "unknown
+   * is not a failure" rule the version floors follow. The manifest shown in the
+   * row still comes from whichever payload is in hand, so the list itself never
+   * waits.
+   */
+  const launchDialogDatasets = useMemo(() => {
+    const manager = managers.find(m => m.serviceId === launchDialogManagerId);
+    const enriched = manager?.datasetsInfo;
+    const source = enriched || manager?.workerInfo?.datasets || {};
+    const family = workerImageFor(launchDialogManagerId)?.model_family;
+    return Object.entries(source).map(([datasetId, manifest]: [string, any]) => ({
+      datasetId,
+      manifest,
+      incompatibleReason: datasetIncompatibleReason(family, manifest?.zarr_files),
+    }));
+  }, [managers, launchDialogManagerId, workerImageFor]);
+
+  /**
+   * Selected datasets the worker's model cannot read. A dataset can be ticked
+   * before `datasetsInfo` lands and turn out to be unreadable once it does, so
+   * the Start Trainer button checks the selection rather than trusting that a
+   * disabled checkbox was never ticked.
+   */
+  const incompatibleSelectedDatasets = useMemo(
+    () =>
+      launchDialogDatasets.filter(
+        d => d.incompatibleReason && newTrainerDatasets.includes(d.datasetId)
+      ),
+    [launchDialogDatasets, newTrainerDatasets]
+  );
 
   const userWorkspace = server?.config?.workspace as string | undefined;
 
@@ -5087,18 +5126,26 @@ const Training: React.FC = () => {
                     <label className="block text-xs font-semibold text-gray-700 mb-1.5">Datasets <span className="text-red-500">*</span></label>
                     <div className="max-h-44 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-50">
                       {(() => {
-                        const manager = managers.find(m => m.serviceId === launchDialogManagerId);
-                        const datasets = manager?.workerInfo?.datasets || {};
-                        const entries = Object.entries(datasets);
-                        if (entries.length === 0) return <p className="text-sm text-gray-400 text-center py-4">No datasets available on this worker</p>;
-                        return entries.map(([datasetId, manifest]: [string, any]) => {
+                        if (launchDialogDatasets.length === 0) return <p className="text-sm text-gray-400 text-center py-4">No datasets available on this worker</p>;
+                        return launchDialogDatasets.map(({ datasetId, manifest, incompatibleReason }) => {
                           const hasAccess = hasDatasetAccess(manifest);
+                          // Both reasons a dataset cannot be trained on are
+                          // stated in the row rather than only disabling it, so
+                          // the operator is not left guessing which of the two
+                          // greyed-out datasets is which.
+                          const usable = hasAccess && !incompatibleReason;
                           return (
-                            <label key={datasetId} className={`flex items-center gap-2.5 px-3 py-2.5 ${hasAccess ? 'hover:bg-gray-50 cursor-pointer' : 'opacity-50 cursor-not-allowed bg-red-50'}`}>
-                              <input type="checkbox" checked={newTrainerDatasets.includes(datasetId)} onChange={e => { e.target.checked ? setNewTrainerDatasets(p => [...p, datasetId]) : setNewTrainerDatasets(p => p.filter(d => d !== datasetId)); }} disabled={!hasAccess} className="accent-emerald-600 flex-shrink-0" />
+                            <label key={datasetId} className={`flex items-start gap-2.5 px-3 py-2.5 ${usable ? 'hover:bg-gray-50 cursor-pointer' : 'opacity-70 cursor-not-allowed bg-red-50'}`}>
+                              <input type="checkbox" checked={newTrainerDatasets.includes(datasetId)} onChange={e => { e.target.checked ? setNewTrainerDatasets(p => [...p, datasetId]) : setNewTrainerDatasets(p => p.filter(d => d !== datasetId)); }} disabled={!usable} className="accent-emerald-600 flex-shrink-0 mt-0.5" />
                               <div className="flex-1 min-w-0">
                                 <span className="text-sm text-gray-800">{manifest.name || datasetId}</span>
                                 {!hasAccess && <span className="ml-2 text-xs text-red-500">(No access)</span>}
+                                {hasAccess && incompatibleReason && (
+                                  <>
+                                    <span className="ml-2 text-xs text-red-500">(Not readable by this model)</span>
+                                    <p className="mt-1 text-xs text-red-700">{incompatibleReason}</p>
+                                  </>
+                                )}
                               </div>
                             </label>
                           );
@@ -5447,12 +5494,14 @@ const Training: React.FC = () => {
                       );
                     })()}
                   </div>
-                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainerFor(launchDialogManagerId) || newTrainerDatasets.length === 0 || !workerImageFor(launchDialogManagerId)?.trainer_artifact || !!workerImageOutdatedFor(launchDialogManagerId)} title={
+                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainerFor(launchDialogManagerId) || newTrainerDatasets.length === 0 || incompatibleSelectedDatasets.length > 0 || !workerImageFor(launchDialogManagerId)?.trainer_artifact || !!workerImageOutdatedFor(launchDialogManagerId)} title={
                     !workerImageFor(launchDialogManagerId)?.trainer_artifact
                       ? "This worker's image does not declare a model, so there is no trainer to deploy"
                       : workerImageOutdatedFor(launchDialogManagerId)
                         ? `This worker's image is older than Chiron supports. ${imageUpgradeInstruction(workerImageOutdatedFor(launchDialogManagerId)!.floor)}`
-                        : undefined
+                        : incompatibleSelectedDatasets.length > 0
+                          ? incompatibleSelectedDatasets[0].incompatibleReason
+                          : undefined
                   } className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                     {isCreatingTrainerFor(launchDialogManagerId) ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Trainer ({newTrainerDatasets.length} dataset{newTrainerDatasets.length !== 1 ? 's' : ''})</>}
                   </button>

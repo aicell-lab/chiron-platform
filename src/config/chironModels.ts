@@ -62,6 +62,18 @@ export interface ChironModel {
   /** Alias of the published foundation checkpoint to surface first in the
    *  checkpoint picker, if one exists for this model yet. */
   foundationAlias?: string;
+  /** Column under `var/` this model needs in order to find its gene panel in
+   *  a prepared dataset. Three of the four models match genes by name, and
+   *  they disagree on which name: HGNC symbols in `feature_name` for scGPT
+   *  and scFoundation, Ensembl ids in `feature_id` for Geneformer. Tabula
+   *  reads the binned layer positionally and needs neither, so it leaves this
+   *  undefined, which reads as "any prepared dataset will do".
+   *
+   *  The platform compares this against the `var_columns` a worker reports
+   *  per zarr store, so it can say before a deploy that a dataset and a model
+   *  do not fit. Without it the mismatch only surfaces inside the trainer,
+   *  minutes after the operator picked the dataset. */
+  requiredVarColumn?: string;
   /** Measured GPU memory at a given batch size, above the trainer's idle
    *  baseline. Reference for the launch dialog's max-batch-size field. */
   referenceMemory: { batchSize: number; gb: number }[];
@@ -134,6 +146,9 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     sharedWeights: 'transformer trunk',
     localWeights: 'tissue-specific embedder, batch norm and heads',
     foundationAlias: 'tabula-foundation',
+    // No requiredVarColumn. Tabula reads the binned layer by position, so it
+    // trains on any store the data server has prepared, whatever var/ holds.
+
     // Measured on a 24 GB RTX 3090 with the demo blood dataset. Scaling is
     // super-linear, so the in-between sizes are not extrapolated.
     referenceMemory: [
@@ -156,6 +171,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     workerMemoryGb: WORKER_RAM_GB.scgpt,
     sharedWeights: 'gene embedding, value encoder and transformer',
     localWeights: 'expression decoder head',
+    requiredVarColumn: 'feature_name',
     // Only the batch size validated on a 24 GB RTX 3090 so far. The memory
     // curve is not measured yet, so no other sizes are quoted.
     referenceMemory: [{ batchSize: 32, gb: 0 }],
@@ -173,6 +189,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     workerMemoryGb: WORKER_RAM_GB.geneformer,
     sharedWeights: 'token embedding and encoder stack',
     localWeights: 'masked-LM head',
+    requiredVarColumn: 'feature_id',
     referenceMemory: [{ batchSize: 16, gb: 0 }],
     badgeClass: 'bg-amber-50 text-amber-700 border-amber-200',
   },
@@ -188,6 +205,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     workerMemoryGb: WORKER_RAM_GB.scfoundation,
     sharedWeights: 'value embedding, gene position embedding and encoder',
     localWeights: 'value-regression head',
+    requiredVarColumn: 'feature_name',
     referenceMemory: [{ batchSize: 8, gb: 0 }],
     badgeClass: 'bg-rose-50 text-rose-700 border-rose-200',
   },
@@ -281,3 +299,72 @@ export const sharedWeightsLabel = (
 export const localWeightsLabel = (
   family: string | undefined | null
 ): string | undefined => getChironModel(family)?.localWeights;
+
+/**
+ * One zarr store as a worker reports it, reduced to the fields this file
+ * reasons about. The manager sends more (cell and gene counts, HVG and binning
+ * versions), and the rest of the UI reads those from the same objects.
+ */
+export interface ZarrStoreInfo {
+  name?: string;
+  /** Column names present under `var/`. Absent on a manager older than
+   *  0.2.14, which is the case this helper treats as "unknown". */
+  var_columns?: string[];
+}
+
+/**
+ * Why the selected model cannot train on a dataset, or undefined when it can,
+ * or when there is not enough information to say.
+ *
+ * A dataset is a directory of zarr stores and a trainer reads all of them, so
+ * one store without the model's gene-panel column is enough to fail the run.
+ * The failure happens inside the trainer, roughly two minutes after the
+ * operator picked the dataset and pressed the button, which is far too late to
+ * be useful. This is the same fact, stated while the dataset is still being
+ * chosen.
+ *
+ * Silent in three cases, all deliberate, and all following the rule
+ * `chironVersions.ts` sets for version floors: unknown is never treated as
+ * incompatible.
+ *
+ *   - The model needs no named column (Tabula).
+ *   - The worker sent no `zarr_files` at all, so nothing is known about the
+ *     dataset's contents.
+ *   - No store reports `var_columns`, which is what a manager below 0.2.14
+ *     looks like. Blocking there would lock an operator out of a dataset the
+ *     trainer can read perfectly well, on no evidence.
+ *
+ * A worker that reports some stores with the column list and some without is
+ * judged on the ones it did report. That is the shape a partially readable
+ * data directory takes, and the stores it could read are the honest evidence.
+ */
+export const datasetIncompatibleReason = (
+  family: string | undefined | null,
+  zarrFiles: ZarrStoreInfo[] | undefined | null
+): string | undefined => {
+  const model = getChironModel(family);
+  const column = model?.requiredVarColumn;
+  if (!model || !column) return undefined;
+  if (!Array.isArray(zarrFiles) || zarrFiles.length === 0) return undefined;
+
+  const known = zarrFiles.filter(f => Array.isArray(f?.var_columns));
+  if (known.length === 0) return undefined;
+
+  const missing = known.filter(f => !f.var_columns!.includes(column));
+  if (missing.length === 0) return undefined;
+
+  // "This dataset" only when every store in it was reported and every one is
+  // missing the column. A store that reported nothing might well carry it, and
+  // a blanket claim about the dataset would be a guess presented as a fact.
+  const where =
+    missing.length === zarrFiles.length
+      ? 'this dataset does not carry it'
+      : `${missing.map(f => f.name || 'one store').join(', ')} ${
+          missing.length === 1 ? 'does' : 'do'
+        } not carry it`;
+  return (
+    `${model.displayName} matches genes by name and reads them from ` +
+    `var/${column}, and ${where}. Prepare the dataset with that column, or ` +
+    `train it with a model that does not need one.`
+  );
+};
