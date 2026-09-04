@@ -431,6 +431,35 @@ def _ensure_binning(zarr_path: Path, logger) -> bool:
     return True
 
 
+def _sparse_column_ids(X):
+    """The column each stored value of a sparse ``X`` belongs to, or None.
+
+    Duck-typed rather than isinstance-checked so this module keeps importing
+    numpy and nothing else. Returns None for anything that is not a compressed
+    sparse matrix, which the caller then treats as dense.
+
+    Args:
+        X: candidate expression matrix.
+
+    Returns:
+        int array of length nnz, aligned with ``X.data``, or None.
+    """
+    fmt = getattr(X, "format", None)
+    if fmt not in ("csr", "csc"):
+        return None
+    if not all(hasattr(X, member) for member in ("data", "indices", "indptr")):
+        return None
+
+    if fmt == "csr":
+        # CSR indices are already column indices.
+        return np.asarray(X.indices, dtype=np.intp)
+
+    # CSC groups values by column, so the column is the position in indptr.
+    # X.indices holds row indices here and is not what we want.
+    indptr = np.asarray(X.indptr, dtype=np.intp)
+    return np.repeat(np.arange(len(indptr) - 1, dtype=np.intp), np.diff(indptr))
+
+
 def _compute_hvg_score(X) -> np.ndarray:
     """Per-gene over-dispersion score (variance / mean) for ranking.
 
@@ -441,23 +470,48 @@ def _compute_hvg_score(X) -> np.ndarray:
 
     Higher score = more variable.
 
+    A sparse X is scored from its stored values alone, without ever building the
+    dense matrix. Both moments the score needs are per-column sums, and an
+    implicit zero adds nothing to either one, only to the divisor. That makes
+    the cost proportional to the stored values rather than to cells x genes,
+    which is the difference between preparing a real full-panel store on a
+    normal machine and not being able to prepare it at all. The numbers are the
+    same ones the dense path produced, so nothing already ranked needs redoing.
+
     Args:
-        X: (n_cells, n_genes) array-like. May be scipy.sparse or numpy. Will be
-           densified into a float64 working copy.
+        X: (n_cells, n_genes) array-like. A scipy CSR or CSC matrix is read
+           through its stored arrays; anything else is treated as dense.
 
     Returns:
         float32 array of length n_genes.
     """
-    if hasattr(X, "toarray"):
-        X = X.toarray()
-    X = np.asarray(X, dtype=np.float64)
-    if X.ndim != 2:
-        raise ValueError(f"Expected 2D expression matrix, got shape {X.shape}")
-    if X.shape[0] == 0 or X.shape[1] == 0:
-        return np.zeros(X.shape[1], dtype=np.float32)
+    columns = _sparse_column_ids(X)
+    if columns is not None:
+        n_cells, n_genes = int(X.shape[0]), int(X.shape[1])
+        if n_cells == 0 or n_genes == 0:
+            return np.zeros(n_genes, dtype=np.float32)
 
-    means = X.mean(axis=0)
-    vars_ = X.var(axis=0)
+        # float64 throughout: the stored values are float32, and E[X^2] on a
+        # count matrix is large enough that accumulating it at float32 would
+        # lose digits the subtraction below then depends on.
+        values = np.asarray(X.data, dtype=np.float64)
+        total = np.bincount(columns, weights=values, minlength=n_genes)
+        total_sq = np.bincount(columns, weights=values * values, minlength=n_genes)
+
+        means = total / n_cells
+        # Population variance (ddof=0), matching what np.var returned here.
+        # Rounding can push an all-equal column a hair below zero.
+        vars_ = np.maximum(total_sq / n_cells - means * means, 0.0)
+    else:
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim != 2:
+            raise ValueError(f"Expected 2D expression matrix, got shape {X.shape}")
+        if X.shape[0] == 0 or X.shape[1] == 0:
+            return np.zeros(X.shape[1], dtype=np.float32)
+
+        means = X.mean(axis=0)
+        vars_ = X.var(axis=0)
+
     score = np.where(means > 1e-12, vars_ / (means + 1e-12), 0.0)
     return score.astype(np.float32)
 
