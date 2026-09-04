@@ -78,6 +78,15 @@ interface TrainerParams {
       max_batch_size: number | null;
     }[];
   };
+  /**
+   * False when the orchestrator could not read the registered trainer's
+   * properties, reported by chiron-orchestrator 0.4.2. The fit and evaluate
+   * sections then carry only the two scaffold parameters and no batch size
+   * default, which looks exactly like a model that declares nothing. Absent
+   * when an older orchestrator answers, so only an explicit `false` is
+   * treated as degraded.
+   */
+  hyperparameters_available?: boolean;
 }
 
 interface ArtifactEntry {
@@ -990,6 +999,25 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
           </div>
         )}
       </div>
+
+      {/* The orchestrator caches each trainer's properties once, when the
+          trainer registers, and a failed fetch there is only logged. The two
+          sections below are still rendered because every field they do carry
+          is valid and an omitted key falls back to the model's own default at
+          the trainer. What is not acceptable is letting that form pass for the
+          model's full set of parameters, which is what it looks like: same
+          layout, same headings, just missing every knob the model declares. */}
+      {params && params.hyperparameters_available === false && (
+        <div className="mb-5 text-xs bg-amber-50 border border-amber-200 rounded-xl p-3 text-amber-800">
+          <p className="font-semibold mb-1">Showing partial parameters</p>
+          <p>
+            The orchestrator could not read this trainer's parameter list, so only the
+            batch size and batch limits are offered below. Anything left blank uses the
+            model's own default. Reselect the trainer to have the orchestrator read it
+            again.
+          </p>
+        </div>
+      )}
 
       {/* Fit parameters */}
       {renderSection(

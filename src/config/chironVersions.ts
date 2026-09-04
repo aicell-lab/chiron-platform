@@ -95,12 +95,13 @@ export const MIN_APP_VERSIONS: Record<string, VersionFloor> = {
       'mismatched trainer from being deployed onto it.',
   },
   'chiron-orchestrator': {
-    minimum: '0.4.0',
+    minimum: '0.4.2',
     reason:
-      'Every Chiron trainer now takes its model\'s hyperparameters as one ' +
-      'config argument, so the platform can drive any of them the same way. ' +
-      'An orchestrator below 0.4.0 still sends each setting as its own ' +
-      'argument, which a current trainer rejects at the first round.',
+      'An orchestrator below 0.4.2 files each trainer under the exact service ' +
+      'id the caller used, and this page addresses a trainer by an id that ' +
+      'survives a worker restart rather than by the one it registered under. ' +
+      'The two never match, so the training form loses every parameter the ' +
+      'model declares and deselecting a trainer fails.',
   },
   // The four trainers moved to the shared API in the same release, so they
   // share a floor and a reason. They are listed separately rather than
