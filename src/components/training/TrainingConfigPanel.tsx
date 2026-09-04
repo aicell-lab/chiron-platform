@@ -958,7 +958,13 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
                         )}
                         {fullModels.length > 0 && (
                           <>
-                            <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">Full Tabula Models</div>
+                            {/* Named after whichever model this federation is
+                                training. The list is already filtered to that
+                                model's family, so a fixed "Tabula" here labelled
+                                every other model's checkpoints as Tabula's. */}
+                            <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">
+                              {model?.display_name ? `Full ${model.display_name} Models` : 'Full Models'}
+                            </div>
                             {fullModels.map(a => {
                               const label = a.manifest?.name || a.alias || a.id;
                               const sub = fmt(a);
