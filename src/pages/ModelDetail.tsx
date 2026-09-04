@@ -128,6 +128,15 @@ const ModelDetail: React.FC = () => {
     ? (manifest.tissues as string[])
     : undefined;
   const isGlobalTransformer = manifest.global_transformer === true;
+  // Architecture cards (chiron-architectures) carry a `chiron` block;
+  // checkpoints in chiron-models do not. The two share this page but not what
+  // is worth showing on it. An architecture card is editorial: a name, a cover
+  // and the documentation below. Its artifact id, owner, timestamps, attached
+  // files (a cover image and the markdown already rendered) and raw manifest
+  // are platform bookkeeping that says nothing to a visitor reading about the
+  // model. A checkpoint keeps all of it, because there the files are the
+  // weights and the provenance is the point.
+  const isArchitecture = !!manifest.chiron;
   // Publish state lives on `manifest.status`:
   //   • "in_review"        — uploaded from the trainer/orchestrator, hidden
   //                          from the public Model Hub, awaiting owner review.
@@ -361,30 +370,32 @@ const ModelDetail: React.FC = () => {
             )}
           </div>
 
-          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-gray-600">
-            <div>
-              <span className="font-medium text-gray-700">Artifact ID:</span>{' '}
-              <code className="text-xs bg-gray-50 px-1.5 py-0.5 rounded">{artifact.id}</code>
+          {!isArchitecture && (
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-gray-600">
+              <div>
+                <span className="font-medium text-gray-700">Artifact ID:</span>{' '}
+                <code className="text-xs bg-gray-50 px-1.5 py-0.5 rounded">{artifact.id}</code>
+              </div>
+              {(manifest.author || artifact.created_by) && (
+                <div>
+                  <span className="font-medium text-gray-700">Created by:</span>{' '}
+                  {manifest.author || artifact.created_by}
+                </div>
+              )}
+              {(manifest.created_at || artifact.created_at) && (
+                <div>
+                  <span className="font-medium text-gray-700">Created:</span>{' '}
+                  {formatDate(manifest.created_at || artifact.created_at)}
+                </div>
+              )}
+              {artifact.last_modified && (
+                <div>
+                  <span className="font-medium text-gray-700">Last modified:</span>{' '}
+                  {formatDate(artifact.last_modified)}
+                </div>
+              )}
             </div>
-            {(manifest.author || artifact.created_by) && (
-              <div>
-                <span className="font-medium text-gray-700">Created by:</span>{' '}
-                {manifest.author || artifact.created_by}
-              </div>
-            )}
-            {(manifest.created_at || artifact.created_at) && (
-              <div>
-                <span className="font-medium text-gray-700">Created:</span>{' '}
-                {formatDate(manifest.created_at || artifact.created_at)}
-              </div>
-            )}
-            {artifact.last_modified && (
-              <div>
-                <span className="font-medium text-gray-700">Last modified:</span>{' '}
-                {formatDate(artifact.last_modified)}
-              </div>
-            )}
-          </div>
+          )}
         </div>
       </div>
 
@@ -399,39 +410,41 @@ const ModelDetail: React.FC = () => {
         </div>
       )}
 
-      <div className="mt-6 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-200">
-          <h2 className="text-lg font-medium text-gray-900">Files</h2>
-        </div>
-        {files.length === 0 ? (
-          <div className="px-6 py-6 text-sm text-gray-500">No files attached.</div>
-        ) : (
-          <ul className="divide-y divide-gray-100">
-            {files.map((f) => (
-              <li key={f.name} className="px-6 py-3 flex items-center justify-between">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-gray-900 truncate">{f.name}</div>
-                  <div className="text-xs text-gray-500">
-                    {formatBytes(f.size)}
-                    {f.last_modified && ` · ${formatDate(f.last_modified)}`}
+      {!isArchitecture && (
+        <div className="mt-6 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-200">
+            <h2 className="text-lg font-medium text-gray-900">Files</h2>
+          </div>
+          {files.length === 0 ? (
+            <div className="px-6 py-6 text-sm text-gray-500">No files attached.</div>
+          ) : (
+            <ul className="divide-y divide-gray-100">
+              {files.map((f) => (
+                <li key={f.name} className="px-6 py-3 flex items-center justify-between">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-gray-900 truncate">{f.name}</div>
+                    <div className="text-xs text-gray-500">
+                      {formatBytes(f.size)}
+                      {f.last_modified && ` · ${formatDate(f.last_modified)}`}
+                    </div>
                   </div>
-                </div>
-                <a
-                  href={getArtifactFileUrl(artifact.id, f.name)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
-                >
-                  <ArrowDownTrayIcon className="w-4 h-4 mr-1" />
-                  Download
-                </a>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+                  <a
+                    href={getArtifactFileUrl(artifact.id, f.name)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+                  >
+                    <ArrowDownTrayIcon className="w-4 h-4 mr-1" />
+                    Download
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
-      {otherEntries.length > 0 && (
+      {!isArchitecture && otherEntries.length > 0 && (
         <div className="mt-6 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-200">
             <h2 className="text-lg font-medium text-gray-900">Manifest</h2>
