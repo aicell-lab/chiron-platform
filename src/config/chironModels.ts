@@ -246,9 +246,13 @@ export const getChironModel = (
 /**
  * Display name for a worker's model: the registry's name when the family is
  * known, otherwise whatever the image itself said.
+ *
+ * Takes a partial identity so a caller that holds only the family and name can
+ * use it. A run artifact records those two and nothing else, and it needs the
+ * same answer a worker's full identity would give.
  */
 export const modelDisplayName = (
-  identity: ChironImageIdentity | undefined | null
+  identity: Partial<ChironImageIdentity> | undefined | null
 ): string | undefined => {
   if (!identity) return undefined;
   return (
