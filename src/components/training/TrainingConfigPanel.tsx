@@ -38,6 +38,13 @@ const stepPowerOfTwo = (value: number | null, direction: 1 | -1): number => {
 // at the bottom of Advanced Parameters so the model's own settings come first.
 const TRAILING_ADVANCED_PARAMS = ['limit_train_batches', 'limit_val_batches'];
 
+// The outline and the ruled header that mark off one run phase's parameters
+// from the next. Shared so the two sections cannot drift apart.
+const SECTION_BOX = 'mb-5 rounded-xl border border-gray-200 p-4';
+const SECTION_HEADING =
+  'text-xs font-semibold text-gray-700 uppercase tracking-wide mb-3 pb-2 ' +
+  'border-b border-gray-100';
+
 // Declaration order otherwise, so a trainer stays in charge of how its own
 // parameters are grouped on screen.
 const orderAdvanced = (
@@ -632,10 +639,16 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     advancedExpanded: boolean,
     setAdvancedExpanded: (expanded: boolean) => void
   ) => {
+    // Fit and Evaluate carry overlapping field names, batch size in both and a
+    // limit in both, so two sections running together under faint headings read
+    // as one long list with a repeat in the middle. Each gets its own outline
+    // and its own ruled header, which is the panel's existing way of separating
+    // a group, so which run phase a field belongs to is legible without
+    // tracing back up to the last heading.
     if (!section) {
       return (
-        <div className="mb-5">
-          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">{title}</h4>
+        <div className={SECTION_BOX}>
+          <h4 className={SECTION_HEADING}>{title}</h4>
           <p className="text-xs text-gray-400 italic">No parameters to configure</p>
         </div>
       );
@@ -645,8 +658,8 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
     const hasAdvanced = section.advanced && Object.keys(section.advanced).length > 0;
 
     return (
-      <div className="mb-5">
-        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">{title}</h4>
+      <div className={SECTION_BOX}>
+        <h4 className={SECTION_HEADING}>{title}</h4>
 
         {hasStandard ? (
           <div className="mb-3">
