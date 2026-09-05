@@ -95,49 +95,57 @@ export const MIN_APP_VERSIONS: Record<string, VersionFloor> = {
       'mismatched trainer from being deployed onto it.',
   },
   'chiron-orchestrator': {
-    minimum: '0.4.2',
+    minimum: '0.4.3',
     reason:
-      'An orchestrator below 0.4.2 files each trainer under the exact service ' +
-      'id the caller used, and this page addresses a trainer by an id that ' +
-      'survives a worker restart rather than by the one it registered under. ' +
-      'The two never match, so the training form loses every parameter the ' +
-      'model declares and deselecting a trainer fails.',
+      'From 0.4.3 the orchestrator drops a site whose numbers have gone bad ' +
+      'instead of averaging it in. Averaging is a weighted sum, so one such ' +
+      'site ruins the round for every institution however small its share of ' +
+      'the data, and the ruined model is then sent back to all of them. Below ' +
+      '0.4.3 that happens with no error and the run still reports success.',
   },
   // The four trainers moved to the shared API in the same release, so they
   // share a floor and a reason. They are listed separately rather than
   // collapsed, because a floor is keyed by artifact alias and the next reason
   // to raise one will not apply to all four at once.
   'tabula-trainer': {
-    minimum: '0.6.0',
+    minimum: '0.6.2',
     reason:
-      'From 0.6.0 a trainer takes its model\'s hyperparameters as one config ' +
-      'argument and publishes the same API as every other Chiron trainer. An ' +
-      'older one expects each setting as its own argument and fails at the ' +
-      'first round of a run started by a current orchestrator.',
+      'From 0.6.2 a trainer refuses a global model whose numbers have gone ' +
+      'bad, and restores its own weights instead of keeping the result of a ' +
+      'round that diverged. An older one keeps the broken result, and since ' +
+      'federated updates only cover the shared layers, nothing can repair it ' +
+      'afterwards: that site returns nothing usable for good and drops out of ' +
+      'every later round.',
   },
   'scgpt-trainer': {
-    minimum: '0.2.0',
+    minimum: '0.2.2',
     reason:
-      'From 0.2.0 a trainer takes its model\'s hyperparameters as one config ' +
-      'argument and publishes the same API as every other Chiron trainer. An ' +
-      'older one expects each setting as its own argument and fails at the ' +
-      'first round of a run started by a current orchestrator.',
+      'From 0.2.2 a trainer refuses a global model whose numbers have gone ' +
+      'bad, and restores its own weights instead of keeping the result of a ' +
+      'round that diverged. An older one keeps the broken result, and since ' +
+      'federated updates only cover the shared layers, nothing can repair it ' +
+      'afterwards: that site returns nothing usable for good and drops out of ' +
+      'every later round.',
   },
   'geneformer-trainer': {
-    minimum: '0.2.0',
+    minimum: '0.2.2',
     reason:
-      'From 0.2.0 a trainer takes its model\'s hyperparameters as one config ' +
-      'argument and publishes the same API as every other Chiron trainer. An ' +
-      'older one expects each setting as its own argument and fails at the ' +
-      'first round of a run started by a current orchestrator.',
+      'From 0.2.2 a trainer refuses a global model whose numbers have gone ' +
+      'bad, and restores its own weights instead of keeping the result of a ' +
+      'round that diverged. An older one keeps the broken result, and since ' +
+      'federated updates only cover the shared layers, nothing can repair it ' +
+      'afterwards: that site returns nothing usable for good and drops out of ' +
+      'every later round.',
   },
   'scfoundation-trainer': {
-    minimum: '0.2.0',
+    minimum: '0.2.2',
     reason:
-      'From 0.2.0 a trainer takes its model\'s hyperparameters as one config ' +
-      'argument and publishes the same API as every other Chiron trainer. An ' +
-      'older one expects each setting as its own argument and fails at the ' +
-      'first round of a run started by a current orchestrator.',
+      'From 0.2.2 a trainer refuses a global model whose numbers have gone ' +
+      'bad, and restores its own weights instead of keeping the result of a ' +
+      'round that diverged. An older one keeps the broken result, and since ' +
+      'federated updates only cover the shared layers, nothing can repair it ' +
+      'afterwards: that site returns nothing usable for good and drops out of ' +
+      'every later round.',
   },
 };
 
