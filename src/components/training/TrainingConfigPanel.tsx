@@ -29,6 +29,28 @@ const stepPowerOfTwo = (value: number | null, direction: 1 | -1): number => {
   return Math.max(1, 2 ** next);
 };
 
+// The two advanced fields that belong to the platform rather than to a model.
+// Every Chiron trainer takes them, because the scaffold owns them as reserved
+// Lightning arguments, so they read as boilerplate next to the settings that
+// are actually specific to the model in front of you. The orchestrator hands
+// them over in whatever order it built the dict, which for Tabula puts
+// limit_train_batches above the five parameters the model declares. Keep them
+// at the bottom of Advanced Parameters so the model's own settings come first.
+const TRAILING_ADVANCED_PARAMS = ['limit_train_batches', 'limit_val_batches'];
+
+// Declaration order otherwise, so a trainer stays in charge of how its own
+// parameters are grouped on screen.
+const orderAdvanced = (
+  advanced: Record<string, ParamConfig>
+): [string, ParamConfig][] => {
+  const entries = Object.entries(advanced);
+  const rank = (key: string) => {
+    const index = TRAILING_ADVANCED_PARAMS.indexOf(key);
+    return index === -1 ? 0 : index + 1;
+  };
+  return entries.sort((a, b) => rank(a[0]) - rank(b[0]));
+};
+
 interface ParamConfig {
   type: string;
   default: any;
@@ -648,7 +670,7 @@ const TrainingConfigPanel: React.FC<TrainingConfigPanelProps> = ({
 
             {advancedExpanded && (
               <div className="ml-3 pl-3 border-l-2 border-gray-100">
-                {Object.entries(section.advanced).map(([key, config]) =>
+                {orderAdvanced(section.advanced).map(([key, config]) =>
                   renderInput(key, config, values[key], onChange)
                 )}
               </div>
