@@ -13,6 +13,7 @@
 // rewritten as kwarg objects at the call site.
 
 import { useHyphaStore } from '../store/hyphaStore';
+import { logger } from './logger';
 
 const HYPHA_BASE = 'https://hypha.aicell.io';
 
@@ -102,6 +103,16 @@ export async function callHyphaService<T = any>(
     else opts.signal.addEventListener('abort', () => ctrl.abort(opts.signal!.reason), { once: true });
   }
 
+  // Argument names only, never their values: kwargs routinely carry dataset
+  // ids and paths that belong to the operator, not to us.
+  logger.debug('hyphaHttp', 'call', {
+    serviceId,
+    method,
+    args: Object.keys(kwargs),
+    authenticated: !!token,
+  });
+  const startedAt = Date.now();
+
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -111,12 +122,32 @@ export async function callHyphaService<T = any>(
     });
     if (!res.ok) {
       const text = await res.text();
+      logger.error('hyphaHttp', 'call failed', {
+        serviceId,
+        method,
+        status: res.status,
+        ms: Date.now() - startedAt,
+        body: text.slice(0, 1000),
+      });
       throw new HyphaHttpError(serviceId, method, res.status, text);
     }
+    logger.debug('hyphaHttp', 'call ok', { serviceId, method, ms: Date.now() - startedAt });
     // Most Chiron methods return JSON; a few return None (Python) → null.
     const text = await res.text();
     if (!text) return undefined as unknown as T;
     return JSON.parse(text) as T;
+  } catch (error) {
+    // A transport-level failure (abort, timeout, DNS, CORS) never reaches the
+    // !res.ok branch above, and those are precisely the failures a reporter
+    // describes as "it just hung".
+    if (!(error instanceof HyphaHttpError)) {
+      logger.error('hyphaHttp', 'call errored', {
+        serviceId,
+        method,
+        ms: Date.now() - startedAt,
+      }, error);
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -147,9 +178,19 @@ export async function listHyphaServices(
     const res = await fetch(url, { method: 'GET', headers, signal: ctrl.signal });
     if (!res.ok) {
       const text = await res.text();
+      logger.error('hyphaHttp', 'list_services failed', {
+        workspace,
+        status: res.status,
+        body: text.slice(0, 1000),
+      });
       throw new HyphaHttpError(`${workspace}/<list>`, 'list_services', res.status, text);
     }
-    return await res.json();
+    const services = await res.json();
+    logger.debug('hyphaHttp', 'list_services ok', {
+      workspace,
+      count: Array.isArray(services) ? services.length : undefined,
+    });
+    return services;
   } finally {
     clearTimeout(timer);
   }

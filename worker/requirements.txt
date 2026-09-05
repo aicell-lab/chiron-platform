@@ -1,0 +1,52 @@
+# The Python dependencies of chiron-base, plus constraints we mean to enforce.
+#
+# Every Chiron model image is built on chiron-base, so this is the shared floor:
+# what the data server needs, and what every trainer can assume is already
+# present. A model's own dependencies belong in that model's Dockerfile, not
+# here.
+#
+# This file used to be a frozen `pip freeze` dump of the whole transitive closure.
+# That is why it carried stale pins like fastapi==0.106.0, anyio==3.7.1,
+# urllib3==1.26.18 and packaging==22.0, an ancient FastAPI/starlette/anyio
+# triangle that conflicts with modern Ray Serve, pinned for no reason anyone
+# recorded. Everything not listed here (scipy, tqdm, torchmetrics, einops,
+# joblib, typing-extensions, the aiohttp chain, ...) is resolved transitively by
+# pip and no longer hand-maintained.
+#
+# torch, anndata, flash-attn and bioengine are installed in their own Dockerfile
+# layers so they cache independently. See the Dockerfile for those pins.
+#
+# Not listed on purpose: mpi4py and matplotlib. They are imported only by
+# Tabula's legacy standalone MPI path, which the Chiron federated stack does not
+# use and which has never been installable in this image. Install them by hand
+# in a model image if you need that path.
+
+flwr==1.22.0
+numpy==1.26.4              # pinned: numpy 2.x needs scikit-learn>=1.5 and a numba/umap-learn check
+pytorch-lightning>=2.5,<3  # 2.5+ for torch 2.6 support (2.2.0 predates the torch.load and AMP changes)
+pyyaml==6.0.2
+scikit-learn>=1.3,<2       # train_test_split only
+# chiron.datasets, for the dataset-card UMAP. Must be >=0.5.8: 0.5.7 calls
+# sklearn's check_array(force_all_finite=...), an argument scikit-learn renamed
+# to ensure_all_finite in 1.6 and removed in 1.8. Since scikit-learn is no
+# longer pinned to 1.3.0 the old umap fails at fit time with
+# "check_array() got an unexpected keyword argument 'force_all_finite'",
+# which the data server catches and logs as "UMAP skipped", leaving every
+# dataset card without its embedding.
+umap-learn>=0.5.12,<0.6
+zarr==3.1.3
+
+# A constraint, not a direct import. flwr 1.22 caps protobuf strictly below 5.0
+# and Ray Serve 2.55 trips on protobuf 7's removed `FieldDescriptor.label`, so
+# 4.25.x is the only mutually compatible band. The Dockerfile re-applies this
+# after bioengine pulls in the protobuf-7 chain via google-api-core.
+protobuf>=4.25.5,<5
+
+# Also a constraint. googleapis-common-protos 1.75.2 ships a `google/rpc/
+# code_pb2.py` regenerated against protobuf 5, importing
+# `google.protobuf.runtime_version`, which does not exist below protobuf 5.27.
+# Under the pin above that import raises, opencensus fails to load and
+# `ray start` exits 1. 1.75.0 is the last release generated before
+# `runtime_version` and the last that declares `protobuf>=4.25.8` itself, hence
+# `<1.75.1`. Both constraints go away together once flwr accepts protobuf 5.
+googleapis-common-protos<1.75.1

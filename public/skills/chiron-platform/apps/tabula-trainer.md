@@ -79,8 +79,8 @@ Use this when you want to publish a tissue-specialised checkpoint at the end of 
 
 These are the Flower client glue methods the orchestrator drives. Calling them outside of an active session leaves the trainer in an inconsistent state. They are listed here so you know to ignore them, not so you can use them.
 
-- `start_fit(parameters, ..., orchestrator_service_id, session_id)`
-- `start_evaluate(parameters, ..., orchestrator_service_id, session_id)`
+- `start_fit(parameters, batch_size, config, limit_train_batches, server_round, orchestrator_service_id, session_id)` — identical on every Chiron trainer. Tabula's own hyperparameters go in `config`, and `get_properties()` reports which names it accepts.
+- `start_evaluate(parameters, batch_size, config, limit_val_batches, server_round, orchestrator_service_id, session_id)`
 - `get_fit_status()`, `get_evaluate_status()` — useful for monitoring, but the orchestrator already polls them and surfaces the progress through `get_training_status`.
 - `cancel_fit(orchestrator_service_id)`, `cancel_evaluate(orchestrator_service_id)`
 - `set_session_active(active, orchestrator_service_id, per_round_timeout, aggregation_buffer)`

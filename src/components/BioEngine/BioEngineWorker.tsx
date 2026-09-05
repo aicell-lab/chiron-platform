@@ -6,6 +6,7 @@ import BioEngineApps from './BioEngineApps';
 import DeploymentConfigModal from './DeploymentConfigModal';
 import AppDiskCache from './AppDiskCache';
 import ErrorDialog from './ErrorDialog';
+import { logger } from '../../utils/logger';
 
 // Returns true when `actual` is >= `required` under loose semver-by-parts
 // comparison. Handles pre-release suffixes by stripping anything past the
@@ -268,6 +269,7 @@ const BioEngineWorker: React.FC = () => {
     initArtifactManager();
 
     if (serviceId) {
+      logger.info('bioengine', 'Attaching to worker', { serviceId, autoRefreshEnabled });
       fetchStatus();
 
       if (autoRefreshEnabled) {
@@ -282,8 +284,9 @@ const BioEngineWorker: React.FC = () => {
         };
       }
     } else {
-      // If no service ID, redirect to home
-      navigate('/bioengine');
+      // No service id in the query: send the user to the instance list rather
+      // than to the setup guide, since picking a worker is what they were after.
+      navigate('/worker/instances');
     }
   }, [serviceId, server, isLoggedIn, autoRefreshEnabled]);
 
@@ -330,6 +333,9 @@ const BioEngineWorker: React.FC = () => {
 
   // Use a ref to store the current manifest cache to avoid stale closures
   const manifestCacheRef = React.useRef<Record<string, any>>({});
+  // Last logged app-status fingerprint, so the poll only writes a log line
+  // when something actually changed.
+  const lastAppStatusKeyRef = React.useRef<string>('');
 
   // Update ref whenever manifestCache state changes
   React.useEffect(() => {
@@ -496,6 +502,24 @@ const BioEngineWorker: React.FC = () => {
         }
       }
 
+      // One line per change of the app set or of any app's status, not one per
+      // poll. At a 5s cadence an unfiltered status log would fill the whole
+      // buffer with a single dashboard session and push out everything that
+      // led up to the problem being reported.
+      const apps = statusData?.bioengine_apps || {};
+      const statusKey = Object.entries(apps)
+        .filter(([key, value]) => key !== 'service_id' && key !== 'note' && value && typeof value === 'object')
+        .map(([key, value]) => `${key}=${(value as any).status}`)
+        .sort()
+        .join(',');
+      if (statusKey !== lastAppStatusKeyRef.current) {
+        lastAppStatusKeyRef.current = statusKey;
+        logger.info('bioengine', 'Worker app status changed', {
+          serviceId,
+          apps: statusKey || '(none)',
+        });
+      }
+
       setError(null);
       setStatus(statusData);
       if (showLoading) {
@@ -512,11 +536,12 @@ const BioEngineWorker: React.FC = () => {
                                    errorMessage.includes('Service is not available');
       
       if (isServiceUnavailable) {
-        console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
-        navigate('/bioengine');
+        logger.warn('bioengine', 'Worker service unavailable, returning to the instance list', { serviceId, errorMessage });
+        navigate('/worker/instances');
         return;
       }
-      
+
+      logger.error('bioengine', 'Failed to fetch worker status', { serviceId }, err);
       setError(`Failed to fetch BioEngine status: ${errorMessage}`);
       if (showLoading) {
         setLoading(false);
@@ -535,6 +560,17 @@ const BioEngineWorker: React.FC = () => {
 
       setDeployingArtifactId(artifactId);
 
+      // Config KEYS only beyond the artifact id and mode: a deployment config
+      // can carry data directories and dataset ids the operator typed in,
+      // which are theirs and never ours to ship off the machine.
+      logger.info('bioengine', 'Deploying app', {
+        serviceId,
+        artifact_id: artifactId,
+        mode: config.mode,
+        application_id: config.application_id,
+        config_keys: Object.keys(config || {}),
+      });
+
       const bioengineWorker = await server.getService(serviceId);
 
       await bioengineWorker.deploy_app({
@@ -546,9 +582,9 @@ const BioEngineWorker: React.FC = () => {
       await fetchStatus(false);
 
       setDeployingArtifactId(null);
-      console.log(`Successfully submitted deployment for ${artifactId}`);
+      logger.info('bioengine', 'Deployment submitted', { serviceId, artifact_id: artifactId });
     } catch (err) {
-      console.error('Deployment failed:', err);
+      logger.error('bioengine', 'Deployment failed', { serviceId, artifact_id: artifactId }, err);
       const errorMessage = err instanceof Error ? err.message : String(err);
 
       // Check if the error indicates the service is not available
@@ -559,8 +595,8 @@ const BioEngineWorker: React.FC = () => {
                                    errorMessage.includes('Service is not available');
 
       if (isServiceUnavailable) {
-        console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
-        navigate('/bioengine');
+        logger.warn('bioengine', 'Worker service unavailable, returning to the instance list', { serviceId, errorMessage });
+        navigate('/worker/instances');
         return;
       }
 
@@ -658,6 +694,8 @@ const BioEngineWorker: React.FC = () => {
       setUndeploymentError(null); // Clear any previous errors
       setUndeployingArtifactId(applicationId);
 
+      logger.info('bioengine', 'Stopping app', { serviceId, application_id: applicationId });
+
       const bioengineWorker = await server.getService(serviceId);
       await bioengineWorker.stop_app({
         application_id: applicationId,
@@ -668,9 +706,9 @@ const BioEngineWorker: React.FC = () => {
 
       setUndeployingArtifactId(null);
 
-      console.log(`Successfully stopped application ${applicationId}`);
+      logger.info('bioengine', 'Stopped app', { serviceId, application_id: applicationId });
     } catch (err) {
-      console.error('Stop application failed:', err);
+      logger.error('bioengine', 'Stop application failed', { serviceId, application_id: applicationId }, err);
       const errorMessage = err instanceof Error ? err.message : String(err);
 
       // Check if the error indicates the service is not available
@@ -681,8 +719,8 @@ const BioEngineWorker: React.FC = () => {
                                    errorMessage.includes('Service is not available');
 
       if (isServiceUnavailable) {
-        console.warn(`BioEngine worker service ${serviceId} is no longer available, redirecting to home`);
-        navigate('/bioengine');
+        logger.warn('bioengine', 'Worker service unavailable, returning to the instance list', { serviceId, errorMessage });
+        navigate('/worker/instances');
         return;
       }
 
@@ -873,11 +911,16 @@ const BioEngineWorker: React.FC = () => {
   };
 
   // Submit a scaling-only update for a running app. Calls deploy_app with
-  // just the {application_id, artifact_id, scaling} triple — every other
-  // deploy parameter (token, env vars, kwargs, GPU mode...) is preserved by
-  // the worker's is_update branch when the application_id already exists
-  // (bioengine/apps/manager.py:1910-1941). Ray Serve handles the new
+  // just the {application_id, artifact_id, scaling} triple. Every other deploy
+  // parameter (token, env vars, kwargs, GPU mode, and the deployed VERSION) is
+  // preserved by the worker's is_update branch when the application_id already
+  // exists (bioengine/apps/manager.py:1910-1941). Ray Serve handles the new
   // replica counts as a rolling reconfigure.
+  //
+  // Inheriting the version is what we want here and is the reason this call
+  // omits it: changing replica counts must not also swap the running code out
+  // from under an operator who only touched a slider. A version change is a
+  // separate, deliberate act through the deployment config modal.
   const updateAppScaling = async (params: {
     application_id: string;
     artifact_id: string;
@@ -1065,7 +1108,8 @@ ${token}`;
     );
   }
 
-  // If no service_id is provided, redirect to home
+  // If no service_id is provided, the effect above has already redirected to
+  // the instance list.
   if (!serviceId) {
     return null; // This will be handled by the useEffect redirect
   }
@@ -1086,7 +1130,7 @@ ${token}`;
           <div>
             <div className="flex items-center mb-2">
               <button
-                onClick={() => navigate('/bioengine')}
+                onClick={() => navigate('/worker/instances')}
                 className="flex items-center text-blue-600 hover:text-blue-800 transition-colors duration-200 mr-4"
                 title="Back to BioEngine Home"
               >
@@ -1095,7 +1139,7 @@ ${token}`;
                 </svg>
                 <span className="text-sm font-medium">Back</span>
               </button>
-              <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent cursor-pointer" onClick={() => navigate('/bioengine')}>
+              <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent cursor-pointer" onClick={() => navigate('/worker/instances')}>
                 BioEngine Worker Dashboard
               </h1>
             </div>

@@ -4,7 +4,7 @@ description: Single entry point for an AI agent working on the Chiron platform. 
 compatibility: Designed for Claude Code, Gemini CLI, or any agent that can read a URL, call Hypha RPC, and execute Python.
 metadata:
   author: chiron-platform
-  version: "1.1"
+  version: "1.2"
   sub-skills:
     - apps/explore-tabula-models.md
     - apps/chiron-manager.md
@@ -37,9 +37,9 @@ Chiron's Hypha workspace is `chiron-platform`. Published model checkpoints live 
 
 - **Chiron Manager** (`<worker>:chiron-manager`) — control plane: discovers datasets, launches and tears down orchestrator and trainer apps, surfaces logs, reports cluster state.
 - **Chiron Orchestrator** (`<orch-app>:chiron-orchestrator`) — Flower-based FedAvg server that coordinates one federated training session at a time.
-- **Tabula Trainer** (`<trainer-app>:tabula-trainer`) — local Flower client that trains on the institution's private datasets. There can be many trainer apps registered to one orchestrator.
+- **Trainer** (`<trainer-app>:<model>-trainer`, for example `:tabula-trainer`) — local Flower client that trains on the institution's private datasets. There can be many trainer apps registered to one orchestrator, all training the same model.
 
-Tabula's `in_feature` (gene-sequence length the model consumes) is hard-coded to 1,200 in `tabula/framework.yaml` and the data server pre-cuts every dataset to this width before exposing it to the trainer. Chiron runs on BioEngine v0.10.13. The bioengine skill at [bioimage.io/public/skills/bioengine/SKILL.md](https://bioimage.io/public/skills/bioengine/SKILL.md) targets v0.11; the Hypha RPC contract documented here is stable across both, but the BioEngine app build / manifest examples in that skill may differ slightly. **Use this skill for everything Chiron-specific. Delegate to the bioengine skill for everything BioEngine-general.**
+The manager and the orchestrator are model-agnostic. The trainer is not: each worker image carries exactly one model's dependencies and hosts that model's trainer only (see [§ 2](#2-set-up-a-chiron-worker)). For Tabula, `in_feature` (the gene-sequence length the model consumes) is hard-coded to 1,200 in `tabula/framework.yaml` and the data server pre-cuts every dataset to this width before exposing it to the trainer. The other models read the counts themselves and do their own encoding. Chiron runs on BioEngine v0.11.19, the same major line the bioengine skill at [bioimage.io/public/skills/bioengine/SKILL.md](https://bioimage.io/public/skills/bioengine/SKILL.md) targets. **Use this skill for everything Chiron-specific. Delegate to the bioengine skill for everything BioEngine-general.**
 
 ## 1. Explore published Tabula models
 
@@ -49,12 +49,25 @@ See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
 
 Before generating any launch command, gather the environment yourself rather than asking the user to guess.
 
+**Tabula is the model to launch.** A worker's container image decides which model it can train: it carries that model's dependencies and hosts that model's trainer, and no other. Chiron guarantees Tabula today. scGPT, Geneformer and scFoundation are being brought online one at a time, in that order, and appear on [chiron.aicell.io/#/models](https://chiron.aicell.io/#/models) as architectures that are coming. The setup wizard lists them but will not start a worker on one, so do not generate a launch command for them either. If the user asks for one of the three, say it is coming and offer Tabula.
+
+| Model | Image | Trainer artifact | Status |
+|-------|-------|------------------|--------|
+| Tabula | `ghcr.io/aicell-lab/chiron-tabula:<version>` | `chiron-platform/tabula-trainer` | Supported |
+| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` | Coming soon |
+| Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` | Coming soon |
+| scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` | Coming soon |
+
+A site that wants to train two models runs two workers, one per image. Every image declares its identity in `CHIRON_MODEL_FAMILY`, `CHIRON_MODEL_NAME`, `CHIRON_TRAINER_ARTIFACT` and `CHIRON_IMAGE_REF`, which the manager reports as `worker_info.chiron_image` and the Chiron UI shows as the worker's model badge. `create_trainer` defaults to `CHIRON_TRAINER_ARTIFACT` and refuses any trainer artifact declaring a different `model_family`. A worker on an image that predates this contract reports no `chiron_image` and cannot deploy a trainer at all, so the fix is to pull a current image. The setup wizard at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker) picks the image from the selected model, and lets the user choose only which version of it to run. There is no free-text image field: an image the platform cannot reason about is the one thing that turns a clear "your worker is out of date" into a confusing failure minutes into a run.
+
+**The platform rejects images and apps that are too old.** Chiron declares a minimum worker image version and a minimum version per Chiron application, each with the reason it was raised. A worker or an application below the floor is badged out of date in the UI, the action that depends on it is disabled, and the message names the version to move to. Pulling the newest image version the wizard offers, and deploying applications at their newest version, keeps a site clear of this. A tag Chiron cannot read as a version, such as `latest` or a digest pin, is never treated as too old.
+
 **Detect the host environment.** Run these checks and only ask the user when a check fails or is ambiguous:
 
 - **Operating system**: `uname -srm` (Linux/macOS) or `systeminfo` (Windows). Linux is the supported target; macOS and Windows work through Docker Desktop but cannot pass `--gpus all`.
 - **Container runtime**: probe `docker --version`, `podman --version`, `singularity --version`, `apptainer --version` in that order and pick the first that responds. If more than one is installed, ask the user which to use. Docker is the default in the browser wizard.
 - **GPU and CUDA**: `nvidia-smi --query-gpu=name,memory.total --format=csv` lists the GPUs and their memory. No NVIDIA driver means CPU-only mode (training will be unusably slow but the worker still boots).
-- **Compute headroom**: `nproc` for CPU cores and `free -h` (Linux) or equivalent for RAM. The defaults from the wizard (3 CPU, 30 GB RAM, 1 GPU) are a safe starting point.
+- **Compute headroom**: `nproc` for CPU cores and `free -h` (Linux) or equivalent for RAM. The wizard defaults to 4 CPU and 1 GPU. RAM depends on the model, because Ray admits an application only if its declared memory fits the head node's budget and a worker holds the manager (1 GB), the orchestrator (8 GB) and the trainer at once: **30 GB for Tabula**, and later 30 GB for scGPT, 40 GB for Geneformer and 48 GB for scFoundation. A worker started with less comes up healthy and then refuses its trainer with `Insufficient resources`. The wizard fills the right figure in when you pick the model.
 
 **Ask the user for what you cannot detect:**
 
@@ -66,7 +79,7 @@ Before generating any launch command, gather the environment yourself rather tha
 
 **Launch the worker.** Follow the bioengine skill at [bioimage.io/public/skills/bioengine/SKILL.md](https://bioimage.io/public/skills/bioengine/SKILL.md) §1 (Set up a BioEngine worker) for the per-runtime command. For Chiron specifically: launch with `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}'` so the Chiron Manager comes up on startup. Easiest is the browser wizard at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker), which writes a one-line launch command for Docker, Podman, Singularity or Apptainer based on the form values.
 
-**Confirm the worker is online.** Once the worker is up, the Chiron interface at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker) will show its name, its registered datasets, and its hardware. The data server rescans the data directory every 30 seconds. You can also query [apps/chiron-manager.md](apps/chiron-manager.md) `get_worker_info()` and `get_datasets_info()` directly via Hypha RPC.
+**Confirm the worker is online.** Once the worker is up, [chiron.aicell.io/#/worker/instances](https://chiron.aicell.io/#/worker/instances) lists every BioEngine worker this browser can reach, each card showing its location, the model its image was built for, and its BioEngine version. A "Chiron workers only" switch next to Observed Workspaces hides plain BioEngine workers that report no model, since those cannot host a Chiron trainer. Open the worker's dashboard from its card to see its registered datasets and hardware. The data server rescans the data directory every 30 seconds. You can also query [apps/chiron-manager.md](apps/chiron-manager.md) `get_worker_info()` and `get_datasets_info()` directly via Hypha RPC.
 
 ## 3. Run federated training
 
@@ -78,9 +91,17 @@ A federated training run involves three apps cooperating: the manager spawns the
 
 The Chiron web interface at [chiron.aicell.io/#/training](https://chiron.aicell.io/#/training) wraps the same RPC surface in a browser-based form. Driving it via RPC and via the UI are equivalent.
 
+One run-level choice is worth knowing before you start: **Weight Transport**, in the training configuration panel next to Number of Rounds. `WebSocket` relays model weights through the Hypha gateway and works from any network that can reach the platform. `WebRTC` sends them peer to peer so they never reach the gateway, at the cost of needing an ICE handshake that some networks block. Both modes run on the same orchestrator and trainer apps, so switching costs a restart of the run and nothing else. There is no automatic fallback between them, by design: a run that quietly relayed weights through the server after you asked for peer to peer would defeat the point. If the handshake fails, switch to `WebSocket` and start again. Raw data never crosses the network in either mode.
+
 ## 4. Contribute a trainer for another single cell foundation model
 
-Chiron's orchestrator does not require code changes to host a new foundation model. The trainer template at [references/trainer-artifact-template.md](references/trainer-artifact-template.md) documents the per-model engineering: extend the base trainer image with the model's Python dependencies, implement the `trainer.py` against the same Flower client + Hypha RPC contract that `tabula-trainer` uses, and register the result as a new trainer artifact. Each worker image bundles a single foundation model's trainer at build time, so a site that wants to participate in federations for multiple foundation models deploys one worker per model. External contributions for additional foundation models are welcome.
+Chiron's manager and orchestrator do not require code changes to host a new foundation model. The trainer template at [references/trainer-artifact-template.md](references/trainer-artifact-template.md) documents the per-model engineering: extend the Chiron base image with the model's Python dependencies, implement the `trainer.py` against the same Flower client + Hypha RPC contract that `tabula-trainer` uses, and register the result as a new trainer artifact. Each worker image bundles a single foundation model's trainer at build time, so a site that wants to participate in federations for multiple foundation models deploys one worker per model. External contributions for additional foundation models are welcome.
+
+A new model is wired in through three matching declarations, all carrying the same family slug:
+
+- The **adapter** sets `model_family` as a `ClassVar`, plus the display name and the shared-weight scope it reports through `get_properties()`. The orchestrator reads those to label the run, name the parameters in the UI, and describe what FedAvg actually averages.
+- The **trainer artifact manifest** sets `model_family: <slug>`. The manager compares it against the image before deploying, so a mismatched pair fails at the button rather than inside Ray.
+- The **image** sets `CHIRON_MODEL_FAMILY=<slug>`, `CHIRON_MODEL_NAME`, `CHIRON_TRAINER_ARTIFACT` pointing at that artifact, and `CHIRON_IMAGE_REF`. Nothing else in the platform needs to know the model exists.
 
 ## Conventions (read once)
 
@@ -104,7 +125,19 @@ manager = await server.get_service(managers[0]["id"])
 
 **Authentication.** Set the `HYPHA_TOKEN` environment variable from a token issued for the `chiron-platform` workspace. The browser flow at [hypha.aicell.io](https://hypha.aicell.io) issues tokens. Read-only methods (`get_worker_info`, `get_datasets_info`, `list_trainers`, etc.) are accessible to any authenticated user. Write methods (`create_orchestrator`, `create_trainer`, `start_training`, `save_*_weights`) enforce ownership via the `caller_id` and `owner_id` parameters; see [apps/chiron-manager.md § Permissions](apps/chiron-manager.md).
 
-**Model Hub collection.** Every published checkpoint, whether transformer-only (orchestrator save) or full (trainer save), lives in `chiron-platform/chiron-models`. The artifact manifest carries a `global_transformer` boolean flag that distinguishes the two. See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
+**Model Hub collection.** Every published checkpoint, whether shared-weights-only (orchestrator save) or full (trainer save), lives in `chiron-platform/chiron-models`. The artifact manifest carries a `global_transformer` boolean flag that distinguishes the two, and a `model_family` slug saying which model it belongs to. A checkpoint only loads into its own model, so the UI offers each worker the checkpoints of its family alone. Checkpoints published before `model_family` existed are all Tabula. See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
+
+**Architecture cards.** `chiron-platform/chiron-architectures` holds one card per model, aliased by family, and is what the Models page lists above the checkpoints. A card says whether the platform supports that model yet, which trainer artifact and image repository belong to it, and where the model's base weights come from, either a Hypha artifact or a remote URL with a checksum. The trainer reads the card each time it loads base weights, so the card is the current answer to "what does this model start from" and an upstream checkpoint moving is a card edit rather than a new release. The collection is read-only to everyone but the platform maintainers, because a card names a source that runs on other institutions' hardware.
+
+## Reporting a problem
+
+The **Report Issue** button in the footer of every page on the platform sends us a problem report. No account is needed and there is nothing to fill in: the platform attaches its own log buffer, so you do not have to reconstruct what happened or reproduce it first.
+
+The dialog has one optional field, "What were you trying to do?". That is the part the logs cannot show. Everything that would be sent is viewable before you send it, under "What gets sent", including the log buffer itself. Access tokens and file paths are stripped out in the browser before anything leaves it.
+
+On success the dialog shows a report id. Quote it if you follow up.
+
+Reports go into a collection that only maintainers can read, so one reporter cannot read another's report and neither can we read it back through the website.
 
 ## Common pitfalls
 

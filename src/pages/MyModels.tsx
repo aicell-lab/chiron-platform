@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useHyphaStore } from '../store/hyphaStore';
-import { ArtifactRef, listArtifactChildren, resolveCoverUrl } from '../utils/artifactApi';
+import { ArtifactRef, listArtifactChildren } from '../utils/artifactApi';
+import CoverImage from '../components/models/CoverImage';
 import { RiLoginBoxLine } from 'react-icons/ri';
 import { ArrowPathIcon } from '@heroicons/react/24/outline';
 
@@ -36,7 +37,6 @@ const ModelRow: React.FC<ModelRowProps> = ({ artifact }) => {
   const manifest = artifact.manifest || {};
   const name: string = manifest.name || artifact.alias || artifact.id.split('/').pop() || artifact.id;
   const description: string = manifest.description || '';
-  const cover = resolveCoverUrl(manifest.cover, artifact.id);
   const alias = artifact.alias || artifact.id.split('/').pop();
   // Status semantics live on `manifest.status` (single source of truth across
   // the Trainer/Orchestrator save_*_weights writers and the ModelDetail
@@ -50,11 +50,13 @@ const ModelRow: React.FC<ModelRowProps> = ({ artifact }) => {
   const card = (
     <div className={`flex items-stretch gap-4 bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden hover:shadow-md hover:border-blue-200 transition-all ${isPendingDeletion ? 'opacity-70' : ''}`}>
       <div className="w-32 sm:w-44 flex-shrink-0 bg-gray-50 flex items-center justify-center">
-        {cover ? (
-          <img src={cover} alt={name} className="object-contain w-full h-full p-2" loading="lazy" />
-        ) : (
-          <span className="text-3xl text-gray-300">🧬</span>
-        )}
+        <CoverImage
+          cover={manifest.cover}
+          artifactId={artifact.id}
+          alt={name}
+          className="object-contain w-full h-full p-2"
+          fallback={<span className="text-3xl text-gray-300">🧬</span>}
+        />
       </div>
       <div className="flex-1 min-w-0 p-4 flex flex-col gap-2">
         <div className="flex items-start justify-between gap-3 flex-wrap">

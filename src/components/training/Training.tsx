@@ -1,12 +1,29 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useHyphaStore } from '../../store/hyphaStore';
-import { callHyphaService, listHyphaServices } from '../../utils/hyphaHttp';
+import { callHyphaService, listHyphaServices, HyphaHttpError } from '../../utils/hyphaHttp';
+import { logger } from '../../utils/logger';
 import { FaPlay, FaStop, FaPlus, FaTrash, FaInfo, FaCheckCircle, FaTimesCircle, FaSpinner, FaClock, FaUnlink } from 'react-icons/fa';
 import { BiLoaderAlt } from 'react-icons/bi';
 import TrainingConfigPanel from './TrainingConfigPanel';
+import InfoPopover from '../BioEngine/InfoPopover';
 import FederatedWorldMap, { MapWorker, MapConnection, MapLegend, MapLegendMode } from './FederatedWorldMap';
 import LossChart from './LossChart';
+import {
+  ChironImageIdentity,
+  datasetIncompatibleReason,
+  DEFAULT_MODEL_FAMILY,
+  imageRepository,
+  localWeightsLabel,
+  modelBadgeClass,
+  modelDisplayName,
+  referenceMemoryEntries,
+  sharedWeightsLabel,
+} from '../../config/chironModels';
+import { appTooOld, imageTooOld, imageUpgradeInstruction, VersionFloor } from '../../config/chironVersions';
+import { DEFAULT_WEIGHT_TRANSPORT, WEIGHT_TRANSPORT_LABELS, WeightTransport, readWeightTransport } from '../../config/federation';
+import { RunConfig, useTrainingConfigStore } from '../../store/trainingConfigStore';
+import { promptReportIssue } from '../../utils/reportIssuePrompt';
 
 const CountryFlag: React.FC<{ countryName?: string; countryCode?: string; className?: string }> = ({ countryName, countryCode, className }) => {
   const flagUrl = countryCode
@@ -35,6 +52,13 @@ interface WorkerStatus {
   admin_users: string[];
   geo_location: GeoLocation;
   is_ready: boolean;
+  /**
+   * Which model this worker's container image was built for, added by
+   * chiron-manager from the CHIRON_* variables baked into the image. Absent
+   * on an image built before per-model support existed, which is how the UI
+   * tells "no marker" apart from "marker says tabula".
+   */
+  chiron_image?: ChironImageIdentity;
 }
 
 interface ApplicationInfo {
@@ -117,6 +141,9 @@ interface OrchestratorApp {
   status: string;
   serviceIds: any[];
   artifactId: string;
+  /** Artifact version the app was deployed from, checked against the floor in
+   *  chironVersions.ts. Absent on a manager too old to report it. */
+  version?: string;
   displayName?: string;
   applicationId?: string;
   isBusy?: boolean;
@@ -131,6 +158,8 @@ interface TrainerApp {
   serviceIds: any[];
   datasets: Record<string, any>;
   artifactId: string;
+  /** See OrchestratorApp.version. */
+  version?: string;
   displayName?: string;
   applicationId?: string;
   isBusy?: boolean;
@@ -148,6 +177,23 @@ interface TrainingStatus {
   stage: TrainingStage;
   trainers_progress: Record<string, { status?: string; current_batch: number; total_batches: number; progress: number; error?: string; }>;
   pending_removal?: string[];
+  /** Identifier of the run currently held by the orchestrator. */
+  run_id?: string | null;
+  /** The configuration this run was started with, reported by
+   *  chiron-orchestrator 0.3.32. Absent from an older orchestrator, in which
+   *  case a browser opening the page mid-run simply shows the schema defaults
+   *  as it did before. */
+  run_config?: RunConfig;
+  /** Why the last run ended, when it ended badly. Reported by
+   *  chiron-orchestrator 0.3.34 and null on a run that completed its rounds or
+   *  was stopped by the operator. Absent from an older orchestrator, which
+   *  reports nothing at all about a failed run. */
+  error?: {
+    round: number;
+    type: string;
+    message: string;
+    at: string;
+  } | null;
 }
 
 const STAGE_LABELS: Record<NonNullable<TrainingStage>, string> = {
@@ -155,6 +201,21 @@ const STAGE_LABELS: Record<NonNullable<TrainingStage>, string> = {
   evaluate:     'Evaluate',
   aggregation:  'Aggregation',
   distribution: 'Distribution',
+};
+
+// How long the pre-round-1 window may last before the UI stops presenting it as
+// an ordinary wait and explains what is being negotiated. Loading pretrained
+// weights and pulling the initial parameters back takes a handful of seconds on
+// a healthy federation, so a minute in means something is retrying rather than
+// progressing. The orchestrator's own bound is longer than this, deliberately:
+// this threshold changes the wording, it does not end the run.
+const PREPARING_EXPLAIN_AFTER_MS = 60_000;
+
+const formatElapsed = (ms: number): string => {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, '0')}s` : `${seconds}s`;
 };
 
 interface TrainingHistory {
@@ -187,7 +248,48 @@ interface OrchestratorInfoModalData { status?: string; artifactId?: string; }
 interface TrainerInfoModalData { appId: string; status?: string; datasets: Record<string, any>; artifactId?: string; }
 type InfoModalData = ManagerInfoModalData | OrchestratorInfoModalData | TrainerInfoModalData;
 
+/**
+ * The one remote failure a user can act on without reading Python: the worker
+ * had no room for the app.
+ *
+ * A worker refuses the deployment with a ValueError naming a Ray-generated
+ * codename and a dict of raw byte counts, which arrives here inside an HTTP
+ * error body. Shown as-is it is a wall of JSON that never says the one thing
+ * that matters, which is that the worker is full. Restate it, then keep the
+ * original underneath so nothing is hidden from a maintainer reading over the
+ * user's shoulder.
+ *
+ * Returns null for anything that is not this failure, so every other error
+ * keeps its existing treatment.
+ */
+const describeResourceShortage = (msg: string): string | null => {
+  if (!/Insufficient resources/i.test(msg)) return null;
+  const wanted: string[] = [];
+  const cpus = msg.match(/'num_cpus':\s*([\d.]+)/);
+  if (cpus && Number(cpus[1]) > 0) {
+    wanted.push(`${cpus[1]} CPU${Number(cpus[1]) === 1 ? '' : 's'}`);
+  }
+  const memory = msg.match(/'memory':\s*(\d+)/);
+  if (memory && Number(memory[1]) > 0) {
+    wanted.push(`${(Number(memory[1]) / 1e9).toFixed(1)} GB of memory`);
+  }
+  const vram = msg.match(/'VRAM_MB':\s*([\d.]+)/);
+  if (vram && Number(vram[1]) > 0) {
+    wanted.push(`${(Number(vram[1]) / 1024).toFixed(1)} GB of GPU memory`);
+  }
+  const asked = wanted.length ? ` It asked for ${wanted.join(', ')}.` : '';
+  return (
+    'The worker does not have enough free capacity to start this ' +
+    `application.${asked} Remove an application you no longer need from the ` +
+    'Setup step to free its share, or restart the worker with a larger ' +
+    'memory or GPU allowance.\n\n' +
+    msg
+  );
+};
+
 const extractRemoteError = (msg: string): string => {
+  const resources = describeResourceShortage(msg);
+  if (resources) return resources;
   if (!msg.includes('Traceback')) return msg;
   const lines = msg.split('\n');
   let last = '';
@@ -198,6 +300,107 @@ const extractRemoteError = (msg: string): string => {
     }
   }
   return last || msg;
+};
+
+// Name the round a failure happened in, the way an operator counts rounds.
+// The orchestrator reports the round counter as it stood when the exception
+// was raised, and that counter is still 0 for anything that dies before round
+// 1 starts: fetching the initial weights from the first trainer is the usual
+// one. "Training failed in round 0" reads like a bug in the message rather
+// than a description of the run, so say what actually happened instead.
+const describeErrorRound = (round: number): string =>
+  round >= 1 ? `in round ${round}` : 'before the first round';
+
+// Rewrite `workspace/client:app` as `workspace/*:app`.
+//
+// A Hypha service id names both the app and the client process currently
+// serving it. Ray Serve restarts a replica whenever its health check misses,
+// and the replica comes back registered under a fresh client id, so every id
+// the page is holding stops resolving. The page then reads a run it was
+// following as gone: polls 404, the failure counter fills up, and the training
+// view is abandoned while the run itself carries on and finishes normally.
+//
+// Hypha accepts `*` in the client position and resolves it to whichever client
+// currently serves that app. App instance names are unique per deployment, so
+// the wildcard names exactly the same app whenever it names anything at all.
+// The orchestrator already addresses trainers this way
+// (`_client_agnostic_service_id` in apps/chiron_orchestrator/orchestrator.py);
+// this is the frontend half of the same fix.
+//
+// An id that does not carry both separators is returned untouched, so an
+// unexpected shape degrades to today's exact-match behaviour rather than
+// becoming a malformed address.
+const clientAgnosticServiceId = (serviceId: string): string => {
+  const slash = serviceId.indexOf('/');
+  if (slash < 0) return serviceId;
+  const workspace = serviceId.slice(0, slash);
+  const rest = serviceId.slice(slash + 1);
+  const colon = rest.indexOf(':');
+  if (colon < 0) return serviceId;
+  return `${workspace}/*:${rest.slice(colon + 1)}`;
+};
+
+// Rewrite the keys of a service-id-keyed dict to their client-agnostic form.
+//
+// The orchestrator keys `trainers_progress` and the per-client loss series by
+// whichever trainer id it was registered under. Those ids are normalised on
+// arrival for the same reason the page's own are: a trainer that restarts
+// mid-run would otherwise appear as a second participant, splitting its loss
+// curve and dropping its pin off the federation map. Normalising both sides
+// also means an orchestrator that still echoes the pinned form keeps matching.
+const keyByAgnosticServiceId = <T,>(
+  dict: Record<string, T> | undefined | null,
+): Record<string, T> | undefined => {
+  if (!dict) return dict ?? undefined;
+  const out: Record<string, T> = {};
+  for (const [key, value] of Object.entries(dict)) {
+    out[clientAgnosticServiceId(key)] = value;
+  }
+  return out;
+};
+
+// The two orchestrator payloads that carry trainer ids, normalised on arrival
+// so nothing downstream ever holds a client-pinned id. Both are typed loosely
+// because every call site fetches them as `any`.
+const normalizeStatusPayload = (status: any): any =>
+  status && typeof status === 'object'
+    ? { ...status, trainers_progress: keyByAgnosticServiceId(status.trainers_progress) ?? {} }
+    : status;
+
+const normalizeHistoryPayload = (history: any): any =>
+  history && typeof history === 'object'
+    ? {
+        ...history,
+        client_training_losses: keyByAgnosticServiceId(history.client_training_losses),
+        client_validation_losses: keyByAgnosticServiceId(history.client_validation_losses),
+      }
+    : history;
+
+// Republish a polled value only when it actually changed.
+//
+// Every poll response arrives as a fresh object, so handing it straight to a
+// setter re-renders and, worse, invalidates any effect that lists the value as
+// a dependency. `list_trainers` refreshes every 10s and fed
+// `registeredTrainers`, which is a dependency of the `get_trainer_params`
+// effect, which republished `trainerParams`, which the config panel treats as
+// its cue to reload the form defaults. The operator's half-typed training
+// config was therefore wiped every 10 seconds by a poll that had returned the
+// exact same trainer list as the poll before it.
+//
+// Both payloads are deterministic (a sorted-by-construction id list, and a
+// schema plus a model block), so equality here is safe and the identity of an
+// unchanged value survives the poll.
+const sameIdList = (a: string[], b: string[]): boolean =>
+  a.length === b.length && a.every((v, i) => v === b[i]);
+
+const sameParams = (a: unknown, b: unknown): boolean => {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    // A payload that will not serialise is one we cannot compare, so treat it
+    // as changed rather than pinning the UI to a stale value.
+    return false;
+  }
 };
 
 // Dataset-card detail dialog. Lazily fetches get_dataset_card_details from
@@ -600,6 +803,33 @@ const Training: React.FC = () => {
   }, [user]);
 
   const [managers, setManagers] = useState<ManagerConnection[]>([]);
+
+  /**
+   * What the worker's container image says it can train, or undefined when
+   * the image predates per-model support. This is the only source of the
+   * trainer artifact a worker may deploy: the image carries one model's
+   * dependencies and no other's, so there is nothing for the user to choose.
+   */
+  const workerImageFor = useCallback(
+    (managerId: string | null | undefined): ChironImageIdentity | undefined =>
+      managerId
+        ? managers.find(m => m.serviceId === managerId)?.workerInfo?.worker_info?.chiron_image
+        : undefined,
+    [managers]
+  );
+
+  /**
+   * Whether a worker is running an image older than the platform supports,
+   * and the reason to show if so. Undefined means the image is current, or
+   * carries a tag that cannot be read as a version (see chironVersions.ts,
+   * which never treats an unreadable version as too old).
+   */
+  const workerImageOutdatedFor = useCallback(
+    (managerId: string | null | undefined) =>
+      imageTooOld(workerImageFor(managerId)?.image_ref),
+    [workerImageFor]
+  );
+
   const [connectingWorkspace, setConnectingWorkspace] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
 
@@ -623,6 +853,20 @@ const Training: React.FC = () => {
   const [trainers, setTrainers] = useState<TrainerApp[]>([]);
   const [selectedOrchestrator, setSelectedOrchestrator] = useState<string | null>(null);
 
+  // Apps that are up and healthy but belong to someone else. Step 2 can only
+  // offer apps this user deployed, so these are the difference between "there
+  // is nothing running" and "there is nothing running that you may use", two
+  // situations with different answers, which the empty states used to report
+  // with the same sentence.
+  const othersRunningOrchestrators = useMemo(
+    () => orchestrators.filter(o => o.status === 'RUNNING' && !isOwnedByMe(o)).length,
+    [orchestrators, isOwnedByMe]
+  );
+  const othersRunningTrainers = useMemo(
+    () => trainers.filter(t => t.status === 'RUNNING' && !isOwnedByMe(t)).length,
+    [trainers, isOwnedByMe]
+  );
+
   const [showCreateOrchestrator, setShowCreateOrchestrator] = useState(false);
   const [showCreateTrainer, setShowCreateTrainer] = useState(false);
   const [creatingFor, setCreatingFor] = useState<string | null>(null);
@@ -640,7 +884,6 @@ const Training: React.FC = () => {
     !!(managerId && creatingTrainerMgrs[managerId]);
   const [newOrchestratorArtifactId, setNewOrchestratorArtifactId] = useState('chiron-platform/chiron-orchestrator');
   const [newTrainerDatasets, setNewTrainerDatasets] = useState<string[]>([]);
-  const [newTrainerArtifactId, setNewTrainerArtifactId] = useState('chiron-platform/tabula-trainer');
   // Hardware-aware upper bound for this trainer's training batch size. Set
   // once at deploy time based on the worker's GPU memory; the trainer
   // clamps any per-session fit_config batch_size at this value so a session
@@ -650,8 +893,10 @@ const Training: React.FC = () => {
   const [selectedWeightsPath, setSelectedWeightsPath] = useState<string | null>(null);
   const [isLoadingLocalWeights, setIsLoadingLocalWeights] = useState(false);
   const [isWeightsDropdownOpen, setIsWeightsDropdownOpen] = useState(false);
-  // chiron-models artifacts (tabula_model only) selectable as the trainer's
-  // pretrained starting weights. Mutually exclusive with selectedWeightsPath.
+  // Full chiron-models checkpoints (shared-weights-only saves excluded)
+  // selectable as the trainer's pretrained starting weights, across every
+  // model. Narrowed to the worker's own family by trainerWeightArtifacts.
+  // Mutually exclusive with selectedWeightsPath.
   const [chironModelArtifacts, setChironModelArtifacts] = useState<Array<{id: string; alias?: string; manifest?: any; created_at?: number}>>([]);
   const [selectedTrainerWeightsArtifactId, setSelectedTrainerWeightsArtifactId] = useState<string | null>(null);
 
@@ -706,6 +951,11 @@ const Training: React.FC = () => {
   const [trainingConfigSummary, setTrainingConfigSummary] = useState({ numRounds: 5, perRoundTimeoutMinutes: 20 });
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
   const [trainingHistory, setTrainingHistory] = useState<TrainingHistory | null>(null);
+  // Pending/error state for the Training History Refresh button. Without
+  // these the button gave no feedback at all, so a click was
+  // indistinguishable from a dead control.
+  const [historyRefreshing, setHistoryRefreshing] = useState(false);
+  const [historyRefreshError, setHistoryRefreshError] = useState<string | null>(null);
 
   // Prune local pending-removal entries the moment the orchestrator confirms
   // (server pending_removal includes the svc id) so we don't double-track.
@@ -725,6 +975,71 @@ const Training: React.FC = () => {
     }
     if (changed) setPendingLocalRemovals(next);
   }, [isTraining, trainingStatus?.pending_removal, pendingLocalRemovals]);
+
+  // When the current run entered the stage-less window before round 1, or null
+  // when it is not in that window.
+  //
+  // `is_running` goes true the moment the orchestrator accepts the run, but
+  // `current_stage` stays null until round 1 actually begins, and everything in
+  // between is invisible from here: the pretrained weights are loaded onto
+  // every trainer and the initial parameters are pulled back off one of them.
+  // A WebRTC transfer that cannot open its data channel is retried three times
+  // at 90s each before the round fails, so this window can legitimately last a
+  // few seconds or can be five minutes of a run that is already doomed, and an
+  // unqualified "Preparing" reads identically in both cases. Timestamp the
+  // window so the badge can show how long it has lasted and, past the point
+  // where a healthy start would have happened, say what is being waited on.
+  const [preparingSince, setPreparingSince] = useState<number | null>(null);
+
+  // The transport the current run was started with, so the pre-round-1
+  // explanation can name what is actually carrying the weights. Seeded from the
+  // operator's persisted choice, which is also what the config panel defaults
+  // to, so a run this UI did not launch still gets the right name in the
+  // overwhelmingly common case where the choice has not been changed since.
+  const [runTransport, setRunTransport] = useState<WeightTransport>(readWeightTransport);
+
+  useEffect(() => {
+    const preparing = isTraining && !!trainingStatus?.is_running && !trainingStatus?.stage;
+    // Only the transitions move this. Re-stamping on every poll would reset the
+    // clock every 2s and it would never leave zero.
+    setPreparingSince(prev => {
+      if (preparing) return prev ?? Date.now();
+      return prev === null ? prev : null;
+    });
+  }, [isTraining, trainingStatus?.is_running, trainingStatus?.stage]);
+
+  // The elapsed time has to advance on its own. Reading Date.now() at render
+  // only moved it when something else re-rendered the card, so the counter
+  // stepped in twos behind the status poll and froze completely whenever that
+  // poll stalled, which is exactly the situation the operator is watching it
+  // for. Tick once a second while the window is open and stop as soon as a
+  // stage arrives, so nothing runs during a normal run.
+  const [preparingNow, setPreparingNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (preparingSince === null) return;
+    setPreparingNow(Date.now());
+    const id = window.setInterval(() => setPreparingNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [preparingSince]);
+  const preparingElapsed = preparingSince === null ? 0 : preparingNow - preparingSince;
+
+  // Restore the configuration a live run was started with.
+  //
+  // Opening the page in the middle of somebody else's run, or reloading during
+  // your own, used to show the schema defaults in the config panel while the
+  // run used entirely different values. Continuing from there silently changed
+  // the round count, the learning rate or the transport. The orchestrator
+  // reports the run's own configuration on the status poll, so seed the draft
+  // from it. The store seeds once per run_id, so an operator editing the form
+  // to prepare the next run is never overwritten by a later poll.
+  useEffect(() => {
+    if (!selectedOrchestrator) return;
+    const runId = trainingStatus?.run_id;
+    const runConfig = trainingStatus?.run_config;
+    if (!runId || !runConfig || Object.keys(runConfig).length === 0) return;
+    useTrainingConfigStore.getState().seedFromRun(selectedOrchestrator, runId, runConfig);
+  }, [selectedOrchestrator, trainingStatus?.run_id, trainingStatus?.run_config]);
+
   const [registeredTrainers, setRegisteredTrainers] = useState<string[]>([]);
   const [isLoadingRegisteredTrainers, setIsLoadingRegisteredTrainers] = useState(false);
   const [isPreparingTraining, setIsPreparingTraining] = useState(false);
@@ -750,7 +1065,11 @@ const Training: React.FC = () => {
   }>>(() => {
     try {
       const raw = localStorage.getItem(TRAINER_META_CACHE_KEY);
-      return raw ? JSON.parse(raw) : {};
+      // Keys are trainer service ids, and a cache written before those were
+      // normalised holds client-pinned ones. Rewrite on load so a returning
+      // user's Save Weights panel still finds the names and locations of
+      // participants whose worker has since gone quiet.
+      return raw ? (keyByAgnosticServiceId(JSON.parse(raw)) ?? {}) : {};
     } catch { return {}; }
   });
   useEffect(() => {
@@ -798,6 +1117,14 @@ const Training: React.FC = () => {
   const [trainerParams, setTrainerParams] = useState<any>(null);
   const [trainerParamsLoading, setTrainerParamsLoading] = useState(false);
   const [trainerParamsError, setTrainerParamsError] = useState<string | null>(null);
+  // Number of add_trainer calls currently in flight. registerTrainer checks the
+  // box optimistically, which lands in registeredTrainers a few hundred ms
+  // before the orchestrator actually knows about the trainer. The parameter
+  // fetch keys on registeredTrainers, so without this gate it asks for
+  // get_trainer_params while the federation is still empty and the orchestrator
+  // answers 500 "No clients registered for federated training", which the panel
+  // renders as a hard failure of an operation that in fact succeeded.
+  const [pendingTrainerRegistrations, setPendingTrainerRegistrations] = useState(0);
 
   const [showErrorDetailModal, setShowErrorDetailModal] = useState(false);
   const [errorDetailTrainerId, setErrorDetailTrainerId] = useState<string>('');
@@ -934,7 +1261,12 @@ const Training: React.FC = () => {
       urlSelectionAppliedRef.current = true;
       return;
     }
-    const match = orchestrators.find(o => o.serviceIds?.[0]?.websocket_service_id === wsid);
+    // The page now writes the client-agnostic form into ?orchestrator_id=, but
+    // a link shared or bookmarked before that carries a client-pinned id, and
+    // the client it names is long gone. Compare in the agnostic form so an old
+    // deep link still resolves to the orchestrator it was pointing at.
+    const target = clientAgnosticServiceId(wsid);
+    const match = orchestrators.find(o => o.serviceIds?.[0]?.websocket_service_id === target);
     if (match) {
       setSelectedOrchestrator(`${match.managerId}::${match.appId}`);
       setCurrentStep(initialUrlStepRef.current ?? 2);
@@ -1013,8 +1345,8 @@ const Training: React.FC = () => {
   // Populate the trainer dialog's pretrained-weights dropdown when the user is
   // looking at the Trainer tab — fetches local-worker weights from the manager
   // and the chiron-models artifact list (full models only — checkpoints with
-  // global_transformer=true don't have embedder/heads and can't bootstrap a
-  // fresh trainer).
+  // global_transformer=true hold the shared weights alone and can't bootstrap
+  // a fresh trainer).
   useEffect(() => {
     if (!showLaunchDialog || launchDialogTab !== 'trainer' || !launchDialogManagerId) return;
     if (localModelWeights === null) {
@@ -1043,12 +1375,62 @@ const Training: React.FC = () => {
         try {
           const all = await artifactManager.list({ parent_id: 'chiron-platform/chiron-models', limit: 100, _rkwargs: true });
           // Only full models (global_transformer != true) are valid pretrained
-          // starting points; transformer-only saves are filtered out here.
+          // starting points, so shared-weights-only saves are dropped here.
           setChironModelArtifacts((all || []).filter((a: any) => a.manifest?.global_transformer !== true));
         } catch (e) { console.error('Failed to load chiron-models', e); }
       })();
     }
   }, [showLaunchDialog, launchDialogTab, launchDialogManagerId, artifactManager]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A checkpoint only loads into the model it was trained for, so the dialog
+  // offers those of the model this worker's image hosts. Checkpoints published
+  // before the orchestrator wrote model_family are all Tabula, which is also
+  // the family assumed for a worker that reports no image identity (its
+  // trainer deploy is blocked anyway, so the list is moot there).
+  const trainerWeightArtifacts = useMemo(() => {
+    const family = workerImageFor(launchDialogManagerId)?.model_family || DEFAULT_MODEL_FAMILY;
+    return chironModelArtifacts.filter(
+      a => (a.manifest?.model_family || DEFAULT_MODEL_FAMILY) === family
+    );
+  }, [chironModelArtifacts, launchDialogManagerId, workerImageFor]);
+
+  /**
+   * Datasets on the worker this dialog is aimed at, and for each one the
+   * reason the worker's model cannot read it, when there is one.
+   *
+   * Built from `datasetsInfo` rather than from `workerInfo.datasets`, because
+   * only the enriched payload carries `zarr_files` and therefore the column
+   * names the check needs. It arrives one RPC after the bare manifests, so
+   * until it does every dataset reads as compatible, which is the same "unknown
+   * is not a failure" rule the version floors follow. The manifest shown in the
+   * row still comes from whichever payload is in hand, so the list itself never
+   * waits.
+   */
+  const launchDialogDatasets = useMemo(() => {
+    const manager = managers.find(m => m.serviceId === launchDialogManagerId);
+    const enriched = manager?.datasetsInfo;
+    const source = enriched || manager?.workerInfo?.datasets || {};
+    const family = workerImageFor(launchDialogManagerId)?.model_family;
+    return Object.entries(source).map(([datasetId, manifest]: [string, any]) => ({
+      datasetId,
+      manifest,
+      incompatibleReason: datasetIncompatibleReason(family, manifest?.zarr_files),
+    }));
+  }, [managers, launchDialogManagerId, workerImageFor]);
+
+  /**
+   * Selected datasets the worker's model cannot read. A dataset can be ticked
+   * before `datasetsInfo` lands and turn out to be unreadable once it does, so
+   * the Start Trainer button checks the selection rather than trusting that a
+   * disabled checkbox was never ticked.
+   */
+  const incompatibleSelectedDatasets = useMemo(
+    () =>
+      launchDialogDatasets.filter(
+        d => d.incompatibleReason && newTrainerDatasets.includes(d.datasetId)
+      ),
+    [launchDialogDatasets, newTrainerDatasets]
+  );
 
   const userWorkspace = server?.config?.workspace as string | undefined;
 
@@ -1150,6 +1532,16 @@ const Training: React.FC = () => {
   // get_worker_info from racing against (and timing out behind) a long-running
   // deploy on the same single-threaded manager actor.
   const mutatingManagersRef = React.useRef<Set<string>>(new Set());
+
+  // Consecutive get_worker_info failures per manager. One dropped poll is not
+  // evidence that a worker is gone — a single network blip used to empty the
+  // orchestrator and trainer lists, which disables Start Training and Save to
+  // worker with no way back until the next successful poll. We only believe
+  // the worker is unreachable after this many misses in a row, mirroring the
+  // MAX_STATUS_FAILURES tolerance the training-status poller already uses.
+  // 3 × 10 s = ~30 s, long enough to ride out a flap mid-round.
+  const workerRefreshFailuresRef = React.useRef<Map<string, number>>(new Map());
+  const MAX_WORKER_REFRESH_FAILURES = 3;
 
   // appIds the user just deleted. BioEngine's stop_app is asynchronous —
   // it spawns a background _undeploy_application task and returns
@@ -1256,10 +1648,24 @@ const Training: React.FC = () => {
   // single object of the same shape (newer shape). Normalise to an array so
   // downstream code can always do `serviceIds[0]?.websocket_service_id` and
   // `serviceIds.forEach(...)` without crashing.
+  //
+  // Both ids are also rewritten to their client-agnostic form here rather than
+  // at each of the thirty-odd places that read them, so no part of the page can
+  // hold an address that a replica restart invalidates. See
+  // clientAgnosticServiceId.
   const normalizeServiceIds = (sids: any): any[] => {
-    if (Array.isArray(sids)) return sids;
-    if (sids && typeof sids === 'object') return [sids];
-    return [];
+    const asArray = Array.isArray(sids) ? sids : sids && typeof sids === 'object' ? [sids] : [];
+    return asArray.map((sid: any) => {
+      if (!sid || typeof sid !== 'object') return sid;
+      const next = { ...sid };
+      if (typeof next.websocket_service_id === 'string') {
+        next.websocket_service_id = clientAgnosticServiceId(next.websocket_service_id);
+      }
+      if (typeof next.webrtc_service_id === 'string') {
+        next.webrtc_service_id = clientAgnosticServiceId(next.webrtc_service_id);
+      }
+      return next;
+    });
   };
 
   // Pull CHIRON_DEPLOYED_BY / CHIRON_DEPLOYED_BY_EMAIL out of the app's
@@ -1287,6 +1693,7 @@ const Training: React.FC = () => {
     status: s.status,
     serviceIds: normalizeServiceIds(s.service_ids),
     artifactId: s.artifact_id || 'chiron-platform/chiron-orchestrator',
+    version: s.version || undefined,
     displayName: s.display_name,
     applicationId: appId,
     isBusy: s.is_busy ?? false,
@@ -1299,11 +1706,20 @@ const Training: React.FC = () => {
     status: s.status,
     serviceIds: normalizeServiceIds(s.service_ids),
     datasets: s.datasets || {},
-    artifactId: s.artifact_id || 'chiron-platform/tabula-trainer',
+    // A running trainer knows its own artifact. On the rare app row that does
+    // not report one, say so rather than guessing at Tabula: this worker may
+    // be running any of the four models.
+    artifactId: s.artifact_id || 'unknown trainer',
+    version: s.version || undefined,
     displayName: s.display_name,
     applicationId: appId,
     isBusy: s.is_busy ?? false,
-    registeredOrchestratorId: s.registered_orchestrator_id ?? undefined,
+    // Normalised so it still matches an orchestrator's own serviceIds after
+    // either side has restarted a replica, and whichever form the trainer
+    // recorded at registration time.
+    registeredOrchestratorId: s.registered_orchestrator_id
+      ? clientAgnosticServiceId(s.registered_orchestrator_id)
+      : undefined,
     ...extractOwner(s),
   });
 
@@ -1471,6 +1887,7 @@ const Training: React.FC = () => {
     const managerId = serviceId;
     try {
       const workerInfo: WorkerInfo = await callHyphaService(serviceId, 'get_worker_info', {}, { timeoutMs: 10000 });
+      workerRefreshFailuresRef.current.delete(serviceId);
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: true, workerInfo } : m));
       // Merge — preserve only the pending-* placeholder optimism. The
       // DELETING optimism set by the user click is a *one-tick* flip:
@@ -1539,6 +1956,12 @@ const Training: React.FC = () => {
         return [...otherMgrs, ...next];
       });
     } catch (error) {
+      const misses = (workerRefreshFailuresRef.current.get(serviceId) ?? 0) + 1;
+      workerRefreshFailuresRef.current.set(serviceId, misses);
+      // Ride out a blip. Keep the last known good app lists so the buttons that
+      // depend on them stay live, and only declare the worker unreachable once
+      // the misses stack up.
+      if (misses < MAX_WORKER_REFRESH_FAILURES) return;
       setManagers(prev => prev.map(m => m.serviceId === serviceId ? { ...m, isConnected: false } : m));
       // Clear stale app data for this manager when it becomes unreachable.
       setOrchestrators(prev => prev.filter(o => o.managerId !== managerId));
@@ -1585,6 +2008,131 @@ const Training: React.FC = () => {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /**
+   * Whether an error means the request never reached the worker, as opposed to
+   * the worker having considered it and refused.
+   *
+   * The distinction matters because `create_orchestrator` and `create_trainer`
+   * submit a deploy that then runs to completion on the worker whether or not
+   * the browser is still listening. A dropped response therefore says nothing
+   * about whether the deploy happened, and the two cases need opposite advice:
+   * one is "this failed, look at why", the other is "your app is probably
+   * coming up, wait".
+   *
+   * Matching on message text is unpleasant but it is what the transports give
+   * us. Hypha surfaces a browser fetch failure and a websocket drop as plain
+   * Errors with no code, and a worker-side rejection arrives as the remote
+   * traceback, which never contains these phrases. Getting it wrong in the
+   * false-positive direction costs one extra worker poll and a differently
+   * worded modal, so the list leans inclusive.
+   */
+  const isTransportFailure = (error: unknown): boolean => {
+    const message = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase();
+    return [
+      'failed to fetch',       // Chrome, fetch rejected before a response
+      'load failed',           // Safari's wording for the same thing
+      'networkerror',          // Firefox
+      'network changed',       // ERR_NETWORK_CHANGED, the one seen on europa
+      'err_network',
+      'err_connection',
+      'err_internet_disconnected',
+      'connection closed',
+      'connection lost',
+      'websocket',
+      'timed out',
+      'timeout',
+      'aborted',
+    ].some(needle => message.includes(needle));
+  };
+
+  /**
+   * Whether Hypha could not route the call to the service we addressed.
+   *
+   * An app's service takes a moment to become resolvable after the worker
+   * reports the deployment RUNNING, and it can briefly stop resolving again
+   * when a replica restarts. In that window Hypha answers every call to it
+   * with a 404 whose body reads "Service not found: <the id we asked for>".
+   * Like a dropped request, this means the app never saw the call, so it is
+   * never evidence that the app refused anything.
+   *
+   * Matched against the id we addressed rather than on the phrase alone: an
+   * app can legitimately report that some *other* service is missing, and
+   * that is a real answer from a reachable app, not a routing miss.
+   */
+  const isUnroutable = (error: unknown, serviceId: string): boolean =>
+    error instanceof HyphaHttpError
+    && error.status === 404
+    && !!error.bodyText?.includes(`Service not found: ${serviceId}`);
+
+  /**
+   * Watch an orchestrator for half a minute and report whether a run appeared.
+   *
+   * Returns true the moment one does, false only if the orchestrator answered
+   * every probe and said no to all of them, and undefined if it left any probe
+   * unanswered. Callers use this to check a suspicion against the
+   * orchestrator's own account, so a wrong "no" would be worse than admitting
+   * we do not know.
+   *
+   * The whole window matters. This is called after a request we cannot see the
+   * end of, so at the moment of the failure the request may still be on its way
+   * to the app, and even once it lands the orchestrator takes a moment to
+   * accept the session. Asking once and believing the first "no" would report a
+   * run as failed a second or two before it started, which is the exact false
+   * verdict this exists to prevent.
+   */
+  const RUN_PROBE_ATTEMPTS = 6;
+  const RUN_PROBE_INTERVAL_MS = 5000;
+  const orchestratorIsRunning = async (orchSvcId: string): Promise<boolean | undefined> => {
+    let unanswered = 0;
+    for (let attempt = 1; attempt <= RUN_PROBE_ATTEMPTS; attempt++) {
+      try {
+        const status = await callHyphaService<any>(orchSvcId, 'get_training_status', {}, { timeoutMs: 15000 });
+        if (normalizeStatusPayload(status)?.is_running) return true;
+      } catch {
+        unanswered += 1;
+      }
+      if (attempt < RUN_PROBE_ATTEMPTS) {
+        await new Promise(resolve => setTimeout(resolve, RUN_PROBE_INTERVAL_MS));
+      }
+    }
+    return unanswered > 0 ? undefined : false;
+  };
+
+  /**
+   * Poll the manager until an app appears that was not there when the deploy
+   * was fired, or until the window runs out.
+   *
+   * Calls `get_worker_info` directly rather than going through
+   * `refreshWorkerInfo`, which returns immediately while this manager holds
+   * the mutation lock, and the lock is still held here.
+   *
+   * Assumes any newly listed app is the one we just asked for. Two people
+   * deploying to the same worker in the same 90 s could in principle make us
+   * adopt someone else's app, but the cost of that is a suppressed error
+   * modal, against the certainty of showing a false one every time a request
+   * drops.
+   */
+  const waitForDeployedApp = async (
+    managerId: string,
+    kind: 'orchestrators_status' | 'trainers_status',
+    knownAppIds: Set<string>,
+  ): Promise<string | null> => {
+    // Six attempts fifteen seconds apart. A trainer deploy is given 180 s by
+    // the RPC itself, but the call we are recovering from was submitted, so
+    // what remains is the worker bringing the app up far enough to list it,
+    // which it does within a few seconds of accepting the deploy.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 15000));
+      try {
+        const workerInfo: WorkerInfo = await callHyphaService(managerId, 'get_worker_info', {}, { timeoutMs: 10000 });
+        const appIds = Object.keys(workerInfo[kind] || {});
+        const fresh = appIds.find(appId => !knownAppIds.has(appId) && !isRecentlyDeleted(appId));
+        if (fresh) return fresh;
+      } catch { /* the poll can drop for the same reason the deploy did */ }
+    }
+    return null;
+  };
+
   // Optimistic deploy: close the dialog immediately, drop a NOT_STARTED placeholder
   // into local state, and fire the long-running create_* RPC in the background. The
   // manager lock is acquired *synchronously* before the optimistic update so the
@@ -1608,6 +2156,11 @@ const Training: React.FC = () => {
     // turned the placeholder into a real app row.
     if (orchestrators.some(o => o.managerId === managerId && o.appId.startsWith('pending-'))) return;
     mutatingManagersRef.current.add(managerId);
+    // Snapshot the apps this manager already has, so that if the create call's
+    // response is lost we can tell a deploy that went through from one that
+    // never started. Taken before the placeholder is added.
+    const knownAppIds = new Set(orchestrators.filter(o => o.managerId === managerId).map(o => o.appId));
+    logger.info('training', 'Creating orchestrator', { managerId });
     setCreatingOrchestratorMgrs(prev => ({ ...prev, [managerId]: true }));
     // Close UI immediately
     setShowCreateOrchestrator(false);
@@ -1645,10 +2198,31 @@ const Training: React.FC = () => {
         const ownerEmail = (user?.email as string | undefined) || undefined;
         await callManagerCompat(managerId, 'create_orchestrator', { token: applicationToken, owner_id: ownerId, owner_email: ownerEmail }, ['owner_email'], { timeoutMs: 120000 });
       } catch (error) {
-        setOrchestrators(prev => prev.filter(o => o.appId !== pendingAppId));
-        setErrorPopupMessage('Failed to Create Orchestrator');
-        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-        setShowErrorPopup(true);
+        // A lost response is not a failed deploy. Give the worker a chance to
+        // list the orchestrator before saying anything, otherwise the user
+        // reads "failed", clicks Launch again, and ends up with two.
+        const adopted = isTransportFailure(error)
+          ? await waitForDeployedApp(managerId, 'orchestrators_status', knownAppIds)
+          : null;
+        if (adopted) {
+          // Leave the placeholder in place. The refresh below sees a real
+          // entry for this manager and drops the placeholder in the same tick.
+          logger.info('training', 'Adopted orchestrator after a dropped create call', { managerId, appId: adopted });
+        } else {
+          setOrchestrators(prev => prev.filter(o => o.appId !== pendingAppId));
+          const dropped = isTransportFailure(error);
+          setErrorPopupMessage(dropped ? 'Could Not Reach the Worker' : 'Failed to Create Orchestrator');
+          setErrorPopupDetails(
+            dropped
+              ? 'The request did not reach the worker, so it is not certain whether the ' +
+                'orchestrator was created. The worker was checked for the next minute and a half ' +
+                'and reported none, so it most likely never started. Check the worker page ' +
+                'before launching again, in case one appears late.\n\n' +
+                extractRemoteError(error instanceof Error ? error.message : 'Unknown error')
+              : extractRemoteError(error instanceof Error ? error.message : 'Unknown error')
+          );
+          setShowErrorPopup(true);
+        }
       } finally {
         // Hold the loading-spinner state on the Start Orchestrator button
         // for an extra 10 s after the deploy resolves. The manager's
@@ -1676,6 +2250,10 @@ const Training: React.FC = () => {
 
   const createTrainer = async (managerId: string) => {
     if (newTrainerDatasets.length === 0) return;
+    // The image decides the trainer. Without a marker there is nothing safe
+    // to deploy, and the manager would refuse anyway, so stop at the button.
+    const workerImage = workerImageFor(managerId);
+    if (!workerImage?.trainer_artifact) return;
     // Guard against a re-entrant call (double-click on the deploy button,
     // user retrying after an HTTP timeout while the previous deploy is
     // still running server-side, etc). Acquire the lock BEFORE any state
@@ -1688,10 +2266,13 @@ const Training: React.FC = () => {
     // refresh has reconciled the placeholder into the real app row.
     if (trainers.some(t => t.managerId === managerId && t.appId.startsWith('pending-'))) return;
     mutatingManagersRef.current.add(managerId);
+    // See createOrchestrator: the apps this manager has before we ask for
+    // another, so a dropped response can be told apart from a failed deploy.
+    const knownAppIds = new Set(trainers.filter(t => t.managerId === managerId).map(t => t.appId));
     setCreatingTrainerMgrs(prev => ({ ...prev, [managerId]: true }));
     // Snapshot user-input state before clearing the form
     const datasetsArg = newTrainerDatasets;
-    const trainerArtifactArg = newTrainerArtifactId;
+    const trainerArtifactArg = workerImage.trainer_artifact;
     const pretrainedPathArg = selectedWeightsPath;
     const pretrainedArtifactArg = selectedTrainerWeightsArtifactId;
     // Close UI immediately and reset the form
@@ -1717,7 +2298,7 @@ const Training: React.FC = () => {
       status: 'NOT_STARTED',
       serviceIds: [],
       datasets: optimisticDatasets,
-      artifactId: trainerArtifactArg || 'chiron-platform/tabula-trainer',
+      artifactId: trainerArtifactArg,
       displayName: undefined,
       applicationId: pendingAppId,
       isBusy: false,
@@ -1738,10 +2319,29 @@ const Training: React.FC = () => {
         if (pretrainedArtifactArg) trainerParams.pretrained_weights_artifact = { artifact_id: pretrainedArtifactArg, file_path: 'model.pth' };
         await callManagerCompat(managerId, 'create_trainer', trainerParams, ['owner_email'], { timeoutMs: 180000 });
       } catch (error) {
-        setTrainers(prev => prev.filter(t => t.appId !== pendingAppId));
-        setErrorPopupMessage('Failed to Create Trainer');
-        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-        setShowErrorPopup(true);
+        // See createOrchestrator. This is the call the report was filed
+        // against: the trainer deploy is the longest one the page makes, so it
+        // is the likeliest to have its response dropped.
+        const adopted = isTransportFailure(error)
+          ? await waitForDeployedApp(managerId, 'trainers_status', knownAppIds)
+          : null;
+        if (adopted) {
+          logger.info('training', 'Adopted trainer after a dropped create call', { managerId, appId: adopted });
+        } else {
+          setTrainers(prev => prev.filter(t => t.appId !== pendingAppId));
+          const dropped = isTransportFailure(error);
+          setErrorPopupMessage(dropped ? 'Could Not Reach the Worker' : 'Failed to Create Trainer');
+          setErrorPopupDetails(
+            dropped
+              ? 'The request did not reach the worker, so it is not certain whether the ' +
+                'trainer was created. The worker was checked for the next minute and a half ' +
+                'and reported none, so it most likely never started. Check the worker page ' +
+                'before launching again, in case one appears late.\n\n' +
+                extractRemoteError(error instanceof Error ? error.message : 'Unknown error')
+              : extractRemoteError(error instanceof Error ? error.message : 'Unknown error')
+          );
+          setShowErrorPopup(true);
+        }
       } finally {
         // Hold the Start Trainer button's spinner state for 10 s after the
         // deploy resolves, matching the manager's _CREATE_DEDUPE_WINDOW_S.
@@ -1811,7 +2411,7 @@ const Training: React.FC = () => {
       (async () => {
         let history: any = null;
         try {
-          history = await callHyphaService(orchSvcId, 'get_training_history', {}, { timeoutMs: 15000 });
+          history = normalizeHistoryPayload(await callHyphaService(orchSvcId, 'get_training_history', {}, { timeoutMs: 15000 }));
         } catch {
           // No history endpoint or the call failed — fall through to the
           // generic confirm body below.
@@ -1878,6 +2478,7 @@ const Training: React.FC = () => {
   const performRemoveOrchestrator = async (managerId: string, appId: string, force: boolean) => {
     const orchestrator = orchestrators.find(o => o.managerId === managerId && o.appId === appId);
     if (!orchestrator) return;
+    logger.info('training', 'Removing orchestrator', { managerId, appId, force });
     markRecentlyDeleted(orchestrator.appId);
     setOrchestrators(prev => prev.map(o => o.managerId === managerId && o.appId === appId ? { ...o, status: 'DELETING' } : o));
     try {
@@ -1886,8 +2487,10 @@ const Training: React.FC = () => {
       await withManagerLock(managerId, () =>
         callManagerCompat(managerId, 'remove_orchestrator', { application_id: orchestrator.appId, force, caller_id: callerId, caller_email: callerEmail }, ['caller_email'], { timeoutMs: 60000 })
       );
+      logger.info('training', 'Removed orchestrator', { managerId, appId });
       await refreshWorkerInfo(managerId); scheduleWorkerRefresh(managerId);
     } catch (error) {
+      logger.error('training', 'Failed to remove orchestrator', { managerId, appId, force }, error);
       const msg = extractRemoteError(error instanceof Error ? error.message : 'Unknown error');
       setErrorPopupMessage('Failed to Remove Orchestrator');
       setErrorPopupDetails(msg);
@@ -2090,20 +2693,63 @@ const Training: React.FC = () => {
     if (!prev.includes(trainerServiceId)) {
       setRegisteredTrainers([...prev, trainerServiceId]);
     }
+    setPendingTrainerRegistrations(n => n + 1);
     (async () => {
-      try {
-        // NOTE: kwarg is `trainer_service_id`, NOT `service_id`. Hypha's HTTP
-        // gateway reserves `service_id` for the URL path placeholder.
-        await callHyphaService(orchestratorServiceId, 'add_trainer', {
-          trainer_service_id: trainerServiceId,
-          orchestrator_service_id: orchestratorServiceId,
-        }, { timeoutMs: 30000 });
-      } catch (error) {
-        setRegisteredTrainers(prev);
-        setErrorPopupMessage('Failed to Register Trainer');
-        setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
-        setShowErrorPopup(true);
+      // A freshly deployed orchestrator is reported RUNNING slightly before
+      // its service resolves, and this is the first thing the user clicks
+      // afterwards, so ticking the box in that window used to raise a
+      // full-screen modal quoting a Python KeyError for a federation that was
+      // seconds away from working. Give the routing time to settle before
+      // deciding anything, on the two failures that mean the orchestrator
+      // never saw the call. A refusal from the orchestrator itself is a real
+      // answer and still fails on the first try.
+      const ATTEMPTS = 4;
+      const RETRY_DELAY_MS = 5000;
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+        try {
+          // NOTE: kwarg is `trainer_service_id`, NOT `service_id`. Hypha's HTTP
+          // gateway reserves `service_id` for the URL path placeholder.
+          await callHyphaService(orchestratorServiceId, 'add_trainer', {
+            trainer_service_id: trainerServiceId,
+            orchestrator_service_id: orchestratorServiceId,
+          }, { timeoutMs: 30000 });
+          logger.info('training', 'Registered trainer', {
+            orchestratorServiceId,
+            trainerServiceId,
+            attempt,
+          });
+          setPendingTrainerRegistrations(n => Math.max(0, n - 1));
+          return;
+        } catch (error) {
+          lastError = error;
+          const retryable = isUnroutable(error, orchestratorServiceId) || isTransportFailure(error);
+          if (!retryable || attempt === ATTEMPTS) break;
+          logger.warn('training', 'Could not reach the orchestrator to register a trainer, retrying', {
+            orchestratorServiceId,
+            trainerServiceId,
+            attempt,
+          }, error);
+          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+        }
       }
+      logger.error('training', 'Failed to register trainer', {
+        orchestratorServiceId,
+        trainerServiceId,
+      }, lastError);
+      setRegisteredTrainers(prev);
+      const unreachable = isUnroutable(lastError, orchestratorServiceId) || isTransportFailure(lastError);
+      setErrorPopupMessage(unreachable ? 'Could Not Reach the Orchestrator' : 'Failed to Register Trainer');
+      setErrorPopupDetails(
+        unreachable
+          ? 'The orchestrator did not answer, so this trainer was not added to the ' +
+            'federation. It may still be starting up. Wait a moment and tick the box ' +
+            'again, or check the orchestrator on the Setup step.\n\n' +
+            (lastError instanceof Error ? lastError.message : String(lastError ?? ''))
+          : extractRemoteError(lastError instanceof Error ? lastError.message : 'Unknown error')
+      );
+      setShowErrorPopup(true);
+      setPendingTrainerRegistrations(n => Math.max(0, n - 1));
     })();
   };
 
@@ -2201,20 +2847,33 @@ const Training: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false;
+    // Same reason as the status poll below: an orchestrator app serves at most
+    // 10 concurrent requests, and a refresh that fires on a fixed interval
+    // regardless of whether the last one answered will stack calls onto an app
+    // that is already struggling and hold it there.
+    let inFlight = false;
     const fetchRegisteredTrainers = async (showSpinner: boolean) => {
-      if (!selectedOrchestrator) { if (!cancelled) setRegisteredTrainers([]); return; }
+      // Every early return and every success below goes through
+      // `keepUnchanged`, so a poll that finds nothing new leaves the array
+      // identity alone. See `sameIdList` for why that matters.
+      const keepUnchanged = (next: string[]) =>
+        setRegisteredTrainers(prev => (sameIdList(prev, next) ? prev : next));
+      if (!selectedOrchestrator) { if (!cancelled) keepUnchanged([]); return; }
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
-      if (!orchestrator || orchestrator.status !== 'RUNNING') { if (!cancelled) setRegisteredTrainers([]); return; }
+      if (!orchestrator || orchestrator.status !== 'RUNNING') { if (!cancelled) keepUnchanged([]); return; }
+      if (inFlight) return;
+      inFlight = true;
       try {
         if (showSpinner) setIsLoadingRegisteredTrainers(true);
         const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-        const registeredServiceIds = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
-        if (!cancelled) setRegisteredTrainers(registeredServiceIds);
+        const registeredServiceIds = (await callHyphaService<string[]>(orchSvcId, 'list_trainers', {})).map(clientAgnosticServiceId);
+        if (!cancelled) keepUnchanged(registeredServiceIds);
       } catch {
         // Don't wipe the list on a transient fetch error during periodic
         // refresh — keep what we have so optimistic state survives.
-        if (showSpinner && !cancelled) setRegisteredTrainers([]);
+        if (showSpinner && !cancelled) keepUnchanged([]);
       } finally {
+        inFlight = false;
         if (showSpinner && !cancelled) setIsLoadingRegisteredTrainers(false);
       }
     };
@@ -2234,17 +2893,29 @@ const Training: React.FC = () => {
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
       if (!orchestrator || orchestrator.status !== 'RUNNING') { setTrainerParams(null); setTrainerParamsError('Orchestrator not running'); return; }
       if (registeredTrainers.length === 0) { setTrainerParams(null); setTrainerParamsLoading(false); setTrainerParamsError(null); return; }
+      // Hold while a registration is still on the wire. The effect re-runs when
+      // the counter falls back to zero, so the fetch happens once the
+      // orchestrator can actually answer it.
+      if (pendingTrainerRegistrations > 0) { setTrainerParamsLoading(true); setTrainerParamsError(null); return; }
       try {
         setTrainerParamsLoading(true); setTrainerParamsError(null);
         const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
         const params = await callHyphaService(orchSvcId, 'get_trainer_params', {});
-        setTrainerParams(params);
+        setTrainerParams((prev: any) => (sameParams(prev, params) ? prev : params));
       } catch (error) {
-        setTrainerParamsError(error instanceof Error ? error.message : 'Failed to fetch parameters');
+        const raw = error instanceof Error ? error.message : 'Failed to fetch parameters';
+        // The orchestrator raises this whenever its client list is empty. It is
+        // reachable outside the registration race too, when a trainer we still
+        // show as selected was dropped worker-side between polls, so translate
+        // it rather than showing the remote traceback.
+        const msg = raw.includes('No clients registered for federated training')
+          ? 'The orchestrator has no registered trainers yet. Reselect a trainer to continue.'
+          : extractRemoteError(raw);
+        setTrainerParamsError(msg);
       } finally { setTrainerParamsLoading(false); }
     };
     fetchTrainerParams();
-  }, [selectedOrchestrator, registeredTrainers]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedOrchestrator, registeredTrainers, pendingTrainerRegistrations]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const fetchTrainingHistory = async () => {
@@ -2253,7 +2924,7 @@ const Training: React.FC = () => {
       if (!orchestrator || orchestrator.status !== 'RUNNING') return;
       try {
         const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-        const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
+        const history = normalizeHistoryPayload(await callHyphaService<any>(orchSvcId, 'get_training_history', {}));
         if (history) setTrainingHistory(history);
       } catch { /* no history yet */ }
     };
@@ -2261,22 +2932,231 @@ const Training: React.FC = () => {
   }, [selectedOrchestrator]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    // Poll the orchestrator that is actively training (not the currently viewed one)
+    // Keep the loss curves current for the orchestrator that is actively
+    // training, which is not necessarily the one being viewed.
+    //
+    // Two things here used to overload the orchestrator between them.
+    //
+    // It was a plain 2s setInterval, which fires whether or not the previous
+    // tick has answered, and it also polled get_training_status even though
+    // startTrainingStatusPoll below already does that every 3s. An orchestrator
+    // app serves at most 10 concurrent requests, so once a call took longer
+    // than the interval the browser filled the pool within seconds, every
+    // further request came back "has reached its maximum of 10 concurrent
+    // requests", and because the interval kept firing regardless the app never
+    // got a gap in which to drain. A run that was training perfectly well then
+    // reported an unreachable orchestrator across the whole page, which is what
+    // a user sees as the run having failed. It also cost the operator the run's
+    // own configuration, because the panel is restored from the run_config that
+    // rides on the status poll and no status poll ever came back.
+    //
+    // So: chain the next tick off the end of the previous one, which bounds the
+    // browser to a single in-flight request no matter how slow the orchestrator
+    // gets, and fetch only the history. The status poll below owns the status,
+    // including the failure counting and the end-of-run reconciliation, and
+    // duplicating it here only spent a second request slot on the one call that
+    // is already the slowest.
     if (!trainingOrchestratorId || !isTraining) return;
-    const fetchHistoryPeriodically = async () => {
+
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const POLL_MS = 2000;
+
+    const tick = async () => {
+      if (stopped) return;
       const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === trainingOrchestratorId);
-      if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-      try {
-        const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-        const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
-        if (history) setTrainingHistory(history);
-        const status = await callHyphaService<any>(orchSvcId, 'get_training_status', {});
-        if (status) setTrainingStatus(status);
-      } catch { /* silent */ }
+      if (orchestrator && orchestrator.status === 'RUNNING') {
+        try {
+          const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+          const history = normalizeHistoryPayload(await callHyphaService<any>(orchSvcId, 'get_training_history', {}));
+          if (!stopped && history) setTrainingHistory(history);
+        } catch { /* silent */ }
+      }
+      if (!stopped) timer = setTimeout(tick, POLL_MS);
     };
-    const historyInterval = setInterval(fetchHistoryPeriodically, 2000);
-    return () => clearInterval(historyInterval);
+
+    timer = setTimeout(tick, POLL_MS);
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
   }, [isTraining, trainingOrchestratorId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Mirror of `orchestrators` so the status poll below can re-read it from
+  // inside an interval callback without capturing a stale closure.
+  const orchestratorsRef = React.useRef(orchestrators);
+  orchestratorsRef.current = orchestrators;
+
+  // Resolve an orchestrator's *current* Hypha service id.
+  //
+  // These ids are pinned (`<clientId>:<appName>`), so they change whenever the
+  // app's Ray Serve proxy replica rotates. A poll that captured the id once at
+  // launch keeps calling the dead registration and gets a permanent 404, which
+  // is what stranded finished runs: the poll could never observe
+  // `is_running: false` again, so the run stayed "Training Running" forever and
+  // the Save Weights panel (gated on not-actively-training) never rendered.
+  // The 2s history poll above already re-resolves per tick, which is exactly
+  // why that one kept working through the same rotation.
+  const resolveOrchSvcId = React.useCallback((orchKey: string): string | null => {
+    const orch = orchestratorsRef.current.find(o => `${o.managerId}::${o.appId}` === orchKey);
+    if (!orch || orch.status !== 'RUNNING') return null;
+    return orch.serviceIds?.[0]?.websocket_service_id ?? null;
+  }, []);
+
+  // The one poll currently following a run, if any. Owned here rather than by
+  // the effect that starts it: that effect depends on `orchestrators`, which
+  // re-publishes on every worker-info refresh, so an effect-owned poll was torn
+  // down seconds after it started and the re-run then early-returned (training
+  // was by then active) without starting a replacement. Nothing was left
+  // watching, which is how a finished run never got reconciled.
+  const activePollRef = React.useRef<{ key: string; stop: () => void } | null>(null);
+  useEffect(() => () => { activePollRef.current?.stop(); activePollRef.current = null; }, []);
+
+  // Follow a training session to its end and reconcile the UI with it.
+  //
+  // Idempotent: calling it again for the orchestrator already being followed is
+  // a no-op, so both the launch path and the resume path can call it freely.
+  // Shared by both, which previously carried two hand-copied versions of this
+  // loop that had drifted apart.
+  const startTrainingStatusPoll = React.useCallback((orchKey: string) => {
+    if (activePollRef.current?.key === orchKey) return;
+    activePollRef.current?.stop();
+
+    const FAST_MS = 3000;
+    // After the orchestrator has been unreachable for a while, keep watching on
+    // a slower cadence rather than giving up. Deregistration and replica
+    // rotation both recover on their own, and the run usually survives them.
+    const SLOW_MS = 15000;
+    // 10 x 3s = ~30s before we unlock the UI. Shorter than this and a routine
+    // network flap strands the user in a view that refuses Delete and Stop.
+    const MAX_STATUS_FAILURES = 10;
+    // Stop reconciling after this long with no contact at all. Without a cap a
+    // deleted orchestrator would be polled for the lifetime of the page.
+    const MAX_RECONCILE_MS = 30 * 60 * 1000;
+
+    let failures = 0;
+    let lastStageKey = '';
+    let unreachableSince = 0;
+    let unlockedByFailure = false;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const stop = () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      if (activePollRef.current?.key === orchKey) activePollRef.current = null;
+    };
+    const schedule = (ms: number) => { if (!stopped) timer = setTimeout(tick, ms); };
+
+    const finish = async (svcId: string, status?: any) => {
+      setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
+      stop();
+      // A run that dies mid-round reports exactly what a run that finished all
+      // its rounds reports: is_running false, stage null. Until the orchestrator
+      // started carrying the reason on the status, the page could only do what
+      // it does for a success, quietly drop back to the history view, and the
+      // operator was left to describe it as a crash with nothing to go on. Say
+      // what happened, and point at the reporting path, since a failed round is
+      // exactly the kind of thing worth a report.
+      const runError = status?.error;
+      if (runError?.message) {
+        logger.error('training', 'Run ended with an error', {
+          orchestrator: orchKey,
+          round: runError.round,
+          type: runError.type,
+          message: runError.message,
+        });
+        setErrorPopupMessage(`Training failed ${describeErrorRound(runError.round)}`);
+        setErrorPopupDetails(extractRemoteError(runError.message));
+        setErrorPopupDashboardUrl(null);
+        setShowErrorPopup(true);
+        promptReportIssue(`Training failed ${describeErrorRound(runError.round)}: ${runError.message}`);
+      }
+      // Always through callHyphaService with the freshly resolved id. The
+      // resume path used to call an undeclared `orchestratorService` here,
+      // which threw a ReferenceError and left trainingHistory unset, and the
+      // Save Weights panel needs that history to render at all.
+      try {
+        const history = normalizeHistoryPayload(await callHyphaService<any>(svcId, 'get_training_history', {}));
+        if (history) setTrainingHistory(history);
+      } catch { /* curves stay as last polled */ }
+    };
+
+    const tick = async () => {
+      if (stopped) return;
+      const svcId = resolveOrchSvcId(orchKey);
+      if (!svcId) { onFailure(); return; }
+      try {
+        const status = normalizeStatusPayload(await callHyphaService<any>(svcId, 'get_training_status', {}));
+        if (stopped) return;
+        failures = 0; unreachableSince = 0;
+        // One line per round or stage change, not one per poll: at a 3s cadence
+        // an unfiltered status log would fill the whole buffer with a single
+        // run and push out everything that led up to it.
+        // `current_training_round` and `target_round`, which is what
+        // get_training_status returns and what the progress bar below already
+        // reads. This log used to ask for `current_round` and `num_rounds`,
+        // names the orchestrator has never sent, so every entry recorded the
+        // round as undefined and the key collapsed to the stage alone. The one
+        // reader of these lines is a Report Issue attachment, where the round a
+        // run reached is the first thing anyone looks for.
+        const stageKey = `${status?.current_training_round ?? '-'}/${status?.stage ?? '-'}/${status?.is_running}`;
+        if (stageKey !== lastStageKey) {
+          lastStageKey = stageKey;
+          logger.info('training', 'Round status', {
+            orchestrator: orchKey,
+            round: status?.current_training_round,
+            total_rounds: status?.target_round,
+            stage: status?.stage,
+            is_running: status?.is_running,
+          });
+        }
+        setTrainingStatus(status);
+        const newIds = Object.keys(status.trainers_progress ?? {});
+        if (newIds.length > 0) {
+          setParticipatedTrainerIds(prev => {
+            const next = new Set(prev);
+            newIds.forEach(id => next.add(id));
+            return next;
+          });
+        }
+        if (!status.is_running) { await finish(svcId, status); return; }
+        // Reachable and still training. Re-enter the training view only if this
+        // poll is what unlocked it, never unconditionally: the user may have
+        // just pressed Stop Now, and the orchestrator still reports is_running
+        // until it winds down. Re-entering there would undo their click.
+        if (unlockedByFailure) {
+          unlockedByFailure = false;
+          setIsTraining(true); setTrainingOrchestratorId(orchKey);
+        }
+        schedule(FAST_MS);
+      } catch {
+        onFailure();
+      }
+    };
+
+    const onFailure = () => {
+      if (stopped) return;
+      failures += 1;
+      if (failures === 1) {
+        logger.warn('training', 'Orchestrator status poll failed', { orchestrator: orchKey });
+      }
+      if (failures === MAX_STATUS_FAILURES) {
+        logger.warn('training', 'Orchestrator unreachable, unlocking the UI and slowing the poll', {
+          orchestrator: orchKey,
+          failures,
+        });
+        // Unlock the UI so Delete and Stop work, but keep watching. This is the
+        // difference that fixes the stranded-run case: the old code cleared the
+        // interval here, so `is_running: false` became unobservable for good.
+        unreachableSince = Date.now();
+        unlockedByFailure = true;
+        setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
+      }
+      if (unreachableSince && Date.now() - unreachableSince > MAX_RECONCILE_MS) { stop(); return; }
+      schedule(failures >= MAX_STATUS_FAILURES ? SLOW_MS : FAST_MS);
+    };
+
+    activePollRef.current = { key: orchKey, stop };
+    schedule(FAST_MS);
+  }, [resolveOrchSvcId]);
 
   // Auto-detect already-running training when the selected orchestrator changes or
   // when the orchestrators list first loads.  Covers:
@@ -2294,68 +3174,45 @@ const Training: React.FC = () => {
     const checkOngoingTraining = async () => {
       try {
         const [status, history] = await Promise.all([
-          callHyphaService<any>(orchSvcId, 'get_training_status', {}),
-          callHyphaService<any>(orchSvcId, 'get_training_history', {}).catch(() => null),
+          callHyphaService<any>(orchSvcId, 'get_training_status', {}).then(normalizeStatusPayload),
+          callHyphaService<any>(orchSvcId, 'get_training_history', {}).then(normalizeHistoryPayload).catch(() => null),
         ]);
         if (cancelled) return;
         if (history) setTrainingHistory(history);
+        // Record the status whether or not a run is in flight. It carries the
+        // run_config that the config panel is restored from, and the
+        // orchestrator keeps reporting it after the run ends, so throwing it
+        // away here was what left a finished run's settings invisible: opening
+        // the page showed the schema defaults, and continuing from that run's
+        // checkpoint silently started from them. Everything that renders a
+        // live run is gated on isTraining rather than on this, so a finished
+        // run's status cannot put the page back into the training view.
+        if (status) setTrainingStatus(status);
         if (!status?.is_running) return; // training stopped or never started — just show history
         // Training is actively running — enter the monitoring state
         setIsTraining(true);
         setTrainingResumed(true);
         setTrainingOrchestratorId(selectedOrchestrator);
         setTrainingConfigCollapsed(true);
-        setTrainingStatus(status);
         const ids = Object.keys(status.trainers_progress ?? {});
         if (ids.length > 0) setParticipatedTrainerIds(new Set(ids));
-        // Poll until done. After 3 consecutive get_training_status failures we
-        // assume the orchestrator is gone (its websocket dropped, replica
-        // rotated and was never replaced, etc.) and exit the training view so
-        // the user can Delete/Stop the registered trainers. See the matching
-        // counter in startTraining's polling loop for the rationale.
-        let consecutiveStatusFailures = 0;
-        const MAX_STATUS_FAILURES = 3;
-        const statusInterval = setInterval(async () => {
-          try {
-            const s = await callHyphaService<any>(orchSvcId, 'get_training_status', {});
-            if (cancelled) { clearInterval(statusInterval); return; }
-            consecutiveStatusFailures = 0;
-            setTrainingStatus(s);
-            const newIds = Object.keys(s.trainers_progress ?? {});
-            if (newIds.length > 0) {
-              setParticipatedTrainerIds(prev => {
-                const next = new Set(prev);
-                newIds.forEach(id => next.add(id));
-                return next;
-              });
-            }
-            if (!s.is_running) {
-              setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null); clearInterval(statusInterval);
-              const h = await orchestratorService.get_training_history();
-              if (h) setTrainingHistory(h);
-            }
-          } catch {
-            consecutiveStatusFailures += 1;
-            if (consecutiveStatusFailures >= MAX_STATUS_FAILURES) {
-              setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
-              clearInterval(statusInterval);
-            }
-          }
-        }, 3000);
+        // The poll owns its own lifetime (see activePollRef), so this effect
+        // re-running on an `orchestrators` refresh does not disturb it.
+        startTrainingStatusPoll(selectedOrchestrator);
       } catch { /* orchestrator not yet reachable — will retry on next dep change */ }
     };
     checkOngoingTraining();
     return () => { cancelled = true; };
   }, [selectedOrchestrator, orchestrators]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const startTraining = async (config: { num_rounds: number; fit_config: Record<string, any>; eval_config: Record<string, any>; per_round_timeout: number; initial_weights: { artifact_id: string; file_path: string } | null; }) => {
+  const startTraining = async (config: { num_rounds: number; fit_config: Record<string, any>; eval_config: Record<string, any>; per_round_timeout: number; initial_weights: { artifact_id: string; file_path: string } | null; transport?: WeightTransport; }) => {
     if (!selectedOrchestrator) return;
     const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
     if (!orchestrator || orchestrator.status !== 'RUNNING') return;
     setIsPreparingTraining(true);
     try {
       const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-      const currentTrainers = await callHyphaService<string[]>(orchSvcId, 'list_trainers', {});
+      const currentTrainers = (await callHyphaService<string[]>(orchSvcId, 'list_trainers', {})).map(clientAgnosticServiceId);
       if (currentTrainers.length === 0) throw new Error('No trainers available. Please select at least one trainer.');
       const launchedFrom = selectedOrchestrator!;
       setIsPreparingTraining(false); setIsTraining(true); setTrainingResumed(false); setTrainingOrchestratorId(launchedFrom); setTrainingConfigCollapsed(true);
@@ -2366,50 +3223,63 @@ const Training: React.FC = () => {
       requestAnimationFrame(() => scrollMainContentToTop());
       setSavedItems({});
       setSaveStatuses({});
-      const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout };
+      // `transport` picks how weight blobs move between the orchestrator and
+      // the trainers. Same apps either way — see src/config/federation.ts. The
+      // config panel owns the choice; the default is only reached when a caller
+      // hands us a config from before the picker existed.
+      const trainingParams: any = { num_rounds: config.num_rounds, fit_config: config.fit_config, eval_config: config.eval_config, per_round_timeout: config.per_round_timeout, transport: config.transport || DEFAULT_WEIGHT_TRANSPORT };
+      setRunTransport(trainingParams.transport);
       if (config.initial_weights) trainingParams.initial_weights = config.initial_weights;
-      // start_training runs the whole session server-side and only returns when
-      // done — fire-and-forget with a generous timeout (just shy of an hour).
-      callHyphaService(orchSvcId, 'start_training', trainingParams, { timeoutMs: 3_600_000 }).catch((error: Error) => {
-        setErrorPopupMessage('Training Failed'); setErrorPopupDetails(error.message); setShowErrorPopup(true);
-        setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
+      // Config KEYS only. fit_config and eval_config carry dataset ids and
+      // data directories the operator typed in, which are theirs and never
+      // ours to ship off the machine.
+      logger.info('training', 'Starting training', {
+        orchestrator: launchedFrom,
+        trainers: currentTrainers.length,
+        num_rounds: config.num_rounds,
+        per_round_timeout: config.per_round_timeout,
+        transport: trainingParams.transport,
+        has_initial_weights: !!config.initial_weights,
+        fit_config_keys: Object.keys(config.fit_config || {}),
+        eval_config_keys: Object.keys(config.eval_config || {}),
       });
-      // After this many consecutive get_training_status failures we treat the
-      // orchestrator as gone and exit the training view, so the user is not
-      // stranded with a UI that refuses Delete and Stop on a dead session.
-      // 3 × 3 s = ~9 s tolerance, comfortable enough to ride out one slow
-      // Hypha hop without flipping out of training mid-round.
-      let consecutiveStatusFailures = 0;
-      const MAX_STATUS_FAILURES = 3;
-      const statusInterval = setInterval(async () => {
-        try {
-          const status = await callHyphaService<any>(orchSvcId, 'get_training_status', {});
-          consecutiveStatusFailures = 0;
-          setTrainingStatus(status);
-          // Accumulate trainer IDs that have appeared in trainers_progress
-          const newIds = Object.keys(status.trainers_progress);
-          if (newIds.length > 0) {
-            setParticipatedTrainerIds(prev => {
-              const next = new Set(prev);
-              newIds.forEach(id => next.add(id));
-              return next;
-            });
-          }
-          if (!status.is_running) {
-            setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null); clearInterval(statusInterval);
-            const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
-            setTrainingHistory(history);
-          }
-        } catch {
-          consecutiveStatusFailures += 1;
-          if (consecutiveStatusFailures >= MAX_STATUS_FAILURES) {
-            // Orchestrator unreachable — exit the training view so Delete/Stop unblock.
-            setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
-            clearInterval(statusInterval);
+      // start_training runs the whole session server-side and only returns when
+      // done, so this is fire-and-forget with a generous timeout (just shy of
+      // an hour).
+      callHyphaService(orchSvcId, 'start_training', trainingParams, { timeoutMs: 3_600_000 }).catch(async (error: Error) => {
+        // A lost response is not a failed run. start_training only returns
+        // once the whole session is over, and the orchestrator runs it whether
+        // or not the browser is still listening, so an error arriving in the
+        // first moments is the request being dropped, not the run refusing to
+        // start. Taking it at face value tore the page out of the monitoring
+        // view and reported "Training Failed" over a federation that went on
+        // to finish its rounds and produce checkpoints.
+        //
+        // So ask the orchestrator before saying anything, and give it the half
+        // minute it needs to answer honestly. The request may still be in
+        // flight when the browser gives up on it, the orchestrator takes a
+        // moment to accept the session once it lands, and the same routing
+        // wobble that dropped the request can 404 the first status calls too.
+        if (isTransportFailure(error) || isUnroutable(error, orchSvcId)) {
+          const running = await orchestratorIsRunning(orchSvcId);
+          if (running !== false) {
+            // Running, or still unreachable and we cannot honestly say
+            // otherwise. Either way the status poll started below is the one
+            // that knows, so leave the verdict to it.
+            logger.warn('training', 'Lost the start_training response, leaving the run to the status poll', {
+              orchestrator: launchedFrom,
+              orchestratorAnswered: running === true,
+            }, error);
+            return;
           }
         }
-      }, 3000);
+        logger.error('training', 'Training run failed', { orchestrator: launchedFrom }, error);
+        setErrorPopupMessage('Training Failed'); setErrorPopupDetails(extractRemoteError(error.message)); setShowErrorPopup(true);
+        setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
+      });
+      startTrainingStatusPoll(launchedFrom);
     } catch (error) {
+      logger.error('training', 'Failed to start training', error);
       setErrorPopupMessage('Failed to Start Training');
       setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true); setIsPreparingTraining(false); setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null);
@@ -2423,9 +3293,11 @@ const Training: React.FC = () => {
     setIsStoppingTraining(true);
     try {
       const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+      logger.info('training', 'Stopping training now', { orchestrator: selectedOrchestrator });
       await callHyphaService(orchSvcId, 'stop_training', {}, { timeoutMs: 30000 });
       setIsTraining(false); setTrainingResumed(false); setTrainingOrchestratorId(null); setTrainingStatus(null);
     } catch (error) {
+      logger.error('training', 'Failed to stop training', error);
       setErrorPopupMessage('Failed to Stop Training');
       setErrorPopupDetails(extractRemoteError(error instanceof Error ? error.message : 'Unknown error'));
       setShowErrorPopup(true);
@@ -2650,6 +3522,28 @@ const Training: React.FC = () => {
 
   const getStatusBadge = (status?: string, onClick?: () => void) => {
     const displayStatus = status || 'NOT_STARTED';
+    // The worker reports NOT_STARTED for the whole stretch between accepting a
+    // deployment and Ray Serve first listing the application, which for these
+    // apps runs to minutes. The raw state reads as "nothing is happening", and
+    // get_app_logs has nothing better to offer either: it answers with
+    // "has not been deployed yet" and an empty deployments map, which describes
+    // an app that was never started rather than one that is starting now. Show
+    // progress instead, and keep the badge inert until a real state arrives so
+    // that message is not reachable.
+    if (displayStatus === 'NOT_STARTED') {
+      return (
+        <span
+          className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700"
+          title="Waiting for the worker to start this application. Logs become available once it reaches DEPLOYING."
+        >
+          <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+          </svg>
+          Starting…
+        </span>
+      );
+    }
     const statusConfig: Record<string, { color: string; dot: string }> = {
       'NOT_STARTED': { color: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400' },
       'DEPLOYING': { color: 'bg-blue-100 text-blue-700', dot: 'bg-blue-500 animate-pulse' },
@@ -2686,6 +3580,81 @@ const Training: React.FC = () => {
     </span>
   );
 
+  /**
+   * The trainer service IDs that took part in the run currently on screen.
+   *
+   * `registeredTrainers` answers a different question: who is registered with
+   * the orchestrator *right now*. That is the right input while a run is being
+   * assembled, and the wrong one once it has finished. The orchestrator's ping
+   * loop unregisters a trainer it cannot reach, and it flushes the roster at
+   * the end of a session, so a run that completed normally routinely leaves an
+   * empty roster behind. Reading the roster after the fact reports "0 sites"
+   * for a federation that had several, blanks the map, and disables the very
+   * save buttons the run exists to feed.
+   *
+   * The per-round loss curves are the run's own record of who contributed, and
+   * they never regress once written. Take those as the authority and union in
+   * the live roster so a session still being assembled (history empty) is
+   * unaffected.
+   */
+  const runParticipantIds = useMemo<string[]>(() => {
+    const ids = new Set<string>([
+      ...Object.keys(trainingHistory?.client_training_losses ?? {}),
+      ...Object.keys(trainingHistory?.client_validation_losses ?? {}),
+      ...registeredTrainers,
+    ]);
+    return Array.from(ids);
+  }, [trainingHistory, registeredTrainers]);
+
+  /**
+   * Manager (worker) ID for a trainer service, from the live app list when the
+   * worker is reachable and from the persisted metadata cache when it is not.
+   * A participant whose worker has gone quiet still belongs on the map and in
+   * the site count.
+   */
+  const managerIdForTrainer = useCallback((svcId: string): string | undefined =>
+    trainers.find(t => t.serviceIds?.[0]?.websocket_service_id === svcId)?.managerId
+      ?? trainerMetaCache[svcId]?.managerId,
+    [trainers, trainerMetaCache]
+  );
+
+  /**
+   * Why the selected federation cannot start a run, when the reason is the
+   * deployment rather than the form. Today that is only an app older than the
+   * platform's floor. An app that reports no version, or one this build has no
+   * floor for, is never blocked (see src/config/chironVersions.ts).
+   *
+   * Checked here rather than inside the config panel because the panel is
+   * handed parameters, not deployments, and the versions live on the app rows
+   * the manager reports.
+   */
+  const runBlockedReason = useMemo<{ title: string; detail: string } | null>(() => {
+    const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator);
+    const outdated: { name: string; version: string; floor: VersionFloor }[] = [];
+    const orchOld = appTooOld(orchestrator?.artifactId, orchestrator?.version);
+    if (orchestrator && orchOld) {
+      outdated.push({ name: orchestrator.displayName || 'Orchestrator', ...orchOld });
+    }
+    // Only the trainers actually registered with this orchestrator take part in
+    // the run, so a stale trainer parked on some other worker does not block it.
+    trainers.forEach(t => {
+      const isRegistered = t.serviceIds?.some((sid: any) => registeredTrainers.includes(sid?.websocket_service_id));
+      if (!isRegistered) return;
+      const old = appTooOld(t.artifactId, t.version);
+      if (old) outdated.push({ name: t.displayName || 'Trainer', ...old });
+    });
+    if (outdated.length === 0) return null;
+    const first = outdated[0];
+    const others = outdated.length > 1 ? ` (and ${outdated.length - 1} more)` : '';
+    return {
+      title: `${first.name} is older than Chiron supports${others}`,
+      detail:
+        `${first.name} is running ${first.version}, and this run needs ` +
+        `${first.floor.minimum} or newer. ${first.floor.reason} ` +
+        `Redeploy it from Launch Application, choosing version ${first.floor.minimum} or later.`,
+    };
+  }, [orchestrators, trainers, selectedOrchestrator, registeredTrainers]);
+
   // Compute map workers from discovered + connected state
   const mapWorkers = useMemo<MapWorker[]>(() => {
     const appRole = (managerId: string): MapWorker['role'] => {
@@ -2700,10 +3669,10 @@ const Training: React.FC = () => {
       const selectedOrchObj = selectedOrchestrator
         ? orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator)
         : null;
+      // Participants, not the live roster: a finished run keeps its markers even
+      // after the orchestrator has flushed its registrations. See runParticipantIds.
       const registeredTrainerManagerIds = new Set(
-        trainers
-          .filter(t => { const svcId = t.serviceIds?.[0]?.websocket_service_id; return svcId && registeredTrainers.includes(svcId); })
-          .map(t => t.managerId)
+        runParticipantIds.map(managerIdForTrainer).filter((id): id is string => !!id)
       );
       const selectedManagerIds = new Set<string>();
       if (selectedOrchObj) selectedManagerIds.add(selectedOrchObj.managerId);
@@ -2764,7 +3733,7 @@ const Training: React.FC = () => {
       });
     });
     return result;
-  }, [currentStep, managers, orchestrators, trainers, registeredTrainers, selectedOrchestrator, discoveredWorkers, observedWorkspaces]);
+  }, [currentStep, managers, orchestrators, trainers, registeredTrainers, runParticipantIds, managerIdForTrainer, selectedOrchestrator, discoveredWorkers, observedWorkspaces]);
 
   // Annotate mapWorkers with active flag (depends on trainingStatus, kept separate)
   // Map trainer service ID → managerId for pulse/animation lookups
@@ -3215,6 +4184,17 @@ const Training: React.FC = () => {
                           const trainerCount = trainers.filter(t => t.managerId === worker.serviceId).length;
                           const geo = manager?.workerInfo?.worker_info?.geo_location;
                           const datasetEntries = manager?.workerInfo?.datasets ? Object.entries(manager.workerInfo.datasets) : [];
+                          // The model this worker's image can train. Only
+                          // meaningful once the worker has answered at least
+                          // one poll, so an unreachable worker shows neither
+                          // the badge nor the outdated notice.
+                          const workerImage = manager?.workerInfo?.worker_info?.chiron_image;
+                          // A worker can be out of date in two different ways,
+                          // and they need different fixes: an image from before
+                          // per-model support reports no model at all, while a
+                          // newer but still under-floor image reports its model
+                          // correctly and is simply too old to run against.
+                          const workerImageOutdated = imageTooOld(workerImage?.image_ref);
 
                           const isHighlighted = highlightedWorkerIds.includes(worker.serviceId);
                           return (
@@ -3225,6 +4205,31 @@ const Training: React.FC = () => {
                                   <div>
                                     <p className="font-medium text-gray-900 leading-tight">{worker.name}</p>
                                     <p className="text-xs text-gray-400 font-mono">{worker.workspace}</p>
+                                    {isConnected && (workerImage ? (
+                                      <span className="inline-flex flex-wrap items-center gap-1 mt-1">
+                                        <span
+                                          className="inline-block px-1.5 py-0.5 text-[10px] font-semibold rounded bg-indigo-50 text-indigo-700 border border-indigo-100"
+                                          title={workerImage.image_ref ? `Image: ${workerImage.image_ref}` : undefined}
+                                        >
+                                          {modelDisplayName(workerImage)}
+                                        </span>
+                                        {workerImageOutdated && (
+                                          <span
+                                            className="inline-block px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-50 text-amber-700 border border-amber-100"
+                                            title={`Running ${workerImageOutdated.version}, and Chiron needs ${workerImageOutdated.floor.minimum} or newer. ${workerImageOutdated.floor.reason} ${imageUpgradeInstruction(workerImageOutdated.floor)}`}
+                                          >
+                                            Update to {workerImageOutdated.floor.minimum}
+                                          </span>
+                                        )}
+                                      </span>
+                                    ) : (
+                                      <span
+                                        className="inline-block mt-1 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-50 text-amber-700 border border-amber-100"
+                                        title="This worker's image predates per-model support, so Chiron cannot tell which model it can train. Restart it on a current image."
+                                      >
+                                        Outdated image
+                                      </span>
+                                    ))}
                                   </div>
                                 </div>
                               </td>
@@ -3238,9 +4243,19 @@ const Training: React.FC = () => {
                               </td>
                               <td className="px-4 py-3.5">
                                 {datasetEntries.length > 0 ? (
-                                  <div className="flex flex-col gap-0.5">
+                                  // One badge per dataset. Stacked plain text
+                                  // ran together when a name itself wrapped,
+                                  // leaving no way to tell where one dataset
+                                  // ended and the next began.
+                                  <div className="flex flex-wrap gap-1">
                                     {datasetEntries.map(([dsId, ds]: [string, any]) => (
-                                      <span key={dsId} className="text-xs text-gray-600 leading-tight">{ds.name || dsId}</span>
+                                      <span
+                                        key={dsId}
+                                        className="inline-block px-2 py-0.5 text-xs text-gray-700 bg-gray-100 border border-gray-200 rounded-full leading-tight"
+                                        title={ds.name ? `${ds.name} (${dsId})` : dsId}
+                                      >
+                                        {ds.name || dsId}
+                                      </span>
                                     ))}
                                   </div>
                                 ) : isConnected ? <span className="text-gray-300 text-xs">None</span>
@@ -3337,8 +4352,28 @@ const Training: React.FC = () => {
                     {orchestrators.filter(o => o.status === 'RUNNING' && isOwnedByMe(o)).length === 0 ? (
                       <div className="text-center py-8 text-gray-400">
                         <FaClock className="mx-auto mb-2 opacity-40" size={24} />
-                        <p className="text-sm">No running orchestrators</p>
-                        <p className="text-xs mt-1">Launch one from the Setup step</p>
+                        {/* An orchestrator somebody else started is filtered out
+                            of this list but is still shown, dimmed, on the Setup
+                            step. Saying only "none running" contradicts that,
+                            and the advice that follows it sends the user to
+                            launch a second one onto a worker whose memory the
+                            first one already holds. Name the reason instead. */}
+                        {othersRunningOrchestrators > 0 ? (
+                          <>
+                            <p className="text-sm">No orchestrator you can use</p>
+                            <p className="text-xs mt-1 max-w-xs mx-auto">
+                              {othersRunningOrchestrators === 1
+                                ? 'One orchestrator is running here, started by another user.'
+                                : `${othersRunningOrchestrators} orchestrators are running here, all started by other users.`}
+                              {' '}Launch your own from the Setup step, or ask them to share theirs.
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-sm">No running orchestrators</p>
+                            <p className="text-xs mt-1">Launch one from the Setup step</p>
+                          </>
+                        )}
                       </div>
                     ) : (
                       orchestrators
@@ -3419,8 +4454,26 @@ const Training: React.FC = () => {
                           {selectedOrchestrator && connectedRunningTrainers.length === 0 && remoteRegisteredSvcIds.length === 0 && (
                             <div className="text-center py-8 text-gray-400">
                               <FaClock className="mx-auto mb-2 opacity-40" size={24} />
-                              <p className="text-sm">No running trainers</p>
-                              <p className="text-xs mt-1">Launch trainers from the Setup step</p>
+                              {/* Same reasoning as the orchestrator panel above:
+                                  a trainer another user started is dimmed on the
+                                  Setup step but absent here, so an unexplained
+                                  "none" reads as a contradiction. */}
+                              {othersRunningTrainers > 0 ? (
+                                <>
+                                  <p className="text-sm">No trainer you can use</p>
+                                  <p className="text-xs mt-1 max-w-xs mx-auto">
+                                    {othersRunningTrainers === 1
+                                      ? 'One trainer is running here, started by another user.'
+                                      : `${othersRunningTrainers} trainers are running here, all started by other users.`}
+                                    {' '}Launch your own from the Setup step, or ask them to share theirs.
+                                  </p>
+                                </>
+                              ) : (
+                                <>
+                                  <p className="text-sm">No running trainers</p>
+                                  <p className="text-xs mt-1">Launch trainers from the Setup step</p>
+                                </>
+                              )}
                             </div>
                           )}
                           {selectedOrchestrator && connectedRunningTrainers.map(trainer => {
@@ -3461,7 +4514,7 @@ const Training: React.FC = () => {
                                 <input type="checkbox" checked={isRegistered} disabled={isDisabled} onChange={async e => { e.target.checked ? await registerTrainer(trainerId) : await unregisterTrainer(trainerId); }} className="mt-0.5 accent-emerald-600" />
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-center gap-1.5 flex-wrap">
-                                    <p className="font-medium text-gray-900 text-sm leading-tight">{trainer.displayName || 'Tabula Trainer'}</p>
+                                    <p className="font-medium text-gray-900 text-sm leading-tight">{trainer.displayName || 'Trainer'}</p>
                                     {isPendingRemove && (
                                       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700">
                                         <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />Leaving after this round
@@ -3537,7 +4590,10 @@ const Training: React.FC = () => {
                                     <input type="checkbox" checked={true} disabled={isLoadingRegisteredTrainers} onChange={async () => { await unregisterRemoteTrainer(svcId); }} className="mt-0.5 accent-emerald-600" />
                                     <div className="flex-1 min-w-0">
                                       <div className="flex items-center gap-1.5 flex-wrap">
-                                        <p className="font-medium text-gray-700 text-sm leading-tight">Tabula Trainer</p>
+                                        {/* The worker is gone, so its image identity is gone with
+                                            it and the model cannot be named. The service id below
+                                            carries whatever the app was called. */}
+                                        <p className="font-medium text-gray-700 text-sm leading-tight">Trainer</p>
                                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs bg-gray-100 text-gray-500">
                                           <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
                                           Worker disconnected
@@ -3682,6 +4738,7 @@ const Training: React.FC = () => {
                   <div className="px-5 pb-5 border-t border-gray-100">
                     <div className="pt-4">
                       <TrainingConfigPanel
+                        configScope={selectedOrchestrator}
                         params={trainerParams}
                         loading={trainerParamsLoading}
                         error={trainerParamsError}
@@ -3691,6 +4748,7 @@ const Training: React.FC = () => {
                         isTraining={isActivelyTraining}
                         hasHistory={!!trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0)}
                         onConfigChange={(numRounds, perRoundTimeoutMinutes) => setTrainingConfigSummary({ numRounds, perRoundTimeoutMinutes })}
+                        blockedReason={runBlockedReason}
                       />
                     </div>
                   </div>
@@ -3706,7 +4764,27 @@ const Training: React.FC = () => {
                       <h3 className="font-semibold text-gray-900 text-sm">Training in Progress</h3>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{trainingStatus.stage ? STAGE_LABELS[trainingStatus.stage] : 'Idle'}</span>
+                      {/* This block only renders while the orchestrator reports
+                          the run as running, so a null stage does not mean the
+                          federation is idle: it means the run has been accepted
+                          and has not entered round 1 yet, which covers loading
+                          the pretrained weights onto every trainer and pulling
+                          the initial parameters back off one of them. Labelling
+                          that "Idle" describes the opposite of what is
+                          happening, and on a slow first weight transfer it is
+                          the only thing the operator sees for minutes. */}
+                      {trainingStatus.stage ? (
+                        <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">{STAGE_LABELS[trainingStatus.stage]}</span>
+                      ) : (
+                        // The elapsed time is what turns this badge from a
+                        // label into information: it is the only on-screen
+                        // difference between a run that is seconds from round 1
+                        // and one that has been retrying a weight transfer for
+                        // minutes.
+                        <span className="text-xs font-medium text-blue-700 uppercase tracking-wide bg-blue-100 px-2 py-0.5 rounded-full">
+                          Preparing{preparingSince !== null ? ` \u00b7 ${formatElapsed(preparingElapsed)}` : ''}
+                        </span>
+                      )}
                       {(() => {
                         // Show the round currently in flight, not the count of
                         // completed rounds. The orchestrator already decrements
@@ -3732,6 +4810,22 @@ const Training: React.FC = () => {
                       })()}
                     </div>
                   </div>
+                  {/* A long pre-round-1 wait is the one state where the card
+                      has nothing to show and no per-trainer progress to fall
+                      back on, because no trainer has been asked to do anything
+                      yet. Say what the wait is for, and say that it is bounded,
+                      so the operator has a reason to keep waiting rather than
+                      guessing whether the run is dead. */}
+                  {!trainingStatus.stage && preparingSince !== null && preparingElapsed > PREPARING_EXPLAIN_AFTER_MS && (
+                    <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      Still setting up the first round. The pretrained weights are loaded onto every
+                      trainer and the initial parameters are transferred back over{' '}
+                      <span className="font-medium">{WEIGHT_TRANSPORT_LABELS[runTransport].label}</span>.
+                      The orchestrator retries a transfer that does not come through and ends the run
+                      with an error if it cannot complete, so this will not wait indefinitely.
+                      {runTransport === 'webrtc' && ' If it keeps failing here, the peer-to-peer channel is not opening from this network and the WebSocket transport is the fallback.'}
+                    </div>
+                  )}
                   <div className="space-y-3">
                     {Object.entries(trainingStatus.trainers_progress)
                       .sort(([a], [b]) => getTrainerDisplayName(a).localeCompare(getTrainerDisplayName(b)))
@@ -3756,29 +4850,81 @@ const Training: React.FC = () => {
                 </div>
               )}
 
+              {/* Why the last run ended, when it ended badly. The modal raised
+                  at the moment of failure is gone as soon as it is dismissed,
+                  and it never appears at all for someone who reloads the page
+                  after the fact. This is the durable record: it stays until the
+                  next run clears the orchestrator's error, and it sits directly
+                  above the history so the truncated loss curve has an
+                  explanation next to it rather than looking like a short run. */}
+              {!isActivelyTraining && trainingStatus?.error?.message && (
+                <div className="bg-red-50 border border-red-100 rounded-2xl p-4 flex items-start gap-3">
+                  <FaTimesCircle className="text-red-500 flex-shrink-0 mt-0.5" size={16} />
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-red-800">
+                      Training stopped {describeErrorRound(trainingStatus.error.round)}
+                    </p>
+                    <p className="text-sm text-red-700 mt-1 break-words whitespace-pre-wrap">
+                      {extractRemoteError(trainingStatus.error.message)}
+                    </p>
+                    <p className="text-xs text-red-500 mt-2">
+                      Rounds completed before this point are kept, and you can continue from the
+                      last checkpoint once the cause is resolved.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Loss Charts */}
               {trainingHistory && ((trainingHistory.training_losses?.length > 0) || (trainingHistory.validation_losses?.length > 0)) && (
                 <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="font-semibold text-gray-900 text-sm">Training History</h3>
-                    <button
-                      onClick={async () => {
-                        const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === (trainingOrchestratorId || selectedOrchestrator));
-                        if (!orchestrator || orchestrator.status !== 'RUNNING') return;
-                        try {
-                          const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
-                          const history = await callHyphaService<any>(orchSvcId, 'get_training_history', {});
-                          if (history) setTrainingHistory(history);
-                        } catch { /* silent */ }
-                      }}
-                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 transition-colors"
-                      title="Refresh training history"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                      Refresh
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {historyRefreshError && (
+                        <span className="text-xs text-red-500" title={historyRefreshError}>{historyRefreshError}</span>
+                      )}
+                      <button
+                        onClick={async () => {
+                          const orchestrator = orchestrators.find(o => `${o.managerId}::${o.appId}` === (trainingOrchestratorId || selectedOrchestrator));
+                          if (!orchestrator || orchestrator.status !== 'RUNNING') {
+                            setHistoryRefreshError('Orchestrator is not running');
+                            return;
+                          }
+                          // The refresh used to run with no visible state and
+                          // swallow its own failures, so a click looked
+                          // identical whether the call was in flight, had
+                          // returned unchanged data, or had failed outright.
+                          // Hold the pending flag for a beat past a fast
+                          // response: a spinner that appears and vanishes
+                          // within one frame reads as nothing happening,
+                          // which is the complaint this addresses.
+                          setHistoryRefreshing(true);
+                          setHistoryRefreshError(null);
+                          const startedAt = Date.now();
+                          try {
+                            const orchSvcId = orchestrator.serviceIds[0].websocket_service_id;
+                            const history = normalizeHistoryPayload(await callHyphaService<any>(orchSvcId, 'get_training_history', {}));
+                            if (history) setTrainingHistory(history);
+                          } catch (err) {
+                            setHistoryRefreshError(extractRemoteError(err instanceof Error ? err.message : String(err)));
+                          } finally {
+                            const elapsed = Date.now() - startedAt;
+                            const settle = Math.max(0, 400 - elapsed);
+                            if (settle > 0) await new Promise(r => setTimeout(r, settle));
+                            setHistoryRefreshing(false);
+                          }
+                        }}
+                        disabled={historyRefreshing}
+                        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                        title="Refresh training history"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className={`w-3.5 h-3.5 ${historyRefreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        {historyRefreshing ? 'Refreshing…' : 'Refresh'}
+                      </button>
+                    </div>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                     {trainingHistory.training_losses?.length > 0 && (
@@ -3808,19 +4954,52 @@ const Training: React.FC = () => {
               {/* Save Weights — shown when there is training history and not actively training */}
               {!isActivelyTraining && trainingHistory && ((trainingHistory.training_losses?.length ?? 0) > 0 || (trainingHistory.validation_losses?.length ?? 0) > 0) && (() => {
                 const rounds = trainingHistory.training_losses?.length ?? 0;
-                const registeredTrainerApps = trainers.filter(t =>
-                  t.serviceIds?.[0]?.websocket_service_id && registeredTrainers.includes(t.serviceIds[0].websocket_service_id)
-                );
+                // This panel describes a run that has finished, so it counts the
+                // sites that took part in it rather than the ones registered with
+                // the orchestrator at this instant. Those two diverge routinely:
+                // the roster is flushed at end of session and pruned whenever a
+                // ping is missed, which used to render a completed federation as
+                // "0 sites" and disable its save buttons. See runParticipantIds.
+                const siteCount = runParticipantIds.length;
                 // Alpha-sort so the auto-generated description is stable across polls
                 // (per-manager refreshWorkerInfo re-appends trainers to the end of state,
                 // which would otherwise shuffle the dataset list order over time).
-                const allDatasets = [...new Set(registeredTrainerApps.flatMap(t =>
-                  Object.values(t.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean)
-                ))].sort((a, b) => a.localeCompare(b));
-                const globalAutoDesc = `Tabula transformer · ${rounds} federated round${rounds !== 1 ? 's' : ''} · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''}: ${allDatasets.join(', ')}`;
+                // Dataset names come from the live trainer while its worker is
+                // reachable and from the persisted cache when it is not, so the
+                // description does not lose its dataset tail to a dropped poll.
+                const allDatasets = [...new Set(runParticipantIds.flatMap(svcId => {
+                  const live = trainers.find(t => t.serviceIds?.[0]?.websocket_service_id === svcId);
+                  return live
+                    ? Object.values(live.datasets as Record<string, any>).map((d: any) => d.name || '').filter(Boolean)
+                    : (trainerMetaCache[svcId]?.datasets ?? []);
+                }))].sort((a, b) => a.localeCompare(b));
+                // The orchestrator names the model and the subset it averages, so the
+                // description says what was actually federated rather than assuming Tabula.
+                const fedModelName = trainerParams?.model?.display_name || 'Federated model';
+                const fedScope = trainerParams?.model?.shared_weight_scope;
+                // The orchestrator is the authority on which model ran, but it
+                // only answers get_trainer_params while a trainer is
+                // registered. After a recovered run that call may never have
+                // landed, so fall back to the image the trainers' own worker
+                // reports. Both can be absent, and every label below degrades
+                // to model-neutral wording rather than to Tabula's.
+                const fedManagerId = runParticipantIds.map(managerIdForTrainer).find(Boolean);
+                const fedFamily = trainerParams?.model?.family
+                  || workerImageFor(fedManagerId)?.model_family;
+                const fedModelShort = trainerParams?.model?.display_name
+                  || modelDisplayName(workerImageFor(fedManagerId));
+                // What FedAvg averages, and what it never touches. Every model
+                // federates a subset, so the two cards below hold genuinely
+                // different files and the wording has to say which is which.
+                const sharedPhrase = sharedWeightsLabel(fedFamily, fedScope);
+                const localPhrase = localWeightsLabel(fedFamily);
+                // The dataset list is empty whenever the trainers were redeployed after
+                // the run, so keep the ": <datasets>" tail conditional rather than
+                // leaving a dangling colon in a field the user is about to publish.
+                const globalAutoDesc = `${fedModelName}${sharedPhrase ? ` (${sharedPhrase})` : ''} · ${rounds} federated round${rounds !== 1 ? 's' : ''} · ${siteCount} site${siteCount !== 1 ? 's' : ''}${allDatasets.length ? `: ${allDatasets.join(', ')}` : ''}`;
 
-                const SaveCard = ({ itemKey, title, subtitle, autoDesc, actions, checkpointPicker }: {
-                  itemKey: string; title: string; subtitle: string; autoDesc: string;
+                const SaveCard = ({ itemKey, title, subtitle, note, autoDesc, actions, checkpointPicker }: {
+                  itemKey: string; title: string; subtitle: string; note?: string; autoDesc: string;
                   actions: React.ReactNode;
                   // Optional per-card checkpoint picker; rendered inside the card so it is
                   // visually scoped to this card alone (not shared across the panel).
@@ -3835,6 +5014,7 @@ const Training: React.FC = () => {
                       <div>
                         <p className="text-sm font-semibold text-gray-800">{title}</p>
                         <p className="text-xs text-gray-400">{subtitle}</p>
+                        {note && <p className="text-xs text-gray-400 mt-0.5">{note}</p>}
                       </div>
                       {checkpointPicker}
                       <input type="text"
@@ -3918,7 +5098,7 @@ const Training: React.FC = () => {
                     <div className="space-y-3">
                       <SaveCard
                         itemKey="global"
-                        title="Global averaged transformer"
+                        title={fedModelShort ? `Global ${fedModelShort} weights` : 'Global averaged weights'}
                         checkpointPicker={globalCheckpoints.length > 1 ? (
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-xs text-gray-500 flex-shrink-0">Use checkpoint:</span>
@@ -3933,7 +5113,8 @@ const Training: React.FC = () => {
                             </div>
                           </div>
                         ) : undefined}
-                        subtitle={`FedAvg result · ${registeredTrainerApps.length} site${registeredTrainerApps.length !== 1 ? 's' : ''} · round ${selectedGlobalRound ?? rounds}`}
+                        subtitle={`FedAvg result · ${siteCount} site${siteCount !== 1 ? 's' : ''} · round ${selectedGlobalRound ?? rounds}`}
+                        note={`Shared weights only${sharedPhrase ? `: ${sharedPhrase}` : ''}. Seeds a federated run, not a standalone model.`}
                         autoDesc={globalAutoDesc}
                         actions={
                           <button onClick={() => saveGlobalWeights(globalAutoDesc)} disabled={globalStatus === 'saving' || selectedGlobalRound === null}
@@ -3948,13 +5129,8 @@ const Training: React.FC = () => {
                         }
                       />
                       {(() => {
-                        // All service IDs that contributed to this training run (from history + registered).
-                        const historyIds = new Set([
-                          ...Object.keys(trainingHistory.client_training_losses ?? {}),
-                          ...Object.keys(trainingHistory.client_validation_losses ?? {}),
-                        ]);
-                        registeredTrainerApps.forEach(t => historyIds.add(t.serviceIds[0].websocket_service_id));
-                        return Array.from(historyIds).map(svcId => {
+                        // All service IDs that contributed to this training run.
+                        return runParticipantIds.map(svcId => {
                           // Connectivity: is the trainer app currently running?
                           const liveTrainer = trainers.find(t => t.serviceIds?.[0]?.websocket_service_id === svcId);
                           const isConnected = !!liveTrainer && liveTrainer.status === 'RUNNING';
@@ -3974,8 +5150,15 @@ const Training: React.FC = () => {
                           const offlineBadge = !isConnected
                             ? (isMgrConnected ? 'Offline' : 'Disconnected')
                             : null;
+                          // The two states mean different things and only one of
+                          // them says anything about the run. Spell that out, so
+                          // a worker that has merely gone quiet is not read as a
+                          // site that dropped out of the federation.
+                          const offlineTitle = offlineBadge === 'Offline'
+                            ? 'The trainer application is no longer running on this worker. Its contribution to the run above is unaffected.'
+                            : 'This worker is not responding, so the state of its trainer is unknown. Its contribution to the run above is unaffected. Saving becomes available again once it reconnects.';
                           const clientRounds = trainingHistory.client_training_losses?.[svcId]?.length || rounds;
-                          const autoDesc = `Tabula model (embedder + transformer + heads) · ${clientRounds} federated round${clientRounds !== 1 ? 's' : ''} · ${datasetNames.join(', ')}`;
+                          const autoDesc = `${fedModelShort || 'Trainer'} full model (${localPhrase ? `all weights including this site's ${localPhrase}` : 'full state_dict'}) · ${clientRounds} federated round${clientRounds !== 1 ? 's' : ''}${datasetNames.length ? ` · ${datasetNames.join(', ')}` : ''}`;
                           const pubKey = `publish-${svcId}`;
                           const locKey = `local-${svcId}`;
                           const pubStatus = saveStatuses[pubKey] || 'idle';
@@ -3995,11 +5178,22 @@ const Training: React.FC = () => {
                                   <p className={`text-sm font-semibold ${!isConnected ? 'text-gray-500' : 'text-gray-800'}`}>{workerName}</p>
                                   <p className="text-xs text-gray-400">
                                     {geoDisplay && <>{geoDisplay}<span className="text-gray-300 mx-1">·</span></>}
-                                    {datasetNames.join(', ') || 'No datasets'}<span className="text-gray-300 ml-1">· full model</span>
+                                    {datasetNames.join(', ') || 'No datasets'}
+                                    {!localPhrase && <span className="text-gray-300 ml-1">· full model</span>}
                                   </p>
+                                  {/* The contrast with the global card above is
+                                      the whole point of keeping both exports:
+                                      this file is the only one that carries the
+                                      site-local part, so it is the only one that
+                                      loads as a model on its own. */}
+                                  {localPhrase && (
+                                    <p className="text-xs text-gray-400 mt-0.5">
+                                      Full model{sharedPhrase ? `: ${sharedPhrase}` : ''}, plus this site's {localPhrase}.
+                                    </p>
+                                  )}
                                 </div>
                                 {offlineBadge && (
-                                  <span className={`flex-shrink-0 text-xs font-medium px-2 py-0.5 rounded-full ${offlineBadge === 'Offline' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>{offlineBadge}</span>
+                                  <span title={offlineTitle} className={`flex-shrink-0 text-xs font-medium px-2 py-0.5 rounded-full cursor-help ${offlineBadge === 'Offline' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>{offlineBadge}</span>
                                 )}
                               </div>
                               {/* Session + checkpoint picker */}
@@ -4050,7 +5244,7 @@ const Training: React.FC = () => {
                               />
                               <div className={`flex flex-wrap items-center gap-2 rounded-lg p-1.5 -m-1.5 transition-colors`}>
                                 <button onClick={() => saveTrainerPublish(svcId, saveDescriptions[descKey] || autoDesc)} disabled={savingDisabled}
-                                  title={isConnected ? "Upload the full Tabula model as a staged artifact. Review and publish to the Model Hub from My Models." : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker; cannot save" : "Worker manager is not reachable; cannot save"}
+                                  title={isConnected ? "Upload the full model as a staged artifact. Review and publish to the Model Hub from My Models." : offlineBadge === 'Offline' ? "Trainer app no longer exists on this worker; cannot save" : "Worker manager is not reachable; cannot save"}
                                   className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 text-white text-xs font-semibold rounded-lg hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
                                   {pubStatus === 'saving'
                                     ? <>{spinner} Uploading…</>
@@ -4100,10 +5294,12 @@ const Training: React.FC = () => {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col max-h-[90vh]">
             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold text-gray-900">Launch Application</h3>
-                <p className="text-xs text-gray-500 mt-0.5 font-mono">{launchDialogManagerId.split('/')[1]?.split(':')[0] || launchDialogManagerId}</p>
-              </div>
+              {/* No service id here. The only identifier this dialog could
+                  show is the manager's Ray client id, which is opaque, rotates
+                  on every replica restart, and names nothing the operator
+                  chose. The worker row they clicked to get here is the
+                  context. */}
+              <h3 className="font-semibold text-gray-900">Launch Application</h3>
               <button onClick={() => { setShowLaunchDialog(false); setLaunchDialogManagerId(null); setNewTrainerDatasets([]); setLocalModelWeights(null); setSelectedWeightsPath(null); setSelectedTrainerWeightsArtifactId(null); setIsWeightsDropdownOpen(false); }} className="text-gray-400 hover:text-gray-600 p-1">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
@@ -4135,18 +5331,26 @@ const Training: React.FC = () => {
                     <label className="block text-xs font-semibold text-gray-700 mb-1.5">Datasets <span className="text-red-500">*</span></label>
                     <div className="max-h-44 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-50">
                       {(() => {
-                        const manager = managers.find(m => m.serviceId === launchDialogManagerId);
-                        const datasets = manager?.workerInfo?.datasets || {};
-                        const entries = Object.entries(datasets);
-                        if (entries.length === 0) return <p className="text-sm text-gray-400 text-center py-4">No datasets available on this worker</p>;
-                        return entries.map(([datasetId, manifest]: [string, any]) => {
+                        if (launchDialogDatasets.length === 0) return <p className="text-sm text-gray-400 text-center py-4">No datasets available on this worker</p>;
+                        return launchDialogDatasets.map(({ datasetId, manifest, incompatibleReason }) => {
                           const hasAccess = hasDatasetAccess(manifest);
+                          // Both reasons a dataset cannot be trained on are
+                          // stated in the row rather than only disabling it, so
+                          // the operator is not left guessing which of the two
+                          // greyed-out datasets is which.
+                          const usable = hasAccess && !incompatibleReason;
                           return (
-                            <label key={datasetId} className={`flex items-center gap-2.5 px-3 py-2.5 ${hasAccess ? 'hover:bg-gray-50 cursor-pointer' : 'opacity-50 cursor-not-allowed bg-red-50'}`}>
-                              <input type="checkbox" checked={newTrainerDatasets.includes(datasetId)} onChange={e => { e.target.checked ? setNewTrainerDatasets(p => [...p, datasetId]) : setNewTrainerDatasets(p => p.filter(d => d !== datasetId)); }} disabled={!hasAccess} className="accent-emerald-600 flex-shrink-0" />
+                            <label key={datasetId} className={`flex items-start gap-2.5 px-3 py-2.5 ${usable ? 'hover:bg-gray-50 cursor-pointer' : 'opacity-70 cursor-not-allowed bg-red-50'}`}>
+                              <input type="checkbox" checked={newTrainerDatasets.includes(datasetId)} onChange={e => { e.target.checked ? setNewTrainerDatasets(p => [...p, datasetId]) : setNewTrainerDatasets(p => p.filter(d => d !== datasetId)); }} disabled={!usable} className="accent-emerald-600 flex-shrink-0 mt-0.5" />
                               <div className="flex-1 min-w-0">
                                 <span className="text-sm text-gray-800">{manifest.name || datasetId}</span>
                                 {!hasAccess && <span className="ml-2 text-xs text-red-500">(No access)</span>}
+                                {hasAccess && incompatibleReason && (
+                                  <>
+                                    <span className="ml-2 text-xs text-red-500">(Not readable by this model)</span>
+                                    <p className="mt-1 text-xs text-red-700">{incompatibleReason}</p>
+                                  </>
+                                )}
                               </div>
                             </label>
                           );
@@ -4154,41 +5358,276 @@ const Training: React.FC = () => {
                       })()}
                     </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Artifact ID</label>
-                    <input type="text" value={newTrainerArtifactId} onChange={e => setNewTrainerArtifactId(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="chiron-platform/tabula-trainer" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Max batch size</label>
-                    <p className="text-xs text-gray-400 -mt-1 mb-1.5">
-                      Hardware-aware upper bound for this trainer. Any session that requests a larger <code className="bg-gray-100 px-1 rounded">batch_size</code> is clamped to this value. Pick based on the worker's GPU memory.
-                    </p>
-                    {/* Reference GPU memory at common batch sizes, measured live on an
-                        RTX 3090 with the Tabula trainer + the demo blood dataset. Above
-                        the trainer's idle ~0.7 GiB baseline. Scaling is super-linear, so
-                        we don't extrapolate to in-between sizes. */}
-                    <div className="text-xs text-gray-600 -mt-1 mb-1.5 bg-gray-50 border border-gray-200 rounded-md px-2 py-1.5">
-                      <span className="font-medium text-gray-700">Reference memory:</span>{' '}
-                      <code className="bg-white px-1 rounded">8</code> ≈ 2 GB ·{' '}
-                      <code className="bg-white px-1 rounded">16</code> ≈ 6 GB ·{' '}
-                      <code className="bg-white px-1 rounded">32</code> ≈ 20 GB
-                    </div>
-                    {(() => {
-                      const cs = managers.find(m => m.serviceId === launchDialogManagerId)?.workerInfo?.cluster_status;
-                      if (!cs || !cs.total_gpu_memory || cs.total_gpu_memory <= 0) return null;
-                      const totalGiB = cs.total_gpu_memory / (1024 ** 3);
-                      const gpuCount = cs.total_gpu || 0;
-                      const perGpuGiB = gpuCount > 0 ? totalGiB / gpuCount : totalGiB;
-                      const usedGiB = (cs.used_gpu_memory || 0) / (1024 ** 3);
+                  {/* Model architecture, resolved from the worker's image. Not a
+                      choice: the image carries one model's dependencies, so any
+                      other trainer would fail on import inside Ray. The manager
+                      rejects a mismatch independently. */}
+                  {(() => {
+                    const img = workerImageFor(launchDialogManagerId);
+                    if (!img) {
                       return (
-                        <div className="text-xs text-gray-600 -mt-1 mb-1.5 bg-emerald-50 border border-emerald-100 rounded-md px-2 py-1.5">
-                          <span className="font-medium text-emerald-700">This worker:</span>{' '}
-                          {gpuCount > 0 ? `${gpuCount}× GPU, ` : ''}
-                          {totalGiB.toFixed(1)} GiB total{gpuCount > 1 ? ` (~${perGpuGiB.toFixed(1)} GiB per GPU)` : ''}
-                          {usedGiB > 0 && ` · ${usedGiB.toFixed(1)} GiB currently in use`}
+                        <div className="text-xs bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800">
+                          <p className="font-semibold mb-1">This worker's image predates per-model support</p>
+                          <p>
+                            It does not report which model it can train, so Chiron cannot pick a trainer for it.
+                            Restart the worker on a current image, then deploy from here.
+                          </p>
+                          <Link to="/worker" className="inline-block mt-2 underline hover:text-amber-900">
+                            Open the worker setup guide
+                          </Link>
+                        </div>
+                      );
+                    }
+                    // The image reports a model but is older than the platform
+                    // supports. The fix is in the compose file the setup guide
+                    // generated, not in the UI, so say exactly which edit.
+                    //
+                    // Which edit depends on the floor. Most floors need only a
+                    // newer tag. A floor marked `regenerate` also changed
+                    // something else in that file, and telling the user to bump
+                    // the tag would leave them with a worker that starts and
+                    // then misbehaves, so ask for a fresh file instead.
+                    const outdated = workerImageOutdatedFor(launchDialogManagerId);
+                    if (outdated) {
+                      const regenerate = outdated.floor.action === 'regenerate';
+                      return (
+                        <div className="text-xs bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-800">
+                          <p className="font-semibold mb-1">
+                            This worker's image is out of date ({outdated.version})
+                          </p>
+                          <p>{outdated.floor.reason}</p>
+                          {regenerate ? (
+                            <p className="mt-2">
+                              Generate a new compose file for this worker from the setup
+                              guide and restart it on that file. Changing only the image tag
+                              is not enough for this upgrade: the file itself changed.
+                            </p>
+                          ) : (
+                            <p className="mt-2">
+                              Change the image tag in this worker's compose file to{' '}
+                              <code className="bg-amber-100 px-1 rounded">
+                                {imageRepository(img.model_family)}:{outdated.floor.minimum}
+                              </code>{' '}
+                              or newer, then restart the worker.
+                            </p>
+                          )}
+                          <Link to="/worker" className="inline-block mt-2 underline hover:text-amber-900">
+                            Open the worker setup guide
+                          </Link>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-1.5">
+                          <label className="block text-xs font-semibold text-gray-700">Model architecture</label>
+                          <InfoPopover label="About this worker's model">
+                            <p className="font-semibold text-gray-800 mb-1">Decided by the worker's image</p>
+                            <p>
+                              This worker's image ships the dependencies for one model, so it can
+                              only train that one. To train a different model, start a worker on
+                              that model's image.
+                            </p>
+                            <p className="mt-2 text-gray-500">Trainer</p>
+                            <p className="font-mono break-all text-gray-600">{img.trainer_artifact}</p>
+                            {img.image_ref && (
+                              <>
+                                <p className="mt-2 text-gray-500">Image</p>
+                                <p className="font-mono break-all text-gray-600">{img.image_ref}</p>
+                              </>
+                            )}
+                          </InfoPopover>
+                        </div>
+                        <span className={`inline-flex items-center px-2.5 py-1 text-sm font-semibold rounded-full border ${modelBadgeClass(img.model_family)}`}>
+                          {modelDisplayName(img)}
+                        </span>
+                      </div>
+                    );
+                  })()}
+                  {/* Pretrained weights selection — local-worker saves + full
+                      chiron-models checkpoints of this worker's model */}
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <label className="block text-xs font-semibold text-gray-700">Pretrained weights <span className="text-gray-400 font-normal">(optional)</span></label>
+                      <InfoPopover label="About pretrained weights">
+                        <p className="font-semibold text-gray-800 mb-1">Which checkpoints fit here</p>
+                        <p>
+                          The trainer starts from a full checkpoint of this worker's model: the input
+                          embedder, the shared transformer and the output heads.
+                        </p>
+                        <p className="mt-2">
+                          A checkpoint holding only the shared transformer will not do, and neither will
+                          one from a different model. The list below is already filtered to what fits.
+                        </p>
+                        <p className="mt-2">
+                          Leave it on <span className="font-medium text-gray-800">Start fresh</span> to
+                          train from randomly initialised weights.
+                        </p>
+                      </InfoPopover>
+                    </div>
+                    {isLoadingLocalWeights ? (
+                      <div className="flex items-center gap-2 text-xs text-gray-400 py-2"><BiLoaderAlt className="animate-spin" size={12} /> Loading saved weights…</div>
+                    ) : localModelWeights === null ? (
+                      <p className="text-xs text-gray-400">Switch to Trainer tab to load available weights.</p>
+                    ) : (() => {
+                      const selectedLocal = localModelWeights.find(w => w.path === selectedWeightsPath);
+                      const selectedArtifact = trainerWeightArtifacts.find(a => a.id === selectedTrainerWeightsArtifactId);
+                      const selectedLocalDatasets = selectedLocal ? Object.values(selectedLocal.datasets).map((d: any) => d.name || '').filter(Boolean) : [];
+                      const selectedLocalDate = selectedLocal?.saved_at ? new Date(selectedLocal.saved_at).toLocaleDateString() : null;
+                      return (
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() => setIsWeightsDropdownOpen(o => !o)}
+                            className="w-full text-left px-3 py-2 border border-gray-200 rounded-lg bg-white hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors relative"
+                          >
+                            {selectedLocal ? (
+                              <div className="pr-5">
+                                <p className="text-sm text-gray-800">{selectedLocalDate && <span className="mr-1.5">{selectedLocalDate}</span>}{selectedLocalDatasets.join(', ')}{(selectedLocal.num_rounds > 0 || selectedLocal.total_samples_seen > 0) && <span className="text-gray-500"> · {selectedLocal.num_rounds} round{selectedLocal.num_rounds !== 1 ? 's' : ''}, {selectedLocal.total_samples_seen.toLocaleString()} samples seen</span>}</p>
+                                <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{selectedLocal.client_name}</p>
+                              </div>
+                            ) : selectedArtifact ? (
+                              <div className="pr-5">
+                                <p className="text-sm text-gray-800">{selectedArtifact.manifest?.name || selectedArtifact.alias || selectedArtifact.id}</p>
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                  {modelDisplayName(workerImageFor(launchDialogManagerId)) || 'Model'} · from Model Collection
+                                </p>
+                              </div>
+                            ) : (
+                              <span className="text-sm text-gray-500 pr-5">Start fresh (no pretrained weights)</span>
+                            )}
+                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs">{isWeightsDropdownOpen ? '▴' : '▾'}</span>
+                          </button>
+                          {isWeightsDropdownOpen && (
+                            <div className="mt-1 border border-gray-200 rounded-lg overflow-hidden">
+                              <div className="max-h-64 overflow-y-auto divide-y divide-gray-50" onWheel={e => e.stopPropagation()}>
+                                <button type="button" onClick={() => { setSelectedWeightsPath(null); setSelectedTrainerWeightsArtifactId(null); setIsWeightsDropdownOpen(false); }}
+                                  className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === null && selectedTrainerWeightsArtifactId === null ? 'bg-emerald-50' : ''}`}>
+                                  <span className="text-sm text-gray-700">Start fresh</span>
+                                </button>
+
+                                {/* From Model Collection (full chiron-models checkpoints) */}
+                                <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">From Model Collection</div>
+                                {trainerWeightArtifacts.length === 0 && (
+                                  <p className="text-xs text-gray-400 text-center py-3 px-3">
+                                    {(() => {
+                                      const name = modelDisplayName(workerImageFor(launchDialogManagerId));
+                                      return name ? `No ${name} models published yet.` : 'No models published yet.';
+                                    })()}
+                                  </p>
+                                )}
+                                {trainerWeightArtifacts.map(a => {
+                                  const name = a.manifest?.name || a.alias || a.id;
+                                  const tissue = a.manifest?.tissue as string | undefined;
+                                  const date = a.manifest?.created_at || a.created_at;
+                                  const dateStr = date ? new Date(date * 1000).toLocaleDateString() : null;
+                                  return (
+                                    <button key={a.id} type="button"
+                                      onClick={() => { setSelectedTrainerWeightsArtifactId(a.id); setSelectedWeightsPath(null); setIsWeightsDropdownOpen(false); }}
+                                      className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedTrainerWeightsArtifactId === a.id ? 'bg-emerald-50' : ''}`}>
+                                      <p className="text-sm text-gray-800">{name}</p>
+                                      <p className="text-xs text-gray-500 mt-0.5">
+                                        {dateStr && <span className="mr-1.5">{dateStr}</span>}
+                                        {tissue && <span className="capitalize">{tissue}</span>}
+                                      </p>
+                                    </button>
+                                  );
+                                })}
+
+                                {/* From this worker (locally-saved snapshots) */}
+                                <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">From This Worker</div>
+                                {localModelWeights.length === 0 && (
+                                  <p className="text-xs text-gray-400 text-center py-3 px-3">No saved weights on this worker yet.</p>
+                                )}
+                                {localModelWeights.map(w => {
+                                  const names = Object.values(w.datasets).map((d: any) => d.name || '').filter(Boolean);
+                                  const date = w.saved_at ? new Date(w.saved_at).toLocaleDateString() : null;
+                                  return (
+                                    <button key={w.path} type="button"
+                                      onClick={() => { setSelectedWeightsPath(w.path); setSelectedTrainerWeightsArtifactId(null); setIsWeightsDropdownOpen(false); }}
+                                      className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === w.path ? 'bg-emerald-50' : ''}`}>
+                                      <p className="text-sm text-gray-800">{date && <span className="mr-1.5">{date}</span>}{names.join(', ')}</p>
+                                      <p className="text-xs text-gray-500 mt-0.5">{w.num_rounds > 0 || w.total_samples_seen > 0 ? `${w.num_rounds} round${w.num_rounds !== 1 ? 's' : ''} · ${w.total_samples_seen.toLocaleString()} samples seen` : 'No training history'}</p>
+                                      <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{w.client_name}</p>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       );
                     })()}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <label className="block text-xs font-semibold text-gray-700">Max batch size</label>
+                      {/* The reference figures and this worker's GPU are the
+                          numbers you need to answer "what should I put here",
+                          but they are three blocks of small print for a field
+                          most operators set once. They live in the popover so
+                          the field itself stays one line. */}
+                      <InfoPopover label="About max batch size">
+                        <p className="font-semibold text-gray-800 mb-1">A hardware limit, not a training setting</p>
+                        <p>
+                          The batch size a session asks for is one number for the whole federation, but the
+                          sites in a federation rarely have the same GPU. Each trainer clamps the requested
+                          batch size to its own maximum, so a session that is too large for one site still
+                          runs there, just in smaller batches. Set this to what this worker's GPU can hold.
+                        </p>
+                        {(() => {
+                          const img = workerImageFor(launchDialogManagerId);
+                          const entries = referenceMemoryEntries(img?.model_family);
+                          if (entries.length === 0) return null;
+                          const measured = entries.filter(e => e.gb > 0);
+                          return (
+                            <>
+                              <p className="mt-2 font-medium text-gray-700">
+                                {measured.length > 0
+                                  ? `${modelDisplayName(img)} reference memory`
+                                  : `${modelDisplayName(img)} validated batch sizes`}
+                              </p>
+                              <p className="text-gray-600">
+                                {entries.map((e, i) => (
+                                  <React.Fragment key={e.batchSize}>
+                                    {i > 0 && ' · '}
+                                    <code className="bg-gray-100 px-1 rounded">{e.batchSize}</code>
+                                    {e.gb > 0 && ` ≈ ${e.gb} GB`}
+                                  </React.Fragment>
+                                ))}
+                              </p>
+                              {measured.length > 0 && (
+                                <p className="text-gray-400 mt-0.5">
+                                  Measured on a 24 GB RTX 3090, above the trainer's idle baseline. Scaling is
+                                  super-linear, so in-between sizes are not extrapolated.
+                                </p>
+                              )}
+                            </>
+                          );
+                        })()}
+                        {(() => {
+                          const cs = managers.find(m => m.serviceId === launchDialogManagerId)?.workerInfo?.cluster_status;
+                          if (!cs || !cs.total_gpu_memory || cs.total_gpu_memory <= 0) return null;
+                          const totalGiB = cs.total_gpu_memory / (1024 ** 3);
+                          const gpuCount = cs.total_gpu || 0;
+                          const perGpuGiB = gpuCount > 0 ? totalGiB / gpuCount : totalGiB;
+                          const usedGiB = (cs.used_gpu_memory || 0) / (1024 ** 3);
+                          return (
+                            <>
+                              <p className="mt-2 font-medium text-gray-700">This worker</p>
+                              <p className="text-gray-600">
+                                {gpuCount > 0 ? `${gpuCount}× GPU, ` : ''}
+                                {totalGiB.toFixed(1)} GiB total{gpuCount > 1 ? ` (~${perGpuGiB.toFixed(1)} GiB per GPU)` : ''}
+                                {usedGiB > 0 && ` · ${usedGiB.toFixed(1)} GiB currently in use`}
+                              </p>
+                            </>
+                          );
+                        })()}
+                      </InfoPopover>
+                    </div>
+                    <p className="text-xs text-gray-400 -mt-1 mb-1.5">
+                      The largest batch this worker's GPU can hold.
+                    </p>
                     {/* Stepping is on powers of 2 (2, 4, 8, 16, 32, 64, 128,
                         256, 512) because GPU memory cost roughly doubles per
                         step — see the reference strip above. Manual typing is
@@ -4260,100 +5699,15 @@ const Training: React.FC = () => {
                       );
                     })()}
                   </div>
-                  {/* Pretrained weights selection — local-worker saves + chiron-models full tabula models */}
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1.5">Pretrained weights <span className="text-gray-400 font-normal">(optional)</span></label>
-                    <p className="text-xs text-gray-400 -mt-1 mb-1.5">
-                      Loads a full Tabula checkpoint into the new trainer: sets the tissue-specific embedder, the shared transformer, and the projection heads. Transformer-only checkpoints can't be used here.
-                    </p>
-                    {isLoadingLocalWeights ? (
-                      <div className="flex items-center gap-2 text-xs text-gray-400 py-2"><BiLoaderAlt className="animate-spin" size={12} /> Loading saved weights…</div>
-                    ) : localModelWeights === null ? (
-                      <p className="text-xs text-gray-400">Switch to Trainer tab to load available weights.</p>
-                    ) : (() => {
-                      const selectedLocal = localModelWeights.find(w => w.path === selectedWeightsPath);
-                      const selectedArtifact = chironModelArtifacts.find(a => a.id === selectedTrainerWeightsArtifactId);
-                      const selectedLocalDatasets = selectedLocal ? Object.values(selectedLocal.datasets).map((d: any) => d.name || '').filter(Boolean) : [];
-                      const selectedLocalDate = selectedLocal?.saved_at ? new Date(selectedLocal.saved_at).toLocaleDateString() : null;
-                      return (
-                        <div>
-                          <button
-                            type="button"
-                            onClick={() => setIsWeightsDropdownOpen(o => !o)}
-                            className="w-full text-left px-3 py-2 border border-gray-200 rounded-lg bg-white hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors relative"
-                          >
-                            {selectedLocal ? (
-                              <div className="pr-5">
-                                <p className="text-sm text-gray-800">{selectedLocalDate && <span className="mr-1.5">{selectedLocalDate}</span>}{selectedLocalDatasets.join(', ')}{(selectedLocal.num_rounds > 0 || selectedLocal.total_samples_seen > 0) && <span className="text-gray-500"> · {selectedLocal.num_rounds} round{selectedLocal.num_rounds !== 1 ? 's' : ''}, {selectedLocal.total_samples_seen.toLocaleString()} samples seen</span>}</p>
-                                <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{selectedLocal.client_name}</p>
-                              </div>
-                            ) : selectedArtifact ? (
-                              <div className="pr-5">
-                                <p className="text-sm text-gray-800">{selectedArtifact.manifest?.name || selectedArtifact.alias || selectedArtifact.id}</p>
-                                <p className="text-xs text-gray-500 mt-0.5">Tabula model · from Model Collection</p>
-                              </div>
-                            ) : (
-                              <span className="text-sm text-gray-500 pr-5">Start fresh (no pretrained weights)</span>
-                            )}
-                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs">{isWeightsDropdownOpen ? '▴' : '▾'}</span>
-                          </button>
-                          {isWeightsDropdownOpen && (
-                            <div className="mt-1 border border-gray-200 rounded-lg overflow-hidden">
-                              <div className="max-h-64 overflow-y-auto divide-y divide-gray-50" onWheel={e => e.stopPropagation()}>
-                                <button type="button" onClick={() => { setSelectedWeightsPath(null); setSelectedTrainerWeightsArtifactId(null); setIsWeightsDropdownOpen(false); }}
-                                  className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === null && selectedTrainerWeightsArtifactId === null ? 'bg-emerald-50' : ''}`}>
-                                  <span className="text-sm text-gray-700">Start fresh</span>
-                                </button>
-
-                                {/* From Model Collection (chiron-models tabula_model artifacts) */}
-                                <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">From Model Collection</div>
-                                {chironModelArtifacts.length === 0 && (
-                                  <p className="text-xs text-gray-400 text-center py-3 px-3">No tabula models published yet.</p>
-                                )}
-                                {chironModelArtifacts.map(a => {
-                                  const name = a.manifest?.name || a.alias || a.id;
-                                  const tissue = a.manifest?.tissue as string | undefined;
-                                  const date = a.manifest?.created_at || a.created_at;
-                                  const dateStr = date ? new Date(date * 1000).toLocaleDateString() : null;
-                                  return (
-                                    <button key={a.id} type="button"
-                                      onClick={() => { setSelectedTrainerWeightsArtifactId(a.id); setSelectedWeightsPath(null); setIsWeightsDropdownOpen(false); }}
-                                      className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedTrainerWeightsArtifactId === a.id ? 'bg-emerald-50' : ''}`}>
-                                      <p className="text-sm text-gray-800">{name}</p>
-                                      <p className="text-xs text-gray-500 mt-0.5">
-                                        {dateStr && <span className="mr-1.5">{dateStr}</span>}
-                                        {tissue && <span className="capitalize">{tissue}</span>}
-                                      </p>
-                                    </button>
-                                  );
-                                })}
-
-                                {/* From this worker (locally-saved snapshots) */}
-                                <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50">From This Worker</div>
-                                {localModelWeights.length === 0 && (
-                                  <p className="text-xs text-gray-400 text-center py-3 px-3">No saved weights on this worker yet.</p>
-                                )}
-                                {localModelWeights.map(w => {
-                                  const names = Object.values(w.datasets).map((d: any) => d.name || '').filter(Boolean);
-                                  const date = w.saved_at ? new Date(w.saved_at).toLocaleDateString() : null;
-                                  return (
-                                    <button key={w.path} type="button"
-                                      onClick={() => { setSelectedWeightsPath(w.path); setSelectedTrainerWeightsArtifactId(null); setIsWeightsDropdownOpen(false); }}
-                                      className={`w-full text-left px-3 py-2.5 hover:bg-gray-50 transition-colors ${selectedWeightsPath === w.path ? 'bg-emerald-50' : ''}`}>
-                                      <p className="text-sm text-gray-800">{date && <span className="mr-1.5">{date}</span>}{names.join(', ')}</p>
-                                      <p className="text-xs text-gray-500 mt-0.5">{w.num_rounds > 0 || w.total_samples_seen > 0 ? `${w.num_rounds} round${w.num_rounds !== 1 ? 's' : ''} · ${w.total_samples_seen.toLocaleString()} samples seen` : 'No training history'}</p>
-                                      <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">{w.client_name}</p>
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })()}
-                  </div>
-                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainerFor(launchDialogManagerId) || newTrainerDatasets.length === 0} className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                  <button onClick={() => { setCreatingFor(launchDialogManagerId); createTrainer(launchDialogManagerId); }} disabled={isCreatingTrainerFor(launchDialogManagerId) || newTrainerDatasets.length === 0 || incompatibleSelectedDatasets.length > 0 || !workerImageFor(launchDialogManagerId)?.trainer_artifact || !!workerImageOutdatedFor(launchDialogManagerId)} title={
+                    !workerImageFor(launchDialogManagerId)?.trainer_artifact
+                      ? "This worker's image does not declare a model, so there is no trainer to deploy"
+                      : workerImageOutdatedFor(launchDialogManagerId)
+                        ? `This worker's image is older than Chiron supports. ${imageUpgradeInstruction(workerImageOutdatedFor(launchDialogManagerId)!.floor)}`
+                        : incompatibleSelectedDatasets.length > 0
+                          ? incompatibleSelectedDatasets[0].incompatibleReason
+                          : undefined
+                  } className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white text-sm font-semibold rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
                     {isCreatingTrainerFor(launchDialogManagerId) ? <><BiLoaderAlt className="animate-spin" size={14} /> Deploying...</> : <><FaPlay size={12} /> Start Trainer ({newTrainerDatasets.length} dataset{newTrainerDatasets.length !== 1 ? 's' : ''})</>}
                   </button>
                 </div>

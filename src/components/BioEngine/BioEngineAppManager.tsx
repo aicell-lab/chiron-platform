@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import yaml from 'js-yaml';
+import { logger } from '../../utils/logger';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -289,17 +290,33 @@ const BioEngineAppManager = React.forwardRef<
     filesToUpload: Array<{ name: string; content: string; type: string }>,
     targetWorkspace?: string,
   ): Promise<string> => {
-    const bioengineWorker = await server.getService(serviceId, { mode: 'random' });
-    if (targetWorkspace) {
-      const token = await generateWorkspaceToken(targetWorkspace);
-      return await bioengineWorker.upload_app({
-        files: filesToUpload,
-        workspace: targetWorkspace,
-        hypha_token: token,
-        _rkwargs: true,
-      });
+    // File count and workspace only. File contents are the operator's app code
+    // and the generated workspace token must never reach the buffer.
+    logger.info('bioengine', 'Uploading app', {
+      serviceId,
+      files: filesToUpload.length,
+      targetWorkspace: targetWorkspace || null,
+    });
+    try {
+      const bioengineWorker = await server.getService(serviceId, { mode: 'random' });
+      let artifactId: string;
+      if (targetWorkspace) {
+        const token = await generateWorkspaceToken(targetWorkspace);
+        artifactId = await bioengineWorker.upload_app({
+          files: filesToUpload,
+          workspace: targetWorkspace,
+          hypha_token: token,
+          _rkwargs: true,
+        });
+      } else {
+        artifactId = await bioengineWorker.upload_app({ files: filesToUpload, _rkwargs: true });
+      }
+      logger.info('bioengine', 'Uploaded app', { serviceId, artifactId });
+      return artifactId;
+    } catch (err) {
+      logger.error('bioengine', 'Failed to upload app', { serviceId, targetWorkspace: targetWorkspace || null }, err);
+      throw err;
     }
-    return await bioengineWorker.upload_app({ files: filesToUpload, _rkwargs: true });
   }, [serviceId, server, generateWorkspaceToken]);
 
   // ─── Load artifact file list ──────────────────────────────────────────────
@@ -662,11 +679,14 @@ const BioEngineAppManager = React.forwardRef<
     setDeleteLoading(true);
     try {
       const am = await getArtifactManager();
+      logger.info('bioengine', 'Deleting app artifact', { artifactId: artifact.id });
       await am.delete({ artifact_id: artifact.id, delete_files: true, _rkwargs: true });
+      logger.info('bioengine', 'Deleted app artifact', { artifactId: artifact.id });
       setDeleteOpen(false);
       onArtifactUpdated?.();
       handleCloseDialog();
     } catch (err) {
+      logger.error('bioengine', 'Failed to delete app artifact', { artifactId: artifact.id }, err);
       setError(`Failed to delete: ${err instanceof Error ? err.message : String(err)}`);
       setDeleteOpen(false);
     } finally {

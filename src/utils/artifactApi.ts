@@ -6,6 +6,8 @@
 // listing + reading works without auth; only the per-user filter needs a
 // logged-in user.
 
+import { logger } from './logger';
+
 const HYPHA_BASE = 'https://hypha.aicell.io';
 
 export interface ArtifactRef {
@@ -88,7 +90,13 @@ export async function listArtifactChildren(
   const bustUrl = `${url.toString()}${sep}_=${Date.now()}`;
   const res = await fetch(bustUrl, { headers, cache: 'no-store' });
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} listing ${parentId}/children: ${await res.text()}`);
+    const body = await res.text();
+    logger.error('artifactApi', 'listArtifactChildren failed', {
+      parentId,
+      status: res.status,
+      body: body.slice(0, 1000),
+    });
+    throw new Error(`HTTP ${res.status} listing ${parentId}/children: ${body}`);
   }
   const data = await res.json();
   // Paginated response shape: { items, total }; non-paginated: bare array
@@ -112,7 +120,13 @@ export async function readArtifact(artifactId: string, token?: string): Promise<
   const url = `${HYPHA_BASE}/${workspace}/artifacts/${alias}?_=${Date.now()}`;
   const res = await fetch(url, { headers, cache: 'no-store' });
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} reading ${artifactId}: ${await res.text()}`);
+    const body = await res.text();
+    logger.error('artifactApi', 'readArtifact failed', {
+      artifactId,
+      status: res.status,
+      body: body.slice(0, 1000),
+    });
+    throw new Error(`HTTP ${res.status} reading ${artifactId}: ${body}`);
   }
   return (await res.json()) as ArtifactRef;
 }
@@ -130,6 +144,12 @@ export async function listArtifactFiles(artifactId: string, token?: string): Pro
   const res = await fetch(`${HYPHA_BASE}/${workspace}/artifacts/${alias}/files/`, { headers });
   if (!res.ok) {
     // Some artifacts have no files endpoint — return empty rather than throwing.
+    // Still worth a line: an empty file list that came from a 403 looks exactly
+    // like an artifact that genuinely has no files.
+    logger.debug('artifactApi', 'listArtifactFiles returned no files', {
+      artifactId,
+      status: res.status,
+    });
     return [];
   }
   const data = await res.json();
@@ -148,13 +168,44 @@ export function getArtifactFileUrl(artifactId: string, filePath: string): string
 
 /**
  * Resolve a manifest `cover` field into something a browser `<img src>` can
- * use. Accepts either an absolute https URL (used by our seed script) or a
- * relative path (resolved against the artifact's file root).
+ * use. Three shapes are in circulation:
+ *
+ *  - an absolute https URL, used by the seed script, returned unchanged;
+ *  - a bare filename (`scgpt.png`), which every trainer writes via its
+ *    adapter's `cover_asset` and which names a file shipped with the site
+ *    under `/assets/`;
+ *  - a path with a separator, which addresses a file inside the artifact.
+ *
+ * A bare filename resolves to the site asset because that is the only
+ * candidate that exists for a freshly published model: the save path uploads
+ * the weights, the documentation and the history, never a cover. The eight
+ * seeded `tabula-*` artifacts do also hold the file, so for those both
+ * candidates work. Callers that want the other one on a 404 should use
+ * `resolveCoverFallbackUrl`, or just render `<CoverImage>`, which chains them.
  */
 export function resolveCoverUrl(manifestCover: unknown, artifactId: string): string | null {
   if (!manifestCover || typeof manifestCover !== 'string') return null;
   if (manifestCover.startsWith('http://') || manifestCover.startsWith('https://')) {
     return manifestCover;
   }
+  if (!manifestCover.includes('/')) {
+    return `/assets/${manifestCover}`;
+  }
   return getArtifactFileUrl(artifactId, manifestCover);
+}
+
+/**
+ * The other candidate for a manifest `cover`, tried when the one
+ * `resolveCoverUrl` picked fails to load. Null when there is no second guess
+ * to make, which is the case for an absolute URL.
+ */
+export function resolveCoverFallbackUrl(manifestCover: unknown, artifactId: string): string | null {
+  if (!manifestCover || typeof manifestCover !== 'string') return null;
+  if (manifestCover.startsWith('http://') || manifestCover.startsWith('https://')) {
+    return null;
+  }
+  if (!manifestCover.includes('/')) {
+    return getArtifactFileUrl(artifactId, manifestCover);
+  }
+  return null;
 }

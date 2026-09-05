@@ -33,11 +33,29 @@ Trainers usually self-register through their own `register_to_orchestrator` meth
 
 ### `get_trainer_params() -> dict`
 
-Returns the fit and evaluate parameter schemas (Flower-style `fit_config` / `eval_config` dictionaries) that every registered trainer expects. Call this before `start_training` to see what knobs you can pass and what their defaults are. The Tabula trainer's `fit_config` includes `batch_size`, `learning_rate`, `corruption_rate`, `contrastive_scale`, `reconstruction_scale`, `temperature`, and `limit_train_batches`. The `eval_config` includes `batch_size` and `limit_val_batches`.
+Returns the fit and evaluate parameter schemas (Flower-style `fit_config` / `eval_config` dictionaries) that every registered trainer expects, plus a `model` block naming which model they belong to. Call this before `start_training` to see what knobs you can pass and what their defaults are.
+
+Every Chiron trainer publishes the same `start_fit` / `start_evaluate` signature, so the call you make is the same whatever model is loaded. What differs is the model's own hyperparameters, which each trainer declares for itself and reports through `get_properties`, and which this method passes on to you. The Tabula trainer's `fit` schema includes `batch_size`, `learning_rate`, `corruption_rate`, `contrastive_scale`, `reconstruction_scale`, `temperature` and `limit_train_batches`, and its `evaluate` schema includes `batch_size` and `limit_val_batches`. Do not assume those names for another model: call this method and read what came back.
+
+Each schema is split into `standard` and `advanced`, and each entry carries a `type`, a `default` and a `description`. `batch_size` has no `default` because the fallback is the model's own, reported separately in `batch_size_limits`.
+
+```python
+{
+    "fit": {...},
+    "evaluate": {...},
+    "model": {
+        "family": "scgpt",
+        "display_name": "scGPT",
+        "shared_weight_scope": "encoder.+value_encoder.+transformer_encoder.",
+    },
+}
+```
+
+`shared_weight_scope` is the trainer's own weight-scope label, a `+`-joined list of the `state_dict` key prefixes that get averaged each round (Tabula reports `transformer.`). Everything outside it stays site-local. The `model` block requires at least one registered trainer, the same precondition as the schemas. Orchestrators older than 0.3.17 omit it.
 
 ## Starting training
 
-### `start_training(num_rounds, fit_config=None, eval_config=None, initial_weights=None, per_round_timeout=300) -> None`
+### `start_training(num_rounds, fit_config=None, fit_config_per_trainer=None, eval_config=None, eval_config_per_trainer=None, initial_weights=None, per_round_timeout=300, transport="websocket") -> None`
 
 Begin a federated run. The orchestrator validates the configs against every registered trainer, creates a run-artifact in `chiron-platform/chiron-models`, optionally broadcasts initial weights, and enters the round loop.
 
@@ -45,9 +63,16 @@ Parameters:
 
 - `num_rounds: int` — how many FedAvg rounds to execute.
 - `fit_config: dict | None` — per-round fit configuration handed to each trainer. Defaults to the schema's defaults.
+- `fit_config_per_trainer: dict | None` — per-trainer overrides keyed by trainer service id, merged on top of `fit_config` for that trainer only. Use it to give heterogeneous hardware different batch sizes.
 - `eval_config: dict | None` — per-round evaluation configuration.
+- `eval_config_per_trainer: dict | None` — same merge semantics, for the evaluation phase.
 - `initial_weights: dict | None` — optional pretrained weights, schema `{"artifact_id": "<ws>/<alias>", "file_path": "model.pth"}`. If set, every trainer downloads and loads them via `load_pretrained_weights(transformer_only=True)` before round 1.
 - `per_round_timeout: int` — seconds; default `300`. A round that exceeds this is aborted and excluded from the training history. The trainer-side watchdog uses this timeout plus an aggregation buffer to clear its session-active flag if the orchestrator crashes mid-round.
+- `transport: "websocket" | "webrtc"` — which transport carries the weight-blob RPCs (`start_fit`, `get_fit_status`, `start_evaluate`, `get_evaluate_status`, `get_parameters`). Default `websocket`. Control-plane calls always use the WebSocket regardless, because they are small and rely on Hypha's routing.
+
+`websocket` relays weights through the Hypha gateway, so it needs nothing but an outbound HTTPS path and works from any site that can reach the platform. `webrtc` opens a peer-to-peer data channel per trainer and the weights never reach the gateway, which is the stronger privacy position, but it needs the two peers to complete an ICE handshake. Peers behind restrictive NATs only manage that through a TURN relay: the orchestrator and the trainer each fetch credentials from the `turn-server/coturn` service, which hands out `turns:turn.hypha.aicell.io:443` over TCP. Port 443 gets through egress filters that block the classic TURN ports (UDP 3478, TCP 5349).
+
+There is deliberately no automatic fallback from `webrtc` to `websocket`. Degrading silently would push weights through the gateway precisely when the caller asked for them not to, so a failed handshake surfaces as an error and the operator decides. In the web interface that decision is the Weight Transport picker in the training configuration panel.
 
 The method returns immediately; the actual training loop runs in a background task on the orchestrator. Poll `get_training_status` to track progress.
 

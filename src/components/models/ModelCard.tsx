@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { ArtifactRef, resolveCoverUrl } from '../../utils/artifactApi';
+import { ArtifactRef } from '../../utils/artifactApi';
+import CoverImage from './CoverImage';
 
 interface ModelCardProps {
   artifact: ArtifactRef;
@@ -33,27 +34,27 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
     ? manifest.tissues
     : undefined;
   const isGlobalTransformer: boolean = manifest.global_transformer === true;
-  const cover = resolveCoverUrl(manifest.cover, artifact.id);
   const alias = artifact.alias || aliasFromId(artifact.id);
+  // Architecture cards (chiron-architectures) carry a status. A model the
+  // platform does not support yet is shown so the roadmap is visible, but it
+  // does not link anywhere: its detail page would describe something a user
+  // cannot run.
+  const comingSoon: boolean = manifest.chiron?.status === 'coming-soon';
 
-  return (
-    <Link
-      to={`/models/${alias}`}
-      className="group flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all overflow-hidden"
-    >
+  const body = (
+    <>
       <div className="relative w-full overflow-hidden bg-gray-50" style={{ paddingTop: '56.25%' }}>
-        {cover ? (
-          <img
-            src={cover}
-            alt={name}
-            className="absolute inset-0 w-full h-full object-contain p-3 group-hover:scale-[1.02] transition-transform"
-            loading="lazy"
-          />
-        ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-gray-300">
-            <span className="text-4xl">🧬</span>
-          </div>
-        )}
+        <CoverImage
+          cover={manifest.cover}
+          artifactId={artifact.id}
+          alt={name}
+          className="absolute inset-0 w-full h-full object-contain p-3 group-hover:scale-[1.02] transition-transform"
+          fallback={
+            <div className="absolute inset-0 flex items-center justify-center text-gray-300">
+              <span className="text-4xl">🧬</span>
+            </div>
+          }
+        />
       </div>
 
       <div className="flex flex-col flex-grow p-4">
@@ -71,6 +72,11 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
         )}
 
         <div className="mt-3 flex flex-wrap gap-1.5">
+          {comingSoon && (
+            <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded-full border border-gray-200">
+              Coming soon
+            </span>
+          )}
           {tissue && (
             <span className="px-2 py-0.5 bg-blue-50 text-blue-700 text-xs rounded-full border border-blue-100 capitalize">
               {tissue}
@@ -92,6 +98,22 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
           {formatDate(manifest.created_at || artifact.created_at)}
         </div>
       </div>
+    </>
+  );
+
+  const shell =
+    'group flex flex-col bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden';
+
+  if (comingSoon) {
+    return <div className={`${shell} opacity-75`}>{body}</div>;
+  }
+
+  return (
+    <Link
+      to={`/models/${alias}`}
+      className={`${shell} hover:shadow-md hover:-translate-y-0.5 transition-all`}
+    >
+      {body}
     </Link>
   );
 };

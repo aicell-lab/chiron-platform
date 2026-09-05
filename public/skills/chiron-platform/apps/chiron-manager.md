@@ -35,6 +35,19 @@ manager = await server.get_service(managers[0]["id"])
 
 Cluster-level snapshot: available datasets (id, manifest), compute resources (CPU/GPU/RAM totals and currently used), geographic location, and a `running_apps` map of currently deployed orchestrator and trainer applications with their busy state. Read-only, safe to poll.
 
+`worker_status.chiron_image` reports which model the worker's container image is built for:
+
+```python
+{
+    "model_family": "scgpt",
+    "model_name": "scGPT",
+    "trainer_artifact": "chiron-platform/scgpt-trainer",
+    "image_ref": "ghcr.io/aicell-lab/chiron-scgpt:0.7.0",
+}
+```
+
+The key is absent on images built before per-model support, which is how you tell "no marker" apart from a marker naming Tabula. Such a worker cannot host a trainer and needs to be restarted on a current image.
+
 ### `get_datasets_info() -> Dict[str, dict]`
 
 Per-dataset details enriched with the data server's zarr-level metadata. The return value is a dict keyed by `dataset_id`. Each entry has the manifest fields plus a `zarr_files` list. Every `zarr_files[i]` entry carries:
@@ -72,9 +85,13 @@ Deploy a new Chiron Orchestrator BioEngine app on the worker. Returns the new `a
 
 Stop and undeploy an orchestrator. Enforces ownership: only the creator or a worker admin can remove it. If the orchestrator is currently running a session it refuses to stop unless `force=True`.
 
-### `create_trainer(token, datasets, trainer_artifact_id, trainer_id=None, trainer_name=None, pretrained_weights_path=None, pretrained_weights_artifact=None, owner_id=None) -> str`
+### `create_trainer(token, datasets, trainer_artifact_id=None, trainer_id=None, trainer_name=None, pretrained_weights_path=None, pretrained_weights_artifact=None, owner_id=None) -> str`
 
-Deploy a new Trainer BioEngine app bound to a fixed list of dataset ids. Returns the new `application_id`. Two key fields:
+Deploy a new Trainer BioEngine app bound to a fixed list of dataset ids. Returns the new `application_id`.
+
+`trainer_artifact_id` defaults to the artifact declared by the worker's image (`chiron_image.trainer_artifact`). Passing an artifact whose manifest declares a different `model_family` than the image raises `ValueError` naming both families, because the container only carries that one model's dependencies. Omit the argument unless you are deploying a fork of the image's own trainer.
+
+Two key fields:
 
 - `pretrained_weights_path` — absolute path on the worker's filesystem to a local checkpoint to load before round 1. Mutually exclusive with `pretrained_weights_artifact`.
 - `pretrained_weights_artifact` — dict `{"artifact_id": "<workspace>/<alias>", "file_path": "model.pth"}` referring to a checkpoint in `chiron-platform/chiron-models` (or any other Hypha artifact). The trainer downloads it before round 1.

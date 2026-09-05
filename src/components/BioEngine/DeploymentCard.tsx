@@ -1,5 +1,6 @@
 import React from 'react';
 import { HYPHA_SERVER_URL } from '../../config/hypha';
+import { appTooOld } from '../../config/chironVersions';
 
 interface DeploymentCardProps {
   deployment: {
@@ -181,6 +182,23 @@ const DeploymentCard: React.FC<DeploymentCardProps> = ({
                 {deployment.version === 'latest' ? 'latest' : `v${deployment.version}`}
               </span>
             )}
+
+            {/* A Chiron app older than the platform's floor. The card is the
+                first place a maintainer looks at an app's version, so the
+                statement belongs next to that version rather than only where
+                the app is used. */}
+            {(() => {
+              const outdated = appTooOld(deployment.artifact_id, deployment.version);
+              if (!outdated) return null;
+              return (
+                <span
+                  className="px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200"
+                  title={`Chiron needs ${outdated.floor.minimum} or newer. ${outdated.floor.reason} Redeploy this app from Launch Application, choosing a newer version.`}
+                >
+                  Update to {outdated.floor.minimum}
+                </span>
+              );
+            })()}
 
             {deployment.status === "UPDATING" && (
               <div className="ml-1 w-4 h-4 border-2 border-gray-300 border-t-blue-600 rounded-full animate-spin"></div>

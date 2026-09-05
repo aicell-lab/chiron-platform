@@ -6,6 +6,7 @@ import { FaChevronDown, FaChevronRight, FaExternalLinkAlt, FaTrash } from 'react
 import { Link } from 'react-router-dom';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { listHyphaServices, callHyphaService } from '../utils/hyphaHttp';
+import { modelBadgeClass, modelDisplayName } from '../config/chironModels';
 
 interface RoundMeta {
   round: number;
@@ -33,7 +34,12 @@ interface RunArtifact {
   alias?: string;
   manifest: {
     name: string;
-    status: 'running' | 'completed' | 'stopped';
+    // The orchestrator's own verdict on the run, written when the artifact is
+    // created ('running') and rewritten on every sync once the run reaches a
+    // terminal state. This is the only record of HOW a run ended: liveStatus
+    // below answers a different question (can it still be continued) and reads
+    // the same for a clean finish and for a crash.
+    status: 'running' | 'completed' | 'stopped' | 'failed';
     started_at: string;
     orchestrator_service_id: string;
     // Identifier of this run, minted by the orchestrator when it created
@@ -42,6 +48,11 @@ interface RunArtifact {
     // has been reset since, so this artifact is no longer resumable even
     // though the orchestrator service is still alive.
     run_id?: string;
+    // Which model this run trained, captured by chiron-orchestrator 0.3.17 when
+    // the run artifact was created. Absent on older runs, all of which were
+    // Tabula, but the UI shows no badge rather than asserting that.
+    model_family?: string;
+    model_name?: string;
     config: Record<string, any>;
     trainers: Record<string, {
       client_name: string;
@@ -77,8 +88,9 @@ interface RunArtifact {
   //                   to /training?step=apps so the user can adjust trainers
   //                   before starting more rounds.
   //   'completed'   — orchestrator unreachable, reset (run_id rotated), or
-  //                   otherwise no longer resumable. Renders the Completed
-  //                   badge and no navigation button.
+  //                   otherwise no longer resumable. Renders the outcome badge
+  //                   (which reads the manifest's own status for its wording)
+  //                   and no navigation button.
   liveStatus?: 'running' | 'continuable' | 'completed';
 }
 
@@ -110,17 +122,68 @@ const parseWorkerServiceId = (svcId: string): string | null => {
   return `${workspace}/${workerClientId}:bioengine-worker`;
 };
 
-// Single status the UI exposes: "Completed", rendered ONLY when the run can
-// no longer be continued — either the orchestrator service is gone, or its
-// internal run_id has rotated (reset_training_state has been called). Runs
-// that ARE still continuable get a Continue button instead of a badge, so
-// the user never has to guess whether a row is actionable.
-const CompletedBadge: React.FC = () => (
-  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
-    <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
-    Completed
-  </span>
-);
+// How a run ended. Rendered ONLY when the run can no longer be continued —
+// either the orchestrator service is gone, or its internal run_id has rotated
+// (reset_training_state has been called). Runs that ARE still continuable get a
+// Continue button instead of a badge, so the user never has to guess whether a
+// row is actionable.
+//
+// The wording comes from the orchestrator's own record, not from that
+// resumability check. The two answer different questions: "cannot be continued"
+// is equally true of a run that finished all its rounds, one the user stopped,
+// and one that failed before round 1, and calling all three "Completed" reports
+// a failure as a success. A run whose artifact still says `running` while its
+// orchestrator has gone was cut off rather than finished, and says so. A run
+// with no recorded status predates the field, so it stays on a neutral "Ended"
+// rather than claiming an outcome nobody wrote down.
+const OUTCOMES: Record<string, { label: string; box: string; dot: string; title: string }> = {
+  completed: {
+    label: 'Completed',
+    box: 'bg-gray-100 text-gray-600',
+    dot: 'bg-gray-400',
+    title: 'The orchestrator ran this training to the end.',
+  },
+  stopped: {
+    label: 'Stopped',
+    box: 'bg-gray-100 text-gray-600',
+    dot: 'bg-gray-400',
+    title: 'This training was stopped before it reached its last round.',
+  },
+  failed: {
+    label: 'Failed',
+    box: 'bg-red-50 text-red-700',
+    dot: 'bg-red-500',
+    title: 'This training ended with an error. Expand the run to see how far it got.',
+  },
+  running: {
+    label: 'Interrupted',
+    box: 'bg-amber-50 text-amber-700',
+    dot: 'bg-amber-500',
+    title:
+      'The orchestrator recorded this training as still going, but it is no ' +
+      'longer reachable, so the run cannot be continued.',
+  },
+};
+
+const ENDED_UNKNOWN = {
+  label: 'Ended',
+  box: 'bg-gray-100 text-gray-600',
+  dot: 'bg-gray-400',
+  title: 'This run can no longer be continued. It recorded no final status.',
+};
+
+const OutcomeBadge: React.FC<{ status?: string }> = ({ status }) => {
+  const outcome = (status && OUTCOMES[status]) || ENDED_UNKNOWN;
+  return (
+    <span
+      title={outcome.title}
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${outcome.box}`}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full ${outcome.dot}`} />
+      {outcome.label}
+    </span>
+  );
+};
 
 const CountryFlag: React.FC<{ code?: string }> = ({ code }) => {
   if (!code) return null;
@@ -206,12 +269,14 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
   // See RunArtifact.liveStatus for the tri-state semantics.
   //   'running'     → View button, deep-links to /training?step=train.
   //   'continuable' → Continue button, deep-links to /training?step=apps.
-  //   'completed'   → Completed badge, no navigation.
+  //   'completed'   → outcome badge (Completed / Stopped / Failed /
+  //                   Interrupted, read from the manifest), no navigation.
   const status = run.liveStatus || 'completed';
   const running = status === 'running';
   const continuable = status === 'continuable';
   const isCompleted = status === 'completed';
   const completedRounds = m.rounds?.length ?? 0;
+  const modelName = modelDisplayName({ model_family: m.model_family, model_name: m.model_name });
   const trainerSvcIds = useMemo(() => Object.keys(m.trainers ?? {}), [m.trainers]);
   const numTrainers = trainerSvcIds.length;
   const trainLosses = useMemo(() => m.history?.training_losses ?? [], [m.history]);
@@ -257,7 +322,16 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
                 Running
               </span>
             )}
-            {isCompleted && <CompletedBadge />}
+            {isCompleted && <OutcomeBadge status={m.status} />}
+            {modelName && (
+              // Named and coloured through the model registry, like every other
+              // model badge on the platform. Older orchestrators wrote the raw
+              // family into model_name, so trusting the manifest's own string
+              // first put a lowercase "tabula" next to rows reading "Tabula".
+              <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${modelBadgeClass(m.model_family)}`}>
+                {modelName}
+              </span>
+            )}
           </div>
           <p className="text-xs text-gray-400 mt-0.5">
             {formatTs(m.started_at)} · {completedRounds} round{completedRounds !== 1 ? 's' : ''} completed · {numTrainers} trainer{numTrainers !== 1 ? 's' : ''}
@@ -559,7 +633,7 @@ const Runs: React.FC = () => {
       //   - orch unreachable OR run_id mismatch      → 'completed'
       //   - run_id matches AND status.is_running     → 'running'
       //   - run_id matches AND !status.is_running    → 'continuable'
-      // The three states pick the header affordance: Completed badge, View
+      // The three states pick the header affordance: outcome badge, View
       // button (→ step=train), Continue button (→ step=apps) respectively.
       const resolved = await Promise.all(sorted.map(async (run: any): Promise<RunArtifact> => {
         const m = run.manifest ?? {};
@@ -754,7 +828,7 @@ const Runs: React.FC = () => {
   }, []);
 
   // Single list, newest first. Continuable vs completed is signalled per-row
-  // (Continue button vs Completed badge); no top-level Active/History split.
+  // (Continue button vs outcome badge); no top-level Active/History split.
   const sortedRuns = useMemo(
     () => [...runs].sort((a, b) => (b.manifest?.started_at ?? '').localeCompare(a.manifest?.started_at ?? '')),
     [runs],

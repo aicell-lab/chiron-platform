@@ -2,22 +2,18 @@ import React, { useEffect, useState } from 'react';
 import { HashRouter, Routes, Route, useLocation, Navigate } from 'react-router-dom';
 import Navbar from './components/Navbar';
 import HyphaStatusBanner from './components/HyphaStatusBanner';
+import AppErrorBoundary from './components/AppErrorBoundary';
 
-import ResourceGrid from './components/ResourceGrid';
-import ResourceDetails from './components/ResourceDetails';
 import Snackbar from './components/Snackbar';
 import About from './components/About';
 import Footer from './components/Footer';
-import Edit from './components/Edit';
 import './index.css'
 import './github-markdown.css'
 import { HyphaProvider } from './HyphaContext';
 import { ProjectsProvider } from './providers/ProjectsProvider';
-import ModelTrainer from './components/ModelTrainer';
-import ManageWorker from './components/ManageWorker';
 import BioEngineHome from './components/BioEngine/BioEngineHome';
 import BioEngineWorker from './components/BioEngine/BioEngineWorker';
-import Orchestrator from './components/BioEngine/Orchestrator';
+import BioEngineWorkerList from './components/BioEngine/BioEngineWorkerList';
 import AgentLab from './pages/AgentLab';
 import Training from './components/training/Training';
 import Runs from './pages/Runs';
@@ -25,6 +21,21 @@ import Models from './pages/Models';
 import ModelDetail from './pages/ModelDetail';
 import MyModels from './pages/MyModels';
 import Landing from './pages/Landing';
+import { logger } from './utils/logger';
+
+// BioEngine builds the "Manage BioEngine worker at:" line it prints on
+// startup as `<dashboard-url>/worker?service_id=<id>` (bioengine/worker/
+// worker.py), and the setup guide sets --dashboard-url to
+// "https://chiron.aicell.io/#/worker", so the link an operator copies out of
+// their container logs arrives here. Forward it to the dashboard rather than
+// adding a second canonical URL for the same page, keeping the query string
+// the service id rides in.
+const WorkerLogLinkRedirect: React.FC = () => {
+  const location = useLocation();
+  return (
+    <Navigate to={{ pathname: '/worker/dashboard', search: location.search }} replace />
+  );
+};
 
 // Create a wrapper component that uses Router hooks
 const AppContent: React.FC = () => {
@@ -54,6 +65,13 @@ const AppContent: React.FC = () => {
   // interactions; only a new pathname is an actual "navigated somewhere".
   useEffect(() => {
     window.scrollTo(0, 0);
+  }, [location.pathname]);
+
+  // A report is far easier to read when it starts with where the user was.
+  // Only the pathname, never the query string, which carries ids a reporter
+  // has not agreed to hand over.
+  useEffect(() => {
+    logger.info('router', 'Navigated', { pathname: location.pathname });
   }, [location.pathname]);
 
   const toggleSidebar = () => {
@@ -92,18 +110,13 @@ const AppContent: React.FC = () => {
       <main>
         <Routes>
           <Route path="/" element={<Landing />} />
-          <Route path="/resources/:id" element={<div className="container mx-auto px-4"><ResourceDetails /></div>} />
           <Route path="/about" element={<div className="container mx-auto px-4"><About /></div>} />
-          <Route path="/workers" element={<div className="container mx-auto px-4"><ResourceGrid type="worker" /></div>} />
-          <Route path="/notebooks" element={<div className="container mx-auto px-4"><ResourceGrid type="notebook" /></div>} />
-          <Route path="/edit/:artifactId" element={<div className="container mx-auto px-4"><Edit /></div>} />
-          <Route path="/model-trainer/:id" element={<div className="container mx-auto px-4"><ModelTrainer /></div>} />
-          <Route path="/manage-worker/:artifactId" element={<div className="container mx-auto px-4"><ManageWorker /></div>} />
           <Route path="/worker" element={<div className="container mx-auto px-4"><BioEngineHome /></div>} />
+          <Route path="/worker/instances" element={<div className="container mx-auto px-4"><BioEngineWorkerList /></div>} />
           <Route path="/worker/dashboard" element={<div className="container mx-auto px-4"><BioEngineWorker /></div>} />
+          <Route path="/worker/worker" element={<WorkerLogLinkRedirect />} />
           <Route path="/bioengine" element={<Navigate to="/worker" replace />} />
           <Route path="/bioengine/worker" element={<Navigate to="/worker/dashboard" replace />} />
-          <Route path="/orchestrator" element={<div className="container mx-auto px-4"><Orchestrator /></div>} />
           <Route path="/training" element={<Training />} />
           <Route path="/models" element={<Models />} />
           <Route path="/models/:alias" element={<ModelDetail />} />
@@ -111,6 +124,10 @@ const AppContent: React.FC = () => {
           <Route path="/runs" element={<Runs />} />
           <Route path="/lab" element={<AgentLab />} />
           <Route path="/notebook" element={<Navigate to="/lab" replace />} />
+          {/* An address that matches nothing used to render the navbar and the
+              footer around an empty page, which reads as the platform having
+              broken rather than as the address being wrong. Send it home. */}
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
       <Footer />
@@ -121,13 +138,15 @@ const AppContent: React.FC = () => {
 // Main App component that provides Router context
 const App: React.FC = () => {
   return (
-    <HyphaProvider>
-      <ProjectsProvider>
-        <HashRouter>
-          <AppContent />
-        </HashRouter>
-      </ProjectsProvider>
-    </HyphaProvider>
+    <AppErrorBoundary>
+      <HyphaProvider>
+        <ProjectsProvider>
+          <HashRouter>
+            <AppContent />
+          </HashRouter>
+        </ProjectsProvider>
+      </HyphaProvider>
+    </AppErrorBoundary>
   );
 };
 

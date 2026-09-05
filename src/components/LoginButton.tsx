@@ -5,6 +5,7 @@ import { RiLoginBoxLine } from 'react-icons/ri';
 import { useHyphaContext } from '../HyphaContext';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Spinner } from './Spinner';
+import { HYPHA_SERVER_URL } from '../config/hypha';
 
 interface LoginButtonProps {
   className?: string;
@@ -15,7 +16,7 @@ interface LoginConfig {
   login_callback: (context: { login_url: string }) => void;
 }
 
-const serverUrl = "https://hypha.aicell.io";
+const serverUrl = HYPHA_SERVER_URL;
 const REDIRECT_PATH_KEY = 'redirectPath';
 const FORCE_LOGIN_KEY = 'hypha_force_login';
 
@@ -33,7 +34,7 @@ const getSavedToken = () => {
 export default function LoginButton({ className = '' }: LoginButtonProps) {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
-  const { client, user, connect, setUser, server, isConnected, isLoggedIn, logout } = useHyphaStore();
+  const { client, user, connect, setUser, server, isConnected, isLoggedIn, logout, connectionStatus } = useHyphaStore();
   const { hyphaClient, setHyphaClient } = useHyphaContext();
   const navigate = useNavigate();
   const location = useLocation();
@@ -57,9 +58,10 @@ export default function LoginButton({ className = '' }: LoginButtonProps) {
         await hyphaClient.disconnect();
         setHyphaClient(null);
       }
-      if (server) {
-        try { await server.disconnect(); } catch { /* ignore */ }
-      }
+      // The Hypha server socket is closed by the store's logout() below, which
+      // detaches the disconnect handler first. Closing it here instead would
+      // look like a dropped connection and start a reconnect we are about to
+      // throw away.
     } catch (error) {
       console.error('Error during logout:', error);
     } finally {
@@ -68,7 +70,7 @@ export default function LoginButton({ className = '' }: LoginButtonProps) {
       localStorage.removeItem('user');
       sessionStorage.removeItem(REDIRECT_PATH_KEY);
       sessionStorage.setItem(FORCE_LOGIN_KEY, 'true');
-      logout();
+      await logout();
       setIsDropdownOpen(false);
       navigate('/');
     }
@@ -165,22 +167,75 @@ export default function LoginButton({ className = '' }: LoginButtonProps) {
     }
   }, [server, setUser, navigate]);
 
+  // Coarse connection health, shown as a coloured dot in the account menu.
+  // Green means live, amber means a reconnect is in flight, red means the
+  // socket died and nothing is retrying.
+  const connMeta = {
+    connected: { dot: 'bg-green-500', label: 'Connected', pulse: false },
+    reconnecting: { dot: 'bg-amber-500', label: 'Reconnecting...', pulse: true },
+    disconnected: { dot: 'bg-red-500', label: 'Connection lost', pulse: false },
+  }[connectionStatus] ?? { dot: 'bg-gray-400', label: 'Connected', pulse: false };
+  const showConnectionIssue = connectionStatus !== 'connected';
+  const avatarLabel = ['User profile menu', showConnectionIssue ? connMeta.label : null]
+    .filter(Boolean)
+    .join(', ');
+
+  // Manual retry from the account menu. Uses reconnect() (the cached-token
+  // connect) rather than attemptReconnect() so a click always forces an
+  // attempt, without the automatic path's cooldown. reconnect() leaves the
+  // status at 'reconnecting' when the connect throws, so reflect the failure
+  // here.
+  //
+  // With no valid cached token there is nothing to reconnect with and
+  // reconnect() would just log the user out, so go straight to the interactive
+  // login flow, which is the only way to obtain a fresh token.
+  const handleReconnect = async () => {
+    if (connectionStatus === 'reconnecting') return;
+    if (!getSavedToken()) {
+      await handleLogin();
+      return;
+    }
+    try {
+      await useHyphaStore.getState().reconnect();
+    } catch (error) {
+      console.error('Manual reconnect failed:', error);
+      useHyphaStore.getState().setConnectionStatus('disconnected');
+    }
+  };
+
   return (
     <div className={className}>
       {user?.email ? (
         <div className="relative">
           <button
             onClick={() => setIsDropdownOpen(!isDropdownOpen)}
-            className="text-gray-700 hover:text-gray-900 focus:outline-none"
+            className="relative text-gray-700 hover:text-gray-900 focus:outline-none"
+            aria-label={avatarLabel}
+            title={showConnectionIssue ? connMeta.label : undefined}
           >
             <UserCircleIcon className="h-6 w-6" />
+            {/* Only mark the avatar when something is wrong. A healthy
+                connection stays unmarked to avoid clutter. */}
+            {showConnectionIssue && (
+              <span
+                className={`absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-white ${connMeta.dot} ${connMeta.pulse ? 'motion-safe:animate-pulse' : ''}`}
+                aria-hidden="true"
+              />
+            )}
           </button>
           
           {/* Dropdown Menu */}
           {isDropdownOpen && (
-            <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg py-1 z-50 border border-gray-200">
-              <div className="px-4 py-2 text-sm text-gray-700 border-b border-gray-200">
-                {user.email}
+            <div id="user-dropdown" className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg py-1 z-50 border border-gray-200">
+              <div className="px-4 py-2 border-b border-gray-200">
+                <div className="text-sm text-gray-700 truncate">{user.email}</div>
+                <div className="mt-1 flex items-center gap-1.5">
+                  <span
+                    className={`inline-block h-2 w-2 rounded-full flex-shrink-0 ${connMeta.dot} ${connMeta.pulse ? 'motion-safe:animate-pulse' : ''}`}
+                    aria-hidden="true"
+                  />
+                  <span className="text-xs text-gray-500">{connMeta.label}</span>
+                </div>
               </div>
               <Link
                 to="/my-models"
@@ -195,6 +250,24 @@ export default function LoginButton({ className = '' }: LoginButtonProps) {
               >
                 Logout
               </button>
+
+              {/* Manual recovery, only while the connection is not healthy. */}
+              {showConnectionIssue && (
+                <button
+                  onClick={handleReconnect}
+                  disabled={connectionStatus === 'reconnecting'}
+                  className="flex w-full items-center gap-2 border-t border-gray-200 px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {connectionStatus === 'reconnecting' ? (
+                    <>
+                      <Spinner className="h-4 w-4" />
+                      Reconnecting...
+                    </>
+                  ) : (
+                    'Reconnect'
+                  )}
+                </button>
+              )}
             </div>
           )}
         </div>
