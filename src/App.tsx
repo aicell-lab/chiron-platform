@@ -4,22 +4,16 @@ import Navbar from './components/Navbar';
 import HyphaStatusBanner from './components/HyphaStatusBanner';
 import AppErrorBoundary from './components/AppErrorBoundary';
 
-import ResourceGrid from './components/ResourceGrid';
-import ResourceDetails from './components/ResourceDetails';
 import Snackbar from './components/Snackbar';
 import About from './components/About';
 import Footer from './components/Footer';
-import Edit from './components/Edit';
 import './index.css'
 import './github-markdown.css'
 import { HyphaProvider } from './HyphaContext';
 import { ProjectsProvider } from './providers/ProjectsProvider';
-import ModelTrainer from './components/ModelTrainer';
-import ManageWorker from './components/ManageWorker';
 import BioEngineHome from './components/BioEngine/BioEngineHome';
 import BioEngineWorker from './components/BioEngine/BioEngineWorker';
 import BioEngineWorkerList from './components/BioEngine/BioEngineWorkerList';
-import Orchestrator from './components/BioEngine/Orchestrator';
 import AgentLab from './pages/AgentLab';
 import Training from './components/training/Training';
 import Runs from './pages/Runs';
@@ -116,20 +110,13 @@ const AppContent: React.FC = () => {
       <main>
         <Routes>
           <Route path="/" element={<Landing />} />
-          <Route path="/resources/:id" element={<div className="container mx-auto px-4"><ResourceDetails /></div>} />
           <Route path="/about" element={<div className="container mx-auto px-4"><About /></div>} />
-          <Route path="/workers" element={<div className="container mx-auto px-4"><ResourceGrid type="worker" /></div>} />
-          <Route path="/notebooks" element={<div className="container mx-auto px-4"><ResourceGrid type="notebook" /></div>} />
-          <Route path="/edit/:artifactId" element={<div className="container mx-auto px-4"><Edit /></div>} />
-          <Route path="/model-trainer/:id" element={<div className="container mx-auto px-4"><ModelTrainer /></div>} />
-          <Route path="/manage-worker/:artifactId" element={<div className="container mx-auto px-4"><ManageWorker /></div>} />
           <Route path="/worker" element={<div className="container mx-auto px-4"><BioEngineHome /></div>} />
           <Route path="/worker/instances" element={<div className="container mx-auto px-4"><BioEngineWorkerList /></div>} />
           <Route path="/worker/dashboard" element={<div className="container mx-auto px-4"><BioEngineWorker /></div>} />
           <Route path="/worker/worker" element={<WorkerLogLinkRedirect />} />
           <Route path="/bioengine" element={<Navigate to="/worker" replace />} />
           <Route path="/bioengine/worker" element={<Navigate to="/worker/dashboard" replace />} />
-          <Route path="/orchestrator" element={<div className="container mx-auto px-4"><Orchestrator /></div>} />
           <Route path="/training" element={<Training />} />
           <Route path="/models" element={<Models />} />
           <Route path="/models/:alias" element={<ModelDetail />} />
