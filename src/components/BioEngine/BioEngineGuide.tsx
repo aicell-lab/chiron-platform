@@ -1141,17 +1141,17 @@ ${bin} exec ${gpuFlag}\\
             )}
           </div>
 
-          {/* Chiron Manager Authorized Users — full-width row */}
+          {/* Who may train on this worker, full-width row */}
           <div className="md:col-span-2 lg:col-span-3">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Chiron Manager Authorized Users</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Federated Training Users</label>
             <TagInput
               tags={managerAuthorizedUsers}
               onChange={setManagerAuthorizedUsers}
               placeholder="user@example.com or *"
             />
             <p className="text-xs text-gray-500 mt-1">
-              Who can use this worker in the Chiron federated training. Use <code className="bg-gray-100 px-0.5 rounded">*</code> to allow all users.
-              Leave empty to restrict to worker admin users only. Press Space or Enter to add.
+              Who may run federated training on this worker. Use <code className="bg-gray-100 px-0.5 rounded">*</code> to allow all users.
+              Leave empty to restrict it to the worker's admin users. Press Space or Enter to add.
             </p>
           </div>
 
@@ -1262,7 +1262,7 @@ ${bin} exec ${gpuFlag}\\
               </div>
               <input type="text" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other" value={workspace}
                 onChange={(e) => { setWorkspace(e.target.value); setWorkspaceResolved(false); }}
-                placeholder="my-workspace" autoComplete="off"
+                placeholder="my-workspace"
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />
               <p className="text-xs text-gray-500 mt-1">Hypha workspace name for service registration. Resolved from the token if left empty.</p>
             </div>
