@@ -124,6 +124,10 @@ const AppContent: React.FC = () => {
           <Route path="/runs" element={<Runs />} />
           <Route path="/lab" element={<AgentLab />} />
           <Route path="/notebook" element={<Navigate to="/lab" replace />} />
+          {/* An address that matches nothing used to render the navbar and the
+              footer around an empty page, which reads as the platform having
+              broken rather than as the address being wrong. Send it home. */}
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
       <Footer />
