@@ -95,10 +95,19 @@ interface RunArtifact {
 }
 
 // Worker name + geo location, resolved on demand from the BioEngine worker
-// behind each trainer/orchestrator service id. Keyed by the worker service id
-// (e.g. "chiron-platform/8jeJoA...:bioengine-worker"), not the
-// trainer/orchestrator service id — multiple apps on the same worker share one
-// entry.
+// behind each trainer/orchestrator service id. Keyed by that app service id
+// exactly as the run manifest records it, so a card can look its own entry up
+// without knowing which worker answered. Several apps on the same worker share
+// one resolved value, but each gets its own key.
+//
+// It used to be keyed by the worker service id, derived from the app id by
+// string surgery. That stopped working when runs began recording client-
+// agnostic ids ("{workspace}/*:{app}") so a replica restart could not
+// invalidate them: a `*` addresses the app but names no worker, so the surgery
+// produced a key nothing ever wrote to and every trainer fell back to its own
+// client name, which is a bare UUID unless the operator named the trainer.
+// Resolving the client id from the live workspace listing is now part of the
+// lookup below.
 interface WorkerInfo {
   name?: string;
   region?: string;
@@ -107,20 +116,6 @@ interface WorkerInfo {
   loading: boolean;
   reachable: boolean;
 }
-
-// "chiron-platform/<workerClientId>-<replica>:<svcName>" →
-// "chiron-platform/<workerClientId>:bioengine-worker". Returns null if the
-// service id is malformed (no workspace).
-const parseWorkerServiceId = (svcId: string): string | null => {
-  const slash = svcId.indexOf('/');
-  if (slash < 0) return null;
-  const workspace = svcId.slice(0, slash);
-  const rest = svcId.slice(slash + 1);
-  const clientPart = rest.split(':')[0];
-  const workerClientId = clientPart.split('-')[0];
-  if (!workerClientId) return null;
-  return `${workspace}/${workerClientId}:bioengine-worker`;
-};
 
 // How a run ended. Rendered ONLY when the run can no longer be continued —
 // either the orchestrator service is gone, or its internal run_id has rotated
@@ -302,8 +297,7 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
 
   const lastTrain = chartData.length > 0 ? chartData[chartData.length - 1].train : null;
   const lastVal = chartData.length > 0 ? chartData[chartData.length - 1].val : null;
-  const orchWorkerSvcId = parseWorkerServiceId(m.orchestrator_service_id);
-  const orchWorkerInfo = orchWorkerSvcId ? workerInfoMap[orchWorkerSvcId] : undefined;
+  const orchWorkerInfo = workerInfoMap[m.orchestrator_service_id];
 
   return (
     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
@@ -461,8 +455,7 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
               <div className="space-y-2">
                 {trainerSvcIds.map(svcId => {
                   const t = m.trainers[svcId];
-                  const workerSvcId = parseWorkerServiceId(svcId);
-                  const workerInfo = workerSvcId ? workerInfoMap[workerSvcId] : undefined;
+                  const workerInfo = workerInfoMap[svcId];
                   const datasets = t?.datasets ?? [];
                   return (
                     <div
@@ -522,8 +515,7 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
                           ) : (
                             <div className="flex flex-wrap gap-1">
                               {(r.trainers ?? []).map(t => {
-                                const workerSvcId = parseWorkerServiceId(t.service_id);
-                                const wi = workerSvcId ? workerInfoMap[workerSvcId] : undefined;
+                                const wi = workerInfoMap[t.service_id];
                                 // Prefer the manifest's worker_name (captured at
                                 // add_trainer time by chiron-orchestrator 0.3.8)
                                 // over the live workspace lookup, then the live
@@ -707,22 +699,25 @@ const Runs: React.FC = () => {
     return () => clearInterval(interval);
   }, [server]);
 
-  // Resolve worker info for every distinct worker referenced by the visible
-  // runs. Runs once per change in the set of worker service ids — caches in
-  // workerInfoMap so each worker is hit at most once across all cards.
+  // Resolve worker info for every app service id referenced by the visible
+  // runs. Runs once per change in that set — caches in workerInfoMap so each
+  // workspace is listed once and each worker is probed once across all cards.
   useEffect(() => {
     if (!server || runs.length === 0) return;
     const needed = new Set<string>();
+    const add = (svcId?: string) => {
+      if (svcId && svcId.includes('/') && svcId.includes(':')) needed.add(svcId);
+    };
     for (const run of runs) {
       const m = run.manifest;
-      const orchWsId = parseWorkerServiceId(m.orchestrator_service_id);
-      if (orchWsId) needed.add(orchWsId);
-      for (const trainerSvcId of Object.keys(m.trainers ?? {})) {
-        const tWsId = parseWorkerServiceId(trainerSvcId);
-        if (tWsId) needed.add(tWsId);
+      add(m.orchestrator_service_id);
+      for (const trainerSvcId of Object.keys(m.trainers ?? {})) add(trainerSvcId);
+      // A round can name a trainer that has since left the run's trainers map.
+      for (const r of m.rounds ?? []) {
+        for (const t of r.trainers ?? []) add(t.service_id);
       }
     }
-    // Filter to workers we haven't resolved (or are not currently resolving)
+    // Filter to apps we haven't resolved (or are not currently resolving)
     const toResolve = [...needed].filter(id => !workerInfoMap[id]);
     if (toResolve.length === 0) return;
 
@@ -744,28 +739,82 @@ const Runs: React.FC = () => {
     }
 
     const cancelRef = { current: false };
-    const resolveWorkspace = async (ws: string, ids: string[]) => {
-      // 1) Pull the worker name from the workspace's service list. The
-      //    bioengine-worker service registers with its display name; that's
-      //    the closest thing to a friendly site name we have.
+    const resolveWorkspace = async (ws: string, appSvcIds: string[]) => {
+      // 1) One listing answers both of the questions below: which client is
+      //    currently serving each app, and what each worker in the workspace
+      //    calls itself. The bioengine-worker service registers with its
+      //    display name; that's the closest thing to a friendly site name we
+      //    have.
+      const serviceIds: string[] = [];
       const nameByClient: Record<string, string> = {};
       try {
         const services = await listHyphaServices(ws, { timeoutMs: 12000 });
         const stripWs = (s: string) => s.includes('/') ? s.slice(s.indexOf('/') + 1) : s;
         for (const s of services) {
           if (!s?.id || typeof s.id !== 'string') continue;
+          serviceIds.push(s.id);
           if (!s.id.endsWith(':bioengine-worker') || s.id.includes('rtc')) continue;
           const clientId = stripWs(s.id).split(':')[0];
           if (clientId && s.name) nameByClient[clientId] = s.name;
         }
       } catch {
-        // Workspace might be unreachable for this user — keep going, the
-        // get_status fallback below may still work.
+        // Workspace might be unreachable for this user. Nothing below can run
+        // without the listing, so every badge falls back to its manifest name.
       }
       if (cancelRef.current) return;
 
-      // 2) For each worker, call get_status to fetch geo_location.
-      await Promise.all(ids.map(async workerSvcId => {
+      // 2) Find the worker behind each app. A run records its service ids
+      //    client-agnostically, as "{workspace}/*:{app}", so a replica restart
+      //    cannot invalidate them. That form addresses the app but names no
+      //    worker, so the client id has to come back from the listing before
+      //    the worker is identifiable at all. The suffix match is safe: an
+      //    app's WebRTC twin registers as "{app}-rtc", which does not end in
+      //    ":{app}".
+      const workerSvcIdFor = (appSvcId: string): string | null => {
+        const rest = appSvcId.slice(ws.length + 1);
+        const colon = rest.indexOf(':');
+        if (colon < 0) return null;
+        let clientPart = rest.slice(0, colon);
+        if (clientPart === '*') {
+          const suffix = `:${rest.slice(colon + 1)}`;
+          const live = serviceIds.find(
+            id => id.startsWith(`${ws}/`) && id.endsWith(suffix)
+          );
+          clientPart = live
+            ? live.slice(ws.length + 1, live.length - suffix.length)
+            : '';
+        }
+        // A bioengine app's client id is "{workerClientId}-{appHash}".
+        const workerClientId = clientPart.split('-')[0];
+        if (!workerClientId || workerClientId === '*') return null;
+        return `${ws}/${workerClientId}:bioengine-worker`;
+      };
+
+      const appsByWorker = new Map<string, string[]>();
+      const unresolved: string[] = [];
+      for (const appSvcId of appSvcIds) {
+        const workerSvcId = workerSvcIdFor(appSvcId);
+        if (!workerSvcId) {
+          unresolved.push(appSvcId);
+          continue;
+        }
+        const group = appsByWorker.get(workerSvcId);
+        if (group) group.push(appSvcId);
+        else appsByWorker.set(workerSvcId, [appSvcId]);
+      }
+      // The app is gone from the workspace, so nothing live can be said about
+      // where it ran. Clear the spinner and let the manifest speak.
+      if (unresolved.length > 0) {
+        setWorkerInfoMap(prev => {
+          const next = { ...prev };
+          for (const id of unresolved) next[id] = { loading: false, reachable: false };
+          return next;
+        });
+      }
+
+      // 3) For each distinct worker, call get_status once to fetch
+      //    geo_location, and apply the result to every app it hosts.
+      await Promise.all([...appsByWorker.entries()].map(async ([workerSvcId, ids]) => {
         const clientId = workerSvcId.slice(ws.length + 1).split(':')[0];
         let geo: any = null;
         try {
@@ -775,17 +824,19 @@ const Runs: React.FC = () => {
           geo = null;
         }
         if (cancelRef.current) return;
-        setWorkerInfoMap(prev => ({
-          ...prev,
-          [workerSvcId]: {
-            loading: false,
-            reachable: geo !== null || !!nameByClient[clientId],
-            name: nameByClient[clientId],
-            region: geo?.region,
-            country_name: geo?.country_name,
-            country_code: geo?.country_code,
-          },
-        }));
+        const info: WorkerInfo = {
+          loading: false,
+          reachable: geo !== null || !!nameByClient[clientId],
+          name: nameByClient[clientId],
+          region: geo?.region,
+          country_name: geo?.country_name,
+          country_code: geo?.country_code,
+        };
+        setWorkerInfoMap(prev => {
+          const next = { ...prev };
+          for (const id of ids) next[id] = info;
+          return next;
+        });
       }));
     };
 
