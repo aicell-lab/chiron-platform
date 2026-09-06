@@ -118,14 +118,15 @@ export const MIN_APP_VERSIONS: Record<string, VersionFloor> = {
       'every later round.',
   },
   'scgpt-trainer': {
-    minimum: '0.2.2',
+    minimum: '0.3.0',
     reason:
-      'From 0.2.2 a trainer refuses a global model whose numbers have gone ' +
-      'bad, and restores its own weights instead of keeping the result of a ' +
-      'round that diverged. An older one keeps the broken result, and since ' +
-      'federated updates only cover the shared layers, nothing can repair it ' +
-      'afterwards: that site returns nothing usable for good and drops out of ' +
-      'every later round.',
+      'From 0.3.0 scGPT reads genes through the same 60,694-symbol ' +
+      'vocabulary its published whole-human weights were pretrained on, ' +
+      'where an older trainer used a smaller one. The gene embedding is part ' +
+      'of what federated averaging combines, so row 40,000 has to mean the ' +
+      'same gene at every site. A 0.2.x site and a 0.3.0 site disagree about ' +
+      'that, and averaging them would mix unrelated genes together with no ' +
+      'error anywhere.',
   },
   'geneformer-trainer': {
     minimum: '0.2.2',

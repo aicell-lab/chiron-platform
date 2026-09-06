@@ -1,5 +1,11 @@
 import React from 'react';
 import ModelGrid from '../components/models/ModelGrid';
+import {
+  AVAILABLE_MODEL_NAMES,
+  AVAILABLE_MODEL_COUNT,
+  UPCOMING_MODEL_NAMES,
+  UPCOMING_MODEL_COUNT,
+} from '../config/chironModels';
 
 const Models: React.FC = () => {
   return (
@@ -13,13 +19,22 @@ const Models: React.FC = () => {
       </div>
 
       {/* Architectures come first: they are what the platform is about, and
-          they are the only place a visitor learns that three of the four are
-          still on the way. Checkpoints below are all Tabula today. */}
+          they are the only place a visitor learns which of the four are still
+          on the way. The names come from the model registry so this sentence
+          cannot drift from the badges on the cards below it. */}
       <section className="mb-10">
         <h2 className="text-xl font-semibold text-gray-900">Architectures</h2>
         <p className="mt-1 mb-4 text-sm text-gray-600">
-          Tabula is available to train today. The others are in preparation and
-          will be enabled one at a time.
+          {AVAILABLE_MODEL_NAMES}{' '}
+          {AVAILABLE_MODEL_COUNT === 1 ? 'is' : 'are'} available to train today.
+          {UPCOMING_MODEL_COUNT > 0 && (
+            <>
+              {' '}
+              {UPCOMING_MODEL_NAMES}{' '}
+              {UPCOMING_MODEL_COUNT === 1 ? 'is' : 'are'} in preparation and will
+              be enabled one at a time.
+            </>
+          )}
         </p>
         <ModelGrid
           parentId="chiron-platform/chiron-architectures"

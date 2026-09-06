@@ -164,13 +164,14 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     displayName: 'scGPT',
     summary:
       'Generative transformer over gene tokens and binned expression values, trained by masked value prediction.',
-    status: 'coming-soon',
+    status: 'available',
     imageRepository: imageRepository('scgpt'),
     image: image('scgpt'),
     trainerArtifactId: 'chiron-platform/scgpt-trainer',
     workerMemoryGb: WORKER_RAM_GB.scgpt,
     sharedWeights: 'gene embedding, value encoder and transformer',
     localWeights: 'expression decoder head',
+    foundationAlias: 'scgpt-foundation',
     requiredVarColumn: 'feature_name',
     // Only the batch size validated on a 24 GB RTX 3090 so far. The memory
     // curve is not measured yet, so no other sizes are quoted.
@@ -220,6 +221,32 @@ export const CHIRON_MODEL_FAMILIES: ChironModelFamily[] = [
 ];
 
 export const DEFAULT_MODEL_FAMILY: ChironModelFamily = 'tabula';
+
+/** Display names of every model at a given status, in registry order. */
+const namesByStatus = (status: ChironModel['status']): string[] =>
+  CHIRON_MODEL_FAMILIES.filter(
+    family => CHIRON_MODELS[family].status === status
+  ).map(family => CHIRON_MODELS[family].displayName);
+
+/** "A", "A and B", "A, B and C". */
+const proseList = (names: string[]): string =>
+  names.length <= 1
+    ? names.join('')
+    : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+
+/**
+ * The models a worker can be started on today, and the ones still being
+ * brought online, as a phrase to drop into a sentence.
+ *
+ * Derived from `status` above rather than written out at each call site,
+ * because enabling a model has to be one edit. Spelled-out copy went stale
+ * the moment a second model became available, and the wizard would have gone
+ * on calling scGPT "in preparation" while offering it in the same dropdown.
+ */
+export const AVAILABLE_MODEL_NAMES = proseList(namesByStatus('available'));
+export const UPCOMING_MODEL_NAMES = proseList(namesByStatus('coming-soon'));
+export const AVAILABLE_MODEL_COUNT = namesByStatus('available').length;
+export const UPCOMING_MODEL_COUNT = namesByStatus('coming-soon').length;
 
 /**
  * What a worker reports about the image it is running, or undefined on an
