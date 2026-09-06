@@ -57,11 +57,22 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
   // reads "Coming soon", or the page contradicts itself about the same model.
   const family: string | undefined =
     manifest.chiron?.model_family || manifest.model_family;
-  const registryStatus = family
-    ? CHIRON_MODELS[family as ChironModelFamily]?.status
+  const registryEntry = family
+    ? CHIRON_MODELS[family as ChironModelFamily]
     : undefined;
+  const registryStatus = registryEntry?.status;
   const comingSoon: boolean =
     (registryStatus ?? manifest.chiron?.status) === 'coming-soon';
+  // Which model a set of weights came from, on the weights themselves. The
+  // grid used to answer this by placing the model's own card above its
+  // checkpoints, but that card no longer takes a slot once the model's
+  // foundation weights are published, and a checkpoint that only says
+  // "Tabula" inside a sentence of prose is not something a reader can scan.
+  // The badge carries the model's registry name and colour, so a page of
+  // checkpoints from several models stays legible, and it hovers to the one
+  // line describing what the architecture actually is. Not on a model's own
+  // card, where the badge would repeat the heading directly above it.
+  const familyBadge = manifest.chiron ? undefined : registryEntry;
 
   const body = (
     <>
@@ -94,6 +105,14 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
         )}
 
         <div className="mt-3 flex flex-wrap gap-1.5">
+          {familyBadge && (
+            <span
+              className={`px-2 py-0.5 text-xs rounded-full border ${familyBadge.badgeClass}`}
+              title={familyBadge.summary}
+            >
+              {familyBadge.displayName}
+            </span>
+          )}
           {comingSoon && (
             <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded-full border border-gray-200">
               Coming soon
