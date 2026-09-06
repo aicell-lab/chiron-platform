@@ -56,16 +56,18 @@ One image per model, each carrying that model's dependencies and hosting that mo
 
 The builds are split across two repositories. `chiron-base` and the scGPT, Geneformer and scFoundation images are built here, from `worker/docker/`, with `scripts/publish_docker_image.sh`. `chiron-tabula` is built in the tabula repo, from `docker/tabula/`, against the `chiron-base` published from here, and stays there until Tabula ships as a pip package. All five push to `ghcr.io/aicell-lab/chiron-*`, because GHCR authorises a push against the organisation rather than against the repository the build ran in. `worker/docker/README.md` has the layer order, the image identity contract and the four-step release procedure across the two repos.
 
-The platform guarantees **Tabula**. The other three images are built and published, and their trainer artifacts exist, but the setup wizard will not start a worker on them and their architecture cards on `#/models` are marked coming soon. They are brought online one at a time, in the order scGPT, Geneformer, scFoundation, each as its own pair of PRs. A maintainer can still run one by hand.
+The platform guarantees **Tabula** and **scGPT**. The other two images are built and published, and their trainer artifacts exist, but the setup wizard will not start a worker on them and their architecture cards on `#/models` are marked coming soon. They are brought online one at a time, in the order Geneformer, scFoundation, each as its own pair of PRs. A maintainer can still run one by hand.
 
 | Model | Image | Trainer artifact | Status | Validated batch size | Trainer RAM | Worker `--head-memory-in-gb` |
 |-------|-------|------------------|--------|----------------------|-------------|------------------------------|
 | Tabula | `ghcr.io/aicell-lab/chiron-tabula:<version>` | `chiron-platform/tabula-trainer` | Supported | 32 (about 20 GB on a 24 GB RTX 3090, 16 is about 6 GB, 8 is about 2 GB) | 16 GiB | 30 |
-| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` | Coming soon | 32 | 16 GiB | 30 |
+| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` | Supported | 32 | 16 GiB | 30 |
 | Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` | Coming soon | 16 | 24 GiB | 40 |
 | scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` | Coming soon | 8 | 32 GiB | 48 |
 
 The batch sizes other than Tabula's come from the four-model probe runs on a 24 GB RTX 3090 and are the sizes that ran, not measured memory curves.
+
+scGPT trains from the published whole-human checkpoint rather than from random initialisation, and it reads genes by HGNC symbol through the 60,694-entry CELLxGENE Census vocabulary the release was pretrained on. Both of those are properties of the federation, not of a site: the gene embedding is one of the averaged tensors, so row *i* has to mean the same gene everywhere. That is why `scgpt-trainer` has a floor of 0.3.0. A 0.2.x site and a 0.3.0 site would average unrelated genes together and report nothing wrong.
 
 The head memory figure is a hard gate, not a hint. Ray admits an application only if its declared `memory` still fits the head node's budget, and a worker has to hold the manager (1 GiB), the orchestrator on the coordinating site (8 GiB) and the trainer at once. A worker started with less comes up healthy and then refuses the trainer with `Insufficient resources for application '<name>'`. The setup guide picks the right figure from the selected model (`WORKER_RAM_GB` in `src/config/chironModels.ts`); a hand-written command line has to pick it from this table.
 

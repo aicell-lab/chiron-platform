@@ -4,7 +4,7 @@
 
 **Chiron Platform** is the web frontend and federated orchestration layer for **Tabula**, a single-cell foundation model that combines tabular learning over genes with federated learning across institutions. Raw single-cell data never leaves the institution that owns it. Only shared transformer weights cross the network. See the bioRxiv preprint: https://www.biorxiv.org/content/10.1101/2025.01.06.631427v1.
 
-`chiron.aicell.io` coordinates BioEngine Workers across institutions so they can train collaboratively. Tabula is currently the only model supported. Keep platform code model-agnostic where possible so future foundation models can plug in.
+`chiron.aicell.io` coordinates BioEngine Workers across institutions so they can train collaboratively. Tabula and scGPT are supported today, with Geneformer and scFoundation being brought online one at a time. Keep platform code model-agnostic where possible so further foundation models can plug in.
 
 ## Where to look first
 

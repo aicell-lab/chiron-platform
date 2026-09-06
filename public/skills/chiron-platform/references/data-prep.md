@@ -1,7 +1,7 @@
 ---
 name: chiron-platform/data-prep
 parent: chiron-platform
-description: Prepare single-cell data for Tabula federated training on a Chiron worker. Covers folder layout, manifest.yaml, and what the data-server handles for you (h5ad → zarr conversion, value binning, HVG ranking, UMAP). Sub-skill of the chiron-platform skill.
+description: Prepare single-cell data for Chiron federated training on a worker. Covers folder layout, manifest.yaml, and what the data-server handles for you (h5ad → zarr conversion, value binning, HVG ranking, UMAP). Sub-skill of the chiron-platform skill.
 compatibility: Designed for Claude Code, Gemini CLI, or any agent that can read a URL and execute Python.
 metadata:
   author: chiron-platform
@@ -14,7 +14,7 @@ metadata:
     - 2D UMAP embedding for the dataset card
 ---
 
-# Prepare single-cell data for Tabula federated training
+# Prepare single-cell data for Chiron federated training
 
 This is a sub-skill of the [chiron-platform skill](../SKILL.md). It explains what a Chiron worker expects on disk and how to get an `.h5ad` file ready for training. Read this once at the start of a data-onboarding session and then act.
 
@@ -26,7 +26,8 @@ The user has either an `.h5ad` file, an already-converted `.zarr` directory, or 
 2. **Pick / confirm a `<dataset-slug>`** for each dataset (one folder per tissue / dataset; one or more `.h5ad` or `.zarr` per folder is fine).
 3. **Place** the file(s) at `<their-DATA_DIR>/<dataset-slug>/`. `.h5ad` and `.zarr` both work — the data-server reads either and auto-converts `.h5ad` to `.zarr` on first scan if no matching `.zarr` exists.
 4. **Write** `<their-DATA_DIR>/<dataset-slug>/manifest.yaml` describing the dataset.
-5. **Optionally pre-filter genes** if the AnnData has dramatically more genes than the trainer's input sequence length `in_feature` (fixed at 1200 in the trainer's framework.yaml). The data-server will rank-select for you at training time, but pre-filtering keeps the on-disk zarr small.
+5. **Check `var` carries gene names** for every model except Tabula. See [Gene names in `var`](#gene-names-in-var) below.
+6. **Optionally pre-filter genes** if the AnnData has dramatically more genes than Tabula's input sequence length `in_feature` (fixed at 1200 in the trainer's framework.yaml). The data-server will rank-select for you at training time, but pre-filtering keeps the on-disk zarr small. Do not pre-filter below a model's own panel: a dataset already cut to Tabula's 1,200 genes is a dataset the other models can only see 1,200 genes of.
 
 You **do not need to**:
 - convert `.h5ad` → `.zarr` yourself (the data-server does it on first scan)
@@ -34,6 +35,27 @@ You **do not need to**:
 - run `scanpy.pp.highly_variable_genes` for the trainer (the data-server ranks genes by per-dataset over-dispersion and writes `var/chiron_hvg_rank` so the trainer can pick the top 1,200 at training time)
 - compute a UMAP / PCA for the dataset card (the data-server does that too with streaming IncrementalPCA + UMAP on a subsample if the dataset is large)
 - modify the AnnData's `X`, `obs`, or `var` beyond what the user wants biologically
+
+## Gene names in `var`
+
+Tabula identifies a gene by its position in the dataset's own HVG ranking, so it needs no gene names at all. The other three models look each gene up in a fixed vocabulary their pretrained weights were built on, and they do that by name:
+
+| Model | Column read from `var` | Contents |
+|-------|------------------------|----------|
+| Tabula | none | positional, no names needed |
+| scGPT | `feature_name` | HGNC gene symbols, for example `CD8A` |
+| scFoundation | `feature_name` | HGNC gene symbols |
+| Geneformer | `feature_id` | Ensembl gene IDs, for example `ENSG00000153563` |
+
+A gene whose name is missing from the model's vocabulary is dropped, silently and per gene, which is the right behaviour for a stray locus and the wrong outcome for a whole dataset. A dataset with no `feature_name` at all is invisible to scGPT and scFoundation, so it will train on nothing.
+
+The column may be a plain string array, a pandas categorical, or a nullable string array. All three are read correctly, so write it however AnnData writes it and do not convert.
+
+If the user's `.h5ad` has symbols in `var.index` and nothing else, copy them across before conversion:
+
+```python
+adata.var["feature_name"] = adata.var.index.astype(str)
+```
 
 Cell- and gene-level quality control is the user's responsibility upstream. The data-server does **not** apply any QC filter; whatever cells and genes are in the user's `.h5ad` are what the trainer sees.
 

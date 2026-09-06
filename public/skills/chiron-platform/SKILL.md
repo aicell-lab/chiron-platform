@@ -49,12 +49,12 @@ See [apps/explore-tabula-models.md](apps/explore-tabula-models.md).
 
 Before generating any launch command, gather the environment yourself rather than asking the user to guess.
 
-**Tabula is the model to launch.** A worker's container image decides which model it can train: it carries that model's dependencies and hosts that model's trainer, and no other. Chiron guarantees Tabula today. scGPT, Geneformer and scFoundation are being brought online one at a time, in that order, and appear on [chiron.aicell.io/#/models](https://chiron.aicell.io/#/models) as architectures that are coming. The setup wizard lists them but will not start a worker on one, so do not generate a launch command for them either. If the user asks for one of the three, say it is coming and offer Tabula.
+**Tabula and scGPT are the models to launch.** A worker's container image decides which model it can train: it carries that model's dependencies and hosts that model's trainer, and no other. Chiron guarantees Tabula and scGPT today. Geneformer and scFoundation are being brought online one at a time, in that order, and appear on [chiron.aicell.io/#/models](https://chiron.aicell.io/#/models) as architectures that are coming. The setup wizard lists them but will not start a worker on one, so do not generate a launch command for them either. If the user asks for one of the two, say it is coming and offer Tabula or scGPT.
 
 | Model | Image | Trainer artifact | Status |
 |-------|-------|------------------|--------|
 | Tabula | `ghcr.io/aicell-lab/chiron-tabula:<version>` | `chiron-platform/tabula-trainer` | Supported |
-| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` | Coming soon |
+| scGPT | `ghcr.io/aicell-lab/chiron-scgpt:<version>` | `chiron-platform/scgpt-trainer` | Supported |
 | Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` | Coming soon |
 | scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` | Coming soon |
 
@@ -67,7 +67,7 @@ A site that wants to train two models runs two workers, one per image. Every ima
 - **Operating system**: `uname -srm` (Linux/macOS) or `systeminfo` (Windows). Linux is the supported target; macOS and Windows work through Docker Desktop but cannot pass `--gpus all`.
 - **Container runtime**: probe `docker --version`, `podman --version`, `singularity --version`, `apptainer --version` in that order and pick the first that responds. If more than one is installed, ask the user which to use. Docker is the default in the browser wizard.
 - **GPU and CUDA**: `nvidia-smi --query-gpu=name,memory.total --format=csv` lists the GPUs and their memory. No NVIDIA driver means CPU-only mode (training will be unusably slow but the worker still boots).
-- **Compute headroom**: `nproc` for CPU cores and `free -h` (Linux) or equivalent for RAM. The wizard defaults to 4 CPU and 1 GPU. RAM depends on the model, because Ray admits an application only if its declared memory fits the head node's budget and a worker holds the manager (1 GB), the orchestrator (8 GB) and the trainer at once: **30 GB for Tabula**, and later 30 GB for scGPT, 40 GB for Geneformer and 48 GB for scFoundation. A worker started with less comes up healthy and then refuses its trainer with `Insufficient resources`. The wizard fills the right figure in when you pick the model.
+- **Compute headroom**: `nproc` for CPU cores and `free -h` (Linux) or equivalent for RAM. The wizard defaults to 4 CPU and 1 GPU. RAM depends on the model, because Ray admits an application only if its declared memory fits the head node's budget and a worker holds the manager (1 GB), the orchestrator (8 GB) and the trainer at once: **30 GB for Tabula and 30 GB for scGPT**, and later 40 GB for Geneformer and 48 GB for scFoundation. A worker started with less comes up healthy and then refuses its trainer with `Insufficient resources`. The wizard fills the right figure in when you pick the model.
 
 **Ask the user for what you cannot detect:**
 
