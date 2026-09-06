@@ -1,17 +1,27 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { ArtifactRef, listArtifactChildren } from '../../utils/artifactApi';
 import ModelCard from './ModelCard';
+import { CHIRON_MODEL_FAMILIES } from '../../config/chironModels';
 import { ArrowPathIcon } from '@heroicons/react/24/outline';
 
 interface ModelGridProps {
-  parentId: string;
+  /** Collections to merge into one grid, in whatever order reads best. The
+   *  grid sorts across all of them, so this order does not decide anything. */
+  parentIds: string[];
   filters?: Record<string, any>;
   emptyMessage?: React.ReactNode;
   limit?: number;
 }
 
+/** Position of each foundation model in the grid, from the registry's own
+ *  order: Tabula first, then the rest by how widely they are used. Anything
+ *  that is not one of the four sorts after all of them. */
+const FAMILY_RANK = new Map<string, number>(
+  CHIRON_MODEL_FAMILIES.map((family, i) => [family as string, i])
+);
+
 /**
- * A grid of published artifacts from a public Chiron collection.
+ * A grid of published artifacts from public Chiron collections.
  *
  * The listing is deliberately anonymous. Everything this grid shows is
  * committed and world-readable, so a token adds nothing, and sending one turns
@@ -25,7 +35,7 @@ interface ModelGridProps {
  * expired, and that decision differs per page.
  */
 const ModelGrid: React.FC<ModelGridProps> = ({
-  parentId,
+  parentIds,
   filters,
   emptyMessage,
   limit = 50,
@@ -34,34 +44,46 @@ const ModelGrid: React.FC<ModelGridProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Depend on the content of the object, not its identity. Callers pass a
-  // literal, so a render would otherwise be enough to refetch. eslint cannot
-  // see through the serialisation, which is what the disable below is for.
+  // Depend on the content of the array and the object, not on their identity.
+  // Callers pass literals, so a render would otherwise be enough to refetch
+  // every collection. eslint cannot see through the serialisation, which is
+  // what the disable below is for.
+  const parentIdsKey = JSON.stringify(parentIds);
   const filtersKey = JSON.stringify(filters || {});
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const { items } = await listArtifactChildren(parentId, { filters, limit });
+      const pages = await Promise.all(
+        parentIds.map(parentId =>
+          listArtifactChildren(parentId, { filters, limit })
+        )
+      );
+      const all = pages.flatMap(page => page.items);
       // Public Model Hub: hide anything still in the per-user review queue,
       // and anything the uploader has discarded (chiron-models grants `rw+`
       // not `delete`, so a user-side discard flips the manifest status
       // instead of removing the artifact — workspace admin sweeps later).
       // Curated/legacy artifacts have no `status` field and are always
       // shown (so the original tabula-* pretrained models keep appearing).
-      const visible = items.filter(a => {
+      const visible = all.filter(a => {
         const s = a.manifest?.status;
         return s !== 'in_review' && s !== 'request_deletion';
       });
-      // What a visitor can use comes before what is on the way, and within
-      // each group the order is alphabetical. Only architecture cards carry
-      // `chiron.status`, so this is alphabetical as before for checkpoints.
+      // The four foundation models lead the grid, in registry order, and
+      // everything trained from them follows alphabetically. They are what a
+      // visitor came to see, they are the entry point to every checkpoint
+      // below them, and one of them being absent from the top of the page is
+      // how a reader would conclude the platform does not have it. The
+      // `chiron` block is what marks a card as the model itself rather than
+      // weights trained from it, so every checkpoint sorts below all four,
+      // exactly as it did when it had its own section.
       const rank = (a: ArtifactRef) =>
-        a.manifest?.chiron?.status === 'coming-soon' ? 1 : 0;
+        FAMILY_RANK.get(a.manifest?.chiron?.model_family) ?? FAMILY_RANK.size;
       const sorted = visible.sort((a, b) => {
-        const byStatus = rank(a) - rank(b);
-        if (byStatus !== 0) return byStatus;
+        const byFamily = rank(a) - rank(b);
+        if (byFamily !== 0) return byFamily;
         const an = (a.manifest?.name || a.alias || '').toLowerCase();
         const bn = (b.manifest?.name || b.alias || '').toLowerCase();
         return an.localeCompare(bn);
@@ -73,7 +95,7 @@ const ModelGrid: React.FC<ModelGridProps> = ({
       setLoading(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [parentId, filtersKey, limit]);
+  }, [parentIdsKey, filtersKey, limit]);
 
   useEffect(() => {
     load();
@@ -109,7 +131,7 @@ const ModelGrid: React.FC<ModelGridProps> = ({
         {emptyMessage || (
           <>
             <div className="text-lg font-medium text-gray-700 mb-1">No models yet</div>
-            <div className="text-sm">Nothing has been published to this collection.</div>
+            <div className="text-sm">Nothing has been published yet.</div>
           </>
         )}
       </div>
