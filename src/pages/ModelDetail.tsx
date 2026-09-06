@@ -64,10 +64,30 @@ const ModelDetail: React.FC = () => {
       setLoading(true);
       setError(null);
       try {
-        const [a, f] = await Promise.all([
-          readArtifact(artifactId, hyphaToken || undefined),
-          listArtifactFiles(artifactId, hyphaToken || undefined),
-        ]);
+        // Anonymous first, the session token only as a fallback.
+        //
+        // Almost everything reachable here is a published artifact in a
+        // world-readable collection, and Hypha rejects a request whose
+        // Authorization header has expired rather than ignoring it and
+        // serving the public copy. Sending the token first would therefore
+        // turn a stale login into a dead page for a model anyone can read.
+        //
+        // The fallback exists because this same route also serves a user's
+        // own staged and in-review artifacts, reached from My Models, and
+        // those nobody else can see. Whichever credential got the record is
+        // then used for the file list and the documentation, so a private
+        // artifact does not half-load.
+        let a: ArtifactRef;
+        let readToken: string | undefined;
+        try {
+          a = await readArtifact(artifactId);
+        } catch (anonymousError) {
+          if (!hyphaToken) throw anonymousError;
+          a = await readArtifact(artifactId, hyphaToken);
+          readToken = hyphaToken;
+        }
+        if (cancelled) return;
+        const f = await listArtifactFiles(artifactId, readToken);
         if (cancelled) return;
         setArtifact(a);
         setFiles(f);
@@ -77,7 +97,7 @@ const ModelDetail: React.FC = () => {
         if (hasDocs) {
           try {
             const headers: Record<string, string> = {};
-            if (hyphaToken) headers['Authorization'] = `Bearer ${hyphaToken}`;
+            if (readToken) headers['Authorization'] = `Bearer ${readToken}`;
             const r = await fetch(getArtifactFileUrl(artifactId, 'documentation.md'), { headers });
             if (r.ok) {
               const text = await r.text();

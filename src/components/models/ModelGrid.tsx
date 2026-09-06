@@ -1,5 +1,4 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { useHyphaStore } from '../../store/hyphaStore';
 import { ArtifactRef, listArtifactChildren } from '../../utils/artifactApi';
 import ModelCard from './ModelCard';
 import { ArrowPathIcon } from '@heroicons/react/24/outline';
@@ -11,26 +10,40 @@ interface ModelGridProps {
   limit?: number;
 }
 
+/**
+ * A grid of published artifacts from a public Chiron collection.
+ *
+ * The listing is deliberately anonymous. Everything this grid shows is
+ * committed and world-readable, so a token adds nothing, and sending one turns
+ * every failure of the session into a failure of the page: Hypha rejects a
+ * request whose Authorization header has expired rather than falling back to
+ * anonymous, so a visitor with a stale login saw "Could not load models, HTTP
+ * 401, the token has expired" on a page that needs no login at all.
+ *
+ * A collection that is not world-readable does not belong here. Reading one
+ * means deciding what to do when the user is logged out or their token has
+ * expired, and that decision differs per page.
+ */
 const ModelGrid: React.FC<ModelGridProps> = ({
   parentId,
   filters,
   emptyMessage,
   limit = 50,
 }) => {
-  const { hyphaToken } = useHyphaStore();
   const [items, setItems] = useState<ArtifactRef[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Depend on the content of the object, not its identity. Callers pass a
+  // literal, so a render would otherwise be enough to refetch. eslint cannot
+  // see through the serialisation, which is what the disable below is for.
+  const filtersKey = JSON.stringify(filters || {});
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const { items } = await listArtifactChildren(parentId, {
-        filters,
-        limit,
-        token: hyphaToken || undefined,
-      });
+      const { items } = await listArtifactChildren(parentId, { filters, limit });
       // Public Model Hub: hide anything still in the per-user review queue,
       // and anything the uploader has discarded (chiron-models grants `rw+`
       // not `delete`, so a user-side discard flips the manifest status
@@ -59,7 +72,8 @@ const ModelGrid: React.FC<ModelGridProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [parentId, JSON.stringify(filters || {}), limit, hyphaToken]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parentId, filtersKey, limit]);
 
   useEffect(() => {
     load();
