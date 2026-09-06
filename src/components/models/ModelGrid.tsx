@@ -24,6 +24,30 @@ const FAMILY_RANK = new Map<string, number>(
   CHIRON_MODEL_FAMILIES.map((family, i) => [family as string, i])
 );
 
+/** The model an artifact belongs to, in either spelling. A card in
+ *  `chiron-architectures` carries the family under `chiron`, published
+ *  weights carry it at the top level. */
+const familyOf = (a: ArtifactRef): ChironModelFamily | undefined =>
+  (a.manifest?.chiron?.model_family || a.manifest?.model_family) as
+    | ChironModelFamily
+    | undefined;
+
+const aliasOf = (a: ArtifactRef): string =>
+  (a.alias || a.id.split('/').pop() || '').toLowerCase();
+
+/** Whether this artifact is its model's published foundation checkpoint, the
+ *  weights every other checkpoint of the family was trained from. The registry
+ *  names it per model, so a family that has not published one yet has no
+ *  candidate and this is false for all of its artifacts. */
+const isFoundation = (a: ArtifactRef): boolean => {
+  const family = familyOf(a);
+  const expected = family && CHIRON_MODELS[family]?.foundationAlias;
+  return !!expected && aliasOf(a) === expected;
+};
+
+/** Whether this artifact is the model's own card rather than weights. */
+const isArchitecture = (a: ArtifactRef): boolean => !!a.manifest?.chiron;
+
 /**
  * A grid of published artifacts from public Chiron collections.
  *
@@ -86,17 +110,43 @@ const ModelGrid: React.FC<ModelGridProps> = ({
         const family = a.manifest?.model_family as ChironModelFamily | undefined;
         return !family || CHIRON_MODELS[family]?.status !== 'coming-soon';
       });
-      // The four foundation models lead the grid, in registry order, and
-      // everything trained from them follows alphabetically. They are what a
-      // visitor came to see, they are the entry point to every checkpoint
-      // below them, and one of them being absent from the top of the page is
-      // how a reader would conclude the platform does not have it. The
-      // `chiron` block is what marks a card as the model itself rather than
-      // weights trained from it, so every checkpoint sorts below all four,
-      // exactly as it did when it had its own section.
-      const rank = (a: ArtifactRef) =>
-        FAMILY_RANK.get(a.manifest?.chiron?.model_family) ?? FAMILY_RANK.size;
-      const sorted = visible.sort((a, b) => {
+      // One card per model at the head of the grid, not two. A model's own
+      // card and its published foundation weights describe the same thing to
+      // a visitor: the base model, the one to start from. Showing both puts
+      // Tabula on the page twice, and the second card is the weaker of the
+      // two, because the card is editorial while the checkpoint is the thing
+      // you can actually train from and download.
+      //
+      // So a model is represented by its foundation checkpoint once that
+      // checkpoint is on the page, and by its own card until then. Nothing is
+      // deleted anywhere: the card stays in `chiron-architectures`, where the
+      // trainer reads it on every run to find the base weights, and its detail
+      // page stays reachable. It just stops competing for a slot in the grid.
+      //
+      // A model this build cannot train yet has its weights filtered out
+      // above, so its card is the only candidate left and keeps carrying the
+      // roadmap, which is the whole reason to list it.
+      const led = new Set(
+        visible.filter(isFoundation).map(a => familyOf(a) as string)
+      );
+      const shown = visible.filter(
+        a => !(isArchitecture(a) && led.has(familyOf(a) as string))
+      );
+      // Those representatives lead the grid, in registry order, and everything
+      // trained from them follows alphabetically. They are what a visitor came
+      // to see, they are the entry point to every checkpoint below them, and
+      // one of them being absent from the top of the page is how a reader
+      // would conclude the platform does not have it. A model's other
+      // checkpoints sort below all four however they are named, exactly as
+      // they did when they had their own section.
+      const rank = (a: ArtifactRef) => {
+        const family = familyOf(a);
+        if (!family || !(isArchitecture(a) || isFoundation(a))) {
+          return FAMILY_RANK.size;
+        }
+        return FAMILY_RANK.get(family) ?? FAMILY_RANK.size;
+      };
+      const sorted = shown.sort((a, b) => {
         const byFamily = rank(a) - rank(b);
         if (byFamily !== 0) return byFamily;
         const an = (a.manifest?.name || a.alias || '').toLowerCase();
