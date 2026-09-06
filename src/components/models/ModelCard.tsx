@@ -2,6 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { ArtifactRef } from '../../utils/artifactApi';
 import CoverImage from './CoverImage';
+import { CHIRON_MODELS, ChironModelFamily } from '../../config/chironModels';
 
 interface ModelCardProps {
   artifact: ArtifactRef;
@@ -35,11 +36,32 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
     : undefined;
   const isGlobalTransformer: boolean = manifest.global_transformer === true;
   const alias = artifact.alias || aliasFromId(artifact.id);
-  // Architecture cards (chiron-architectures) carry a status. A model the
-  // platform does not support yet is shown so the roadmap is visible, but it
+  // Whether this build of the platform can train the model yet. A model that
+  // cannot be trained yet is still listed, so the roadmap is visible, but it
   // does not link anywhere: its detail page would describe something a user
   // cannot run.
-  const comingSoon: boolean = manifest.chiron?.status === 'coming-soon';
+  //
+  // The frontend registry decides, not the artifact. A model's card in
+  // `chiron-architectures` is one record shared by every deployment of the
+  // site, while support for the model ships in a release of this app, so the
+  // card can perfectly well hold a finished set of weights months before the
+  // release that offers them. Reading the status off the card would make the
+  // model announce itself as ready the moment the weights were uploaded.
+  // `chiron.status` on the artifact stays the fallback for a family this
+  // build does not know, which is what a fifth model's card looks like to an
+  // older frontend.
+  // Either spelling. The architecture cards carry the family under `chiron`,
+  // while a mirrored set of published weights carries it at the top level, and
+  // both are the same model as far as this question goes: the scGPT weights
+  // mirror must not present itself as ready on a build where scGPT itself
+  // reads "Coming soon", or the page contradicts itself about the same model.
+  const family: string | undefined =
+    manifest.chiron?.model_family || manifest.model_family;
+  const registryStatus = family
+    ? CHIRON_MODELS[family as ChironModelFamily]?.status
+    : undefined;
+  const comingSoon: boolean =
+    (registryStatus ?? manifest.chiron?.status) === 'coming-soon';
 
   const body = (
     <>
@@ -94,9 +116,15 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
           )}
         </div>
 
-        <div className="mt-3 text-xs text-gray-500 text-right">
-          {formatDate(manifest.created_at || artifact.created_at)}
-        </div>
+        {/* No date on a card for a model that is not here yet. The only
+            timestamp such an artifact has is when its entry was written, which
+            says nothing about when the model arrives, and a date under a
+            "Coming soon" pill reads as the date it is coming. */}
+        {!comingSoon && (
+          <div className="mt-3 text-xs text-gray-500 text-right">
+            {formatDate(manifest.created_at || artifact.created_at)}
+          </div>
+        )}
       </div>
     </>
   );

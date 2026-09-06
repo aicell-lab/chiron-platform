@@ -1,54 +1,104 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { useHyphaStore } from '../../store/hyphaStore';
 import { ArtifactRef, listArtifactChildren } from '../../utils/artifactApi';
 import ModelCard from './ModelCard';
+import {
+  CHIRON_MODELS,
+  CHIRON_MODEL_FAMILIES,
+  ChironModelFamily,
+} from '../../config/chironModels';
 import { ArrowPathIcon } from '@heroicons/react/24/outline';
 
 interface ModelGridProps {
-  parentId: string;
+  /** Collections to merge into one grid, in whatever order reads best. The
+   *  grid sorts across all of them, so this order does not decide anything. */
+  parentIds: string[];
   filters?: Record<string, any>;
   emptyMessage?: React.ReactNode;
   limit?: number;
 }
 
+/** Position of each foundation model in the grid, from the registry's own
+ *  order: Tabula first, then the rest by how widely they are used. Anything
+ *  that is not one of the four sorts after all of them. */
+const FAMILY_RANK = new Map<string, number>(
+  CHIRON_MODEL_FAMILIES.map((family, i) => [family as string, i])
+);
+
+/**
+ * A grid of published artifacts from public Chiron collections.
+ *
+ * The listing is deliberately anonymous. Everything this grid shows is
+ * committed and world-readable, so a token adds nothing, and sending one turns
+ * every failure of the session into a failure of the page: Hypha rejects a
+ * request whose Authorization header has expired rather than falling back to
+ * anonymous, so a visitor with a stale login saw "Could not load models, HTTP
+ * 401, the token has expired" on a page that needs no login at all.
+ *
+ * A collection that is not world-readable does not belong here. Reading one
+ * means deciding what to do when the user is logged out or their token has
+ * expired, and that decision differs per page.
+ */
 const ModelGrid: React.FC<ModelGridProps> = ({
-  parentId,
+  parentIds,
   filters,
   emptyMessage,
   limit = 50,
 }) => {
-  const { hyphaToken } = useHyphaStore();
   const [items, setItems] = useState<ArtifactRef[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Depend on the content of the array and the object, not on their identity.
+  // Callers pass literals, so a render would otherwise be enough to refetch
+  // every collection. eslint cannot see through the serialisation, which is
+  // what the disable below is for.
+  const parentIdsKey = JSON.stringify(parentIds);
+  const filtersKey = JSON.stringify(filters || {});
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const { items } = await listArtifactChildren(parentId, {
-        filters,
-        limit,
-        token: hyphaToken || undefined,
-      });
+      const pages = await Promise.all(
+        parentIds.map(parentId =>
+          listArtifactChildren(parentId, { filters, limit })
+        )
+      );
+      const all = pages.flatMap(page => page.items);
       // Public Model Hub: hide anything still in the per-user review queue,
       // and anything the uploader has discarded (chiron-models grants `rw+`
       // not `delete`, so a user-side discard flips the manifest status
       // instead of removing the artifact — workspace admin sweeps later).
       // Curated/legacy artifacts have no `status` field and are always
       // shown (so the original tabula-* pretrained models keep appearing).
-      const visible = items.filter(a => {
+      const visible = all.filter(a => {
         const s = a.manifest?.status;
-        return s !== 'in_review' && s !== 'request_deletion';
+        if (s === 'in_review' || s === 'request_deletion') return false;
+        // Weights belonging to a model this build cannot train yet. The
+        // model's own card already says it is coming, and that is the whole
+        // roadmap the page owes a visitor, so a second card offering the
+        // weights is at best redundant and at worst reads as an offer: the
+        // scGPT mirror is a finished upstream checkpoint and looks ready to
+        // use. A card in `chiron-architectures` carries a `chiron` block and
+        // is the model itself, so it always stays. An artifact with no family
+        // at all is untouched, which is every tabula-* checkpoint.
+        if (a.manifest?.chiron) return true;
+        const family = a.manifest?.model_family as ChironModelFamily | undefined;
+        return !family || CHIRON_MODELS[family]?.status !== 'coming-soon';
       });
-      // What a visitor can use comes before what is on the way, and within
-      // each group the order is alphabetical. Only architecture cards carry
-      // `chiron.status`, so this is alphabetical as before for checkpoints.
+      // The four foundation models lead the grid, in registry order, and
+      // everything trained from them follows alphabetically. They are what a
+      // visitor came to see, they are the entry point to every checkpoint
+      // below them, and one of them being absent from the top of the page is
+      // how a reader would conclude the platform does not have it. The
+      // `chiron` block is what marks a card as the model itself rather than
+      // weights trained from it, so every checkpoint sorts below all four,
+      // exactly as it did when it had its own section.
       const rank = (a: ArtifactRef) =>
-        a.manifest?.chiron?.status === 'coming-soon' ? 1 : 0;
+        FAMILY_RANK.get(a.manifest?.chiron?.model_family) ?? FAMILY_RANK.size;
       const sorted = visible.sort((a, b) => {
-        const byStatus = rank(a) - rank(b);
-        if (byStatus !== 0) return byStatus;
+        const byFamily = rank(a) - rank(b);
+        if (byFamily !== 0) return byFamily;
         const an = (a.manifest?.name || a.alias || '').toLowerCase();
         const bn = (b.manifest?.name || b.alias || '').toLowerCase();
         return an.localeCompare(bn);
@@ -59,7 +109,8 @@ const ModelGrid: React.FC<ModelGridProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [parentId, JSON.stringify(filters || {}), limit, hyphaToken]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parentIdsKey, filtersKey, limit]);
 
   useEffect(() => {
     load();
@@ -95,7 +146,7 @@ const ModelGrid: React.FC<ModelGridProps> = ({
         {emptyMessage || (
           <>
             <div className="text-lg font-medium text-gray-700 mb-1">No models yet</div>
-            <div className="text-sm">Nothing has been published to this collection.</div>
+            <div className="text-sm">Nothing has been published yet.</div>
           </>
         )}
       </div>
