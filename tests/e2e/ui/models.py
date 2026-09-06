@@ -6,9 +6,11 @@ parameters, which are properties of the test bench rather than of the platform:
 the batch size that fits a 24 GB card, and the dataset the model can actually
 read.
 
-Dataset choice is not cosmetic. The three gene-panel models need a full-panel
-set, so they are pointed at one by name rather than taking whichever row the
-launch dialog happens to list first.
+Dataset choice is not cosmetic. The three gene-panel models need a set that
+carries gene symbols, so they are pointed at one by name rather than taking
+whichever row the launch dialog happens to list first. Skin Aging - BLSA is the
+row they must not take: it is already cut to Tabula's 1200-gene input and
+carries no `feature_name`, so it is the one demo dataset only Tabula can read.
 """
 
 MODELS = [
@@ -26,7 +28,7 @@ MODELS = [
         "slug": "scgpt",
         "display": "scGPT",
         "image": "ghcr.io/aicell-lab/chiron-scgpt",
-        "dataset": "PBMC",
+        "dataset": "Blood-Perturb",
         "batch_size": 32,
         "worker_memory_gb": 30,
     },
@@ -34,7 +36,7 @@ MODELS = [
         "slug": "geneformer",
         "display": "Geneformer",
         "image": "ghcr.io/aicell-lab/chiron-geneformer",
-        "dataset": "PBMC",
+        "dataset": "Blood-Perturb",
         "batch_size": 16,
         "worker_memory_gb": 40,
     },
@@ -42,7 +44,7 @@ MODELS = [
         "slug": "scfoundation",
         "display": "scFoundation",
         "image": "ghcr.io/aicell-lab/chiron-scfoundation",
-        "dataset": "PBMC",
+        "dataset": "Blood-Perturb",
         "batch_size": 8,
         "worker_memory_gb": 48,
     },
