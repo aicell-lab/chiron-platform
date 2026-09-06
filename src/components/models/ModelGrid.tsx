@@ -1,7 +1,11 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { ArtifactRef, listArtifactChildren } from '../../utils/artifactApi';
 import ModelCard from './ModelCard';
-import { CHIRON_MODEL_FAMILIES } from '../../config/chironModels';
+import {
+  CHIRON_MODELS,
+  CHIRON_MODEL_FAMILIES,
+  ChironModelFamily,
+} from '../../config/chironModels';
 import { ArrowPathIcon } from '@heroicons/react/24/outline';
 
 interface ModelGridProps {
@@ -69,7 +73,18 @@ const ModelGrid: React.FC<ModelGridProps> = ({
       // shown (so the original tabula-* pretrained models keep appearing).
       const visible = all.filter(a => {
         const s = a.manifest?.status;
-        return s !== 'in_review' && s !== 'request_deletion';
+        if (s === 'in_review' || s === 'request_deletion') return false;
+        // Weights belonging to a model this build cannot train yet. The
+        // model's own card already says it is coming, and that is the whole
+        // roadmap the page owes a visitor, so a second card offering the
+        // weights is at best redundant and at worst reads as an offer: the
+        // scGPT mirror is a finished upstream checkpoint and looks ready to
+        // use. A card in `chiron-architectures` carries a `chiron` block and
+        // is the model itself, so it always stays. An artifact with no family
+        // at all is untouched, which is every tabula-* checkpoint.
+        if (a.manifest?.chiron) return true;
+        const family = a.manifest?.model_family as ChironModelFamily | undefined;
+        return !family || CHIRON_MODELS[family]?.status !== 'coming-soon';
       });
       // The four foundation models lead the grid, in registry order, and
       // everything trained from them follows alphabetically. They are what a
