@@ -13,7 +13,7 @@ metadata:
     - references/data-prep.md
     - references/trainer-artifact-template.md
   related-skills:
-    - https://bioimage.io/public/skills/bioengine/SKILL.md
+    - https://bioimage.io/skills/bioengine/SKILL.md
 ---
 
 # Chiron platform
@@ -27,7 +27,7 @@ This skill is the dispatcher. Pick a task below.
 | # | Task | Sub-skill |
 |---|------|-----------|
 | 1 | Explore published Tabula checkpoints, load weights, run inference locally | [apps/explore-tabula-models.md](apps/explore-tabula-models.md) |
-| 2 | Set up a BioEngine Worker for Chiron, register your datasets | [§ 2 below](#2-set-up-a-chiron-worker) + [references/data-prep.md](references/data-prep.md) + [bioengine skill](https://bioimage.io/public/skills/bioengine/SKILL.md) |
+| 2 | Set up a BioEngine Worker for Chiron, register your datasets | [§ 2 below](#2-set-up-a-chiron-worker) + [references/data-prep.md](references/data-prep.md) + [bioengine skill](https://bioimage.io/skills/bioengine/SKILL.md) |
 | 3 | Launch and monitor a federated training session | [apps/chiron-manager.md](apps/chiron-manager.md) → [apps/chiron-orchestrator.md](apps/chiron-orchestrator.md) → [apps/tabula-trainer.md](apps/tabula-trainer.md) |
 | 4 | Contribute a trainer for another single cell foundation model | [references/trainer-artifact-template.md](references/trainer-artifact-template.md) |
 
@@ -39,7 +39,7 @@ Chiron's Hypha workspace is `chiron-platform`. Published model checkpoints live 
 - **Chiron Orchestrator** (`<orch-app>:chiron-orchestrator`) — Flower-based FedAvg server that coordinates one federated training session at a time.
 - **Trainer** (`<trainer-app>:<model>-trainer`, for example `:tabula-trainer`) — local Flower client that trains on the institution's private datasets. There can be many trainer apps registered to one orchestrator, all training the same model.
 
-The manager and the orchestrator are model-agnostic. The trainer is not: each worker image carries exactly one model's dependencies and hosts that model's trainer only (see [§ 2](#2-set-up-a-chiron-worker)). For Tabula, `in_feature` (the gene-sequence length the model consumes) is hard-coded to 1,200 in `tabula/framework.yaml` and the data server pre-cuts every dataset to this width before exposing it to the trainer. The other models read the counts themselves and do their own encoding. Chiron runs on BioEngine v0.11.19, the same major line the bioengine skill at [bioimage.io/public/skills/bioengine/SKILL.md](https://bioimage.io/public/skills/bioengine/SKILL.md) targets. **Use this skill for everything Chiron-specific. Delegate to the bioengine skill for everything BioEngine-general.**
+The manager and the orchestrator are model-agnostic. The trainer is not: each worker image carries exactly one model's dependencies and hosts that model's trainer only (see [§ 2](#2-set-up-a-chiron-worker)). For Tabula, `in_feature` (the gene-sequence length the model consumes) is hard-coded to 1,200 in `tabula/framework.yaml` and the data server pre-cuts every dataset to this width before exposing it to the trainer. The other models read the counts themselves and do their own encoding. Chiron runs on BioEngine v0.16.1, pinned as a commit in `worker/docker/versions.env` because BioEngine publishes no tagged releases. The bioengine skill at [bioimage.io/skills/bioengine/SKILL.md](https://bioimage.io/skills/bioengine/SKILL.md) is written against 0.15.x, so a handful of details there lag what a Chiron worker actually runs. Where the two disagree, believe the worker. **Use this skill for everything Chiron-specific. Delegate to the bioengine skill for everything BioEngine-general.**
 
 ## 1. Explore published Tabula models
 
@@ -77,7 +77,7 @@ A site that wants to train two models runs two workers, one per image. Every ima
 
 **Prepare and register datasets.** Follow the data-prep sub-skill at [references/data-prep.md](references/data-prep.md). It explains the per-dataset folder layout, the `manifest.yaml` schema, the expected AnnData keys (`adata.X` raw counts, `adata.var["gene_id"]` gene tokens), and the per-dataset HVG ranking, value binning, and UMAP the data server computes on first read. Inspect each `.h5ad` against this contract, fix anything that needs adjustment, and gather the prepared datasets into a new data directory laid out as one subfolder per dataset with a `manifest.yaml` each.
 
-**Launch the worker.** Follow the bioengine skill at [bioimage.io/public/skills/bioengine/SKILL.md](https://bioimage.io/public/skills/bioengine/SKILL.md) §1 (Set up a BioEngine worker) for the per-runtime command. For Chiron specifically: launch with `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}'` so the Chiron Manager comes up on startup. Easiest is the browser wizard at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker), which writes a one-line launch command for Docker, Podman, Singularity or Apptainer based on the form values.
+**Launch the worker.** Follow the bioengine skill at [bioimage.io/skills/bioengine/SKILL.md](https://bioimage.io/skills/bioengine/SKILL.md) §1 (Set up a BioEngine worker) for the per-runtime command. For Chiron specifically: launch with `--startup-applications '{"artifact_id":"chiron-platform/chiron-manager","application_id":"chiron-manager"}'` so the Chiron Manager comes up on startup. Easiest is the browser wizard at [chiron.aicell.io/#/worker](https://chiron.aicell.io/#/worker), which writes a one-line launch command for Docker, Podman, Singularity or Apptainer based on the form values.
 
 **Confirm the worker is online.** Once the worker is up, [chiron.aicell.io/#/worker/instances](https://chiron.aicell.io/#/worker/instances) lists every BioEngine worker this browser can reach, each card showing its location, the model its image was built for, and its BioEngine version. A "Chiron workers only" switch next to Observed Workspaces hides plain BioEngine workers that report no model, since those cannot host a Chiron trainer. Open the worker's dashboard from its card to see its registered datasets and hardware. The data server rescans the data directory every 30 seconds. You can also query [apps/chiron-manager.md](apps/chiron-manager.md) `get_worker_info()` and `get_datasets_info()` directly via Hypha RPC.
 
