@@ -3968,18 +3968,38 @@ const Training: React.FC = () => {
     // round's training_losses entry lands.
   }, [selectedOrchestrator, trainingOrchestratorId, isTraining, trainingHistory?.training_losses?.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch per-trainer checkpoints for all history participants
-  useEffect(() => {
-    if (!trainingHistory) return;
-    const ids = [
+  // Who took part in this run, deduplicated and in a stable order.
+  //
+  // A trainer that has both fit and evaluate losses is a key in both maps, so
+  // the concatenation names it twice. The checkpoint effect below iterated
+  // that list directly, which made it issue two identical calls per trainer
+  // from the moment round 1's evaluation landed and populated
+  // client_validation_losses. Joining to a string also gives the effect a
+  // dependency that only changes when the participant set does.
+  const historyParticipantKey = useMemo(() => {
+    if (!trainingHistory) return '';
+    return [...new Set([
       ...Object.keys(trainingHistory.client_training_losses ?? {}),
       ...Object.keys(trainingHistory.client_validation_losses ?? {}),
-    ];
-    ids.forEach(async (svcId) => {
+    ])].sort().join(',');
+  }, [trainingHistory]);
+
+  // Fetch per-trainer checkpoints for all history participants
+  //
+  // A trainer writes one checkpoint per round, so this only has new data to
+  // read when the round count changes or a participant joins. Depending on the
+  // whole trainingHistory object re-ran it on every status poll instead, which
+  // is roughly every two seconds and against the same replica that is serving
+  // the round. Same dependency shape as the global-checkpoint effect above.
+  useEffect(() => {
+    if (!historyParticipantKey) return;
+    let cancelled = false;
+    historyParticipantKey.split(',').forEach(async (svcId) => {
       const liveTrainer = trainers.find(t => t.serviceIds?.[0]?.websocket_service_id === svcId);
       if (!liveTrainer || liveTrainer.status !== 'RUNNING') return;
       try {
         const sessions = await callHyphaService<TrainerSession[]>(svcId, 'list_weight_checkpoints', {});
+        if (cancelled) return;
         // Session IDs are intentionally hidden from the UI label (they're opaque
         // and not user-meaningful) but logged here so debugging can map a
         // "Current/Previous" pill back to a server-side directory.
@@ -4002,7 +4022,8 @@ const Training: React.FC = () => {
         });
       } catch { /* silent */ }
     });
-  }, [trainingHistory, isTraining]); // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { cancelled = true; };
+  }, [historyParticipantKey, trainingHistory?.training_losses?.length, isTraining]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stepEnabled = (step: number) => {
     if (step === 1) return true;

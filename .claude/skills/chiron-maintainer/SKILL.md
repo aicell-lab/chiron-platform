@@ -56,7 +56,9 @@ One image per model, each carrying that model's dependencies and hosting that mo
 
 The builds are split across two repositories. `chiron-base` and the scGPT, Geneformer and scFoundation images are built here, from `worker/docker/`, with `scripts/publish_docker_image.sh`. `chiron-tabula` is built in the tabula repo, from `docker/tabula/`, against the `chiron-base` published from here, and stays there until Tabula ships as a pip package. All five push to `ghcr.io/aicell-lab/chiron-*`, because GHCR authorises a push against the organisation rather than against the repository the build ran in. `worker/docker/README.md` has the layer order, the image identity contract and the four-step release procedure across the two repos.
 
-The platform guarantees **Tabula** and **scGPT**. The other two images are built and published, and their trainer artifacts exist, but the setup wizard will not start a worker on them and their architecture cards on `#/models` are marked coming soon. They are brought online one at a time, in the order Geneformer, scFoundation, each as its own pair of PRs. A maintainer can still run one by hand.
+The platform guarantees **Tabula** and **scGPT**. The Geneformer and scFoundation images are built and published, and their trainer artifacts exist, but the setup wizard will not start a worker on them and their architecture cards on `#/models` are marked coming soon. They are brought online one at a time, in that order, each as its own pair of PRs. A maintainer can still run one by hand.
+
+scGPT reads a prepared store by gene symbol, so it needs `var/feature_name` alongside `layers/chiron_binned`. Tabula reads the binned layer positionally and does not. A store prepared without the symbol column deploys and then fails inside the scGPT trainer with `No usable cells found`, so check the dataset before pointing an scGPT worker at it.
 
 | Model | Image | Trainer artifact | Status | Validated batch size | Trainer RAM | Worker `--head-memory-in-gb` |
 |-------|-------|------------------|--------|----------------------|-------------|------------------------------|
@@ -65,7 +67,7 @@ The platform guarantees **Tabula** and **scGPT**. The other two images are built
 | Geneformer | `ghcr.io/aicell-lab/chiron-geneformer:<version>` | `chiron-platform/geneformer-trainer` | Coming soon | 16 | 24 GiB | 40 |
 | scFoundation | `ghcr.io/aicell-lab/chiron-scfoundation:<version>` | `chiron-platform/scfoundation-trainer` | Coming soon | 8 | 32 GiB | 48 |
 
-The batch sizes other than Tabula's come from the four-model probe runs on a 24 GB RTX 3090 and are the sizes that ran, not measured memory curves.
+The batch sizes other than Tabula's come from the probe runs on a 24 GB RTX 3090 and are the sizes that ran, not measured memory curves. scGPT's entry in `chironModels.ts` therefore carries `gb: 0`, which the launch dialog renders as a validated size with no memory figure rather than a misleading zero.
 
 scGPT trains from the published whole-human checkpoint rather than from random initialisation, and it reads genes by HGNC symbol through the 60,694-entry CELLxGENE Census vocabulary the release was pretrained on. Both of those are properties of the federation, not of a site: the gene embedding is one of the averaged tensors, so row *i* has to mean the same gene everywhere. That is why `scgpt-trainer` has a floor of 0.3.0. A 0.2.x site and a 0.3.0 site would average unrelated genes together and report nothing wrong.
 
@@ -86,6 +88,28 @@ The collection is read-only to everyone but a workspace admin (`{"*": "r+"}`), u
 `base_weights` takes either an `artifact_id` plus `file_path`, or a `url` plus an optional `sha256`. The trainer resolves the card on every load, so moving an upstream checkpoint is a card edit and needs no app release and no worker restart. Declare the `sha256` whenever the source is a URL: it is the only thing tying that URL to the bytes that were reviewed, and the trainer refuses to train on a mismatch rather than continuing. A card with no `base_weights` block means that model has no agreed starting checkpoint yet, and the config panel falls back to the published checkpoints.
 
 Flipping a model from coming soon to supported is two edits that go together: `chiron.status` on its card, and `status` for that family in `src/config/chironModels.ts`.
+
+## The shared weight cache
+
+Every checkpoint a trainer downloads, whether from an artifact or from a URL named by an architecture card, lands in one cache per worker at `<BioEngine workspace dir>/weights`, which is `/home/.bioengine/weights` in the containers. It sits above the per-app directories, which BioEngine gives a fresh random name on every launch, so a trainer deployed today reuses what one deployed last month downloaded. Before this existed a host had accumulated 14 copies of the Tabula checkpoint and 4 of the scGPT one.
+
+```
+weights/
+  artifacts/<workspace>/<alias>/<version>/<file path>
+  urls/<sha256 or url digest>/<file name>
+  .locks/
+```
+
+Artifact entries are keyed by the artifact's current version, so a re-uploaded checkpoint lands under a new key rather than being served stale. URL entries are keyed by the card's `sha256` when it has one, which is a second reason to always declare it.
+
+Hypha is read on every load, hit or miss. That read resolves the version and is also the permission check, so a checkpoint cached by one user cannot be handed to a trainer that Hypha would have refused. Do not add a fast path that skips it.
+
+| Variable | Meaning |
+|----------|---------|
+| `CHIRON_WEIGHTS_CACHE` | Cache directory. Point several workers on one host at a shared bind mount to collapse their copies into one. Each per-model BioEngine home has its own cache by default, which is usually what you want since a family only ever needs its own weights. |
+| `CHIRON_WEIGHTS_CACHE_MAX_GB` | Ceiling on the whole cache, default 50. Least-recently-used entries are deleted once it is exceeded, and evictions are logged. `0` switches eviction off. |
+
+Deleting the directory is safe at any time, including while a run is in progress. The next load re-downloads what it needs. The old per-app `downloads/` directories left by trainers below the current floor are dead and go away with their app directories.
 
 ## Uploading and deploying BioEngine apps
 
