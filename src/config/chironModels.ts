@@ -164,18 +164,23 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     displayName: 'scGPT',
     summary:
       'Generative transformer over gene tokens and binned expression values, trained by masked value prediction.',
-    status: 'coming-soon',
+    status: 'available',
     imageRepository: imageRepository('scgpt'),
     image: image('scgpt'),
     trainerArtifactId: 'chiron-platform/scgpt-trainer',
     workerMemoryGb: WORKER_RAM_GB.scgpt,
     sharedWeights: 'gene embedding, value encoder and transformer',
     localWeights: 'expression decoder head',
+    foundationAlias: 'scgpt-foundation',
+    // scGPT matches genes by HGNC symbol, so a store without var/feature_name
+    // is unreadable to it however well prepared it is otherwise.
     requiredVarColumn: 'feature_name',
     // Only the batch size validated on a 24 GB RTX 3090 so far. The memory
-    // curve is not measured yet, so no other sizes are quoted.
+    // curve is not measured yet, so no other sizes are quoted and the launch
+    // dialog shows this as a validated size rather than a memory figure.
     referenceMemory: [{ batchSize: 32, gb: 0 }],
     badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    coverUrl: '/assets/scgpt.png',
   },
   geneformer: {
     family: 'geneformer',
