@@ -219,12 +219,38 @@ const LossSparkline: React.FC<{ losses: [number, number][]; stroke: string }> = 
   );
 };
 
+// Whether a name is really a client id wearing a name's clothing. A trainer's
+// `client_name` is a bare UUID unless the operator named the trainer, and every
+// label chain on this page ends at that field, so an unnamed trainer on a
+// worker that is no longer up rendered as 32 hex digits where a site name
+// belongs. Rejecting the shape is what keeps that out of the visible label; the
+// id itself stays in the badge tooltip, where it is still useful and no longer
+// in the way.
+const looksLikeClientId = (s?: string): boolean =>
+  !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s.trim());
+
+// The worker a trainer ran on, from the live workspace listing first and then
+// whatever the run manifest recorded, skipping any candidate that is only an
+// id. One helper for both the Trainers box and the Rounds table: they used to
+// order their candidates differently, the box preferring the live lookup and
+// the table the manifest, which was survivable while each list stood alone and
+// is not now that a number in one is only meaningful through the other.
+// Undefined when nothing names the worker, which the callers render as an
+// explicit unknown rather than filling in an id.
+const workerNameFor = (
+  live: WorkerInfo | undefined,
+  ...recorded: Array<string | undefined>
+): string | undefined =>
+  live?.name || recorded.find(c => c && !looksLikeClientId(c)) || undefined;
+
 // Renders worker name + flag + region, country. Always shows the manifest
-// fallback (client name, dataset list, etc.) immediately so a slow or
-// permanently-broken live-worker lookup never leaves the badge stuck on a
-// spinner. Live worker info supplements the static manifest data once
-// available — but a deleted worker is still rendered with its manifest-side
-// identity intact.
+// fallback immediately so a slow or permanently-broken live-worker lookup
+// never leaves the badge stuck on a spinner. Live worker info supplements the
+// static manifest data once available — but a deleted worker is still rendered
+// with its manifest-side identity intact. Callers pass the fallback through
+// `workerNameFor`, so it is a name or nothing: an undefined one lands on
+// "Unknown worker", which is the honest answer and better than the id that
+// used to fill the gap.
 const WorkerBadge: React.FC<{ info?: WorkerInfo; fallback?: string; manifestGeo?: { region?: string; country_name?: string; country_code?: string } }> = ({ info, fallback, manifestGeo }) => {
   const name = info?.name || fallback || 'Unknown worker';
   const geo = (info?.region || info?.country_name) ? {
@@ -272,8 +298,58 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
   const isCompleted = status === 'completed';
   const completedRounds = m.rounds?.length ?? 0;
   const modelName = modelDisplayName({ model_family: m.model_family, model_name: m.model_name });
-  const trainerSvcIds = useMemo(() => Object.keys(m.trainers ?? {}), [m.trainers]);
-  const numTrainers = trainerSvcIds.length;
+  // Every site that took part in this run, each with a number, so a trainer
+  // can be referred to the same way everywhere on this card. The Trainers box
+  // spells each number out against the worker it ran on, which leaves the
+  // Rounds table free to carry the number alone: a four-site round used to
+  // render four service ids side by side and push the loss columns off the
+  // edge of the card, and the ids were never what a reader was checking in
+  // that table.
+  //
+  // Order is the run's own trainers map first, which is the order they joined
+  // the run, then any trainer that turns up only inside a round. A round can
+  // name a trainer that has since left the map, and such a trainer still ran
+  // and still needs a number, so it is listed too, from whatever that round
+  // recorded about it.
+  const trainers = useMemo(() => {
+    const rows: Array<{
+      svcId: string;
+      number: number;
+      recorded: Array<string | undefined>;
+      datasets: Array<{ id: string; name: string }>;
+      geo?: { region?: string; country_name?: string; country_code?: string };
+    }> = [];
+    const seen = new Set<string>();
+    const add = (
+      svcId: string,
+      recorded: Array<string | undefined>,
+      t?: RunArtifact['manifest']['trainers'][string],
+    ) => {
+      if (!svcId || seen.has(svcId)) return;
+      seen.add(svcId);
+      rows.push({
+        svcId,
+        number: rows.length + 1,
+        recorded,
+        datasets: t?.datasets ?? [],
+        geo: t?.geo_location,
+      });
+    };
+    for (const [svcId, t] of Object.entries(m.trainers ?? {})) {
+      add(svcId, [t?.worker_name, t?.client_name], t);
+    }
+    for (const r of m.rounds ?? []) {
+      for (const t of r.trainers ?? []) {
+        add(t.service_id, [t.worker_name, t.client_name], m.trainers?.[t.service_id]);
+      }
+    }
+    return rows;
+  }, [m.trainers, m.rounds]);
+  const trainerNumbers = useMemo(
+    () => new Map(trainers.map(t => [t.svcId, t.number])),
+    [trainers]
+  );
+  const numTrainers = trainers.length;
   const trainLosses = useMemo(() => m.history?.training_losses ?? [], [m.history]);
   const valLosses   = useMemo(() => m.history?.validation_losses ?? [], [m.history]);
 
@@ -453,20 +529,27 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
             <div>
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Trainers</p>
               <div className="space-y-2">
-                {trainerSvcIds.map(svcId => {
-                  const t = m.trainers[svcId];
+                {trainers.map(({ svcId, number, recorded, datasets, geo }) => {
                   const workerInfo = workerInfoMap[svcId];
-                  const datasets = t?.datasets ?? [];
                   return (
                     <div
                       key={svcId}
                       className="flex items-start gap-4 bg-gray-50/60 border border-gray-100 rounded-xl px-4 py-3"
                     >
+                      {/* This is where a number is introduced, next to the
+                          worker it stands for. The Rounds table below then
+                          carries the number alone and stays readable. */}
+                      <span
+                        title={svcId}
+                        className="flex-shrink-0 mt-0.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-md px-2 py-1"
+                      >
+                        Trainer {number}
+                      </span>
                       <div className="flex-1 min-w-0">
                         <WorkerBadge
                           info={workerInfo}
-                          fallback={t?.worker_name || t?.client_name || 'Trainer worker'}
-                          manifestGeo={t?.geo_location}
+                          fallback={workerNameFor(undefined, ...recorded)}
+                          manifestGeo={geo}
                         />
                       </div>
                       {datasets.length > 0 && (
@@ -515,28 +598,29 @@ const RunCard: React.FC<RunCardProps> = ({ run, defaultOpen, onDelete, workerInf
                           ) : (
                             <div className="flex flex-wrap gap-1">
                               {(r.trainers ?? []).map(t => {
-                                const wi = workerInfoMap[t.service_id];
-                                // Prefer the manifest's worker_name (captured at
-                                // add_trainer time by chiron-orchestrator 0.3.8)
-                                // over the live workspace lookup, then the live
-                                // name, then the trainer's manifest-side
-                                // client_name from the run's trainers map (which
-                                // is friendlier than the per-round client_name
-                                // when the latter defaulted to a UUID). Last
-                                // resort: the per-round client_name itself.
+                                // Just the number here. Which worker it was is
+                                // answered once, in the Trainers box above,
+                                // and repeating a site name in every row of
+                                // this table is what made a multi-site round
+                                // unreadable. The worker and the service id
+                                // stay on the tooltip for anyone who wants to
+                                // check a specific row without scrolling up.
                                 const runTrainer = m.trainers?.[t.service_id];
-                                const label = t.worker_name
-                                  || wi?.name
-                                  || runTrainer?.worker_name
-                                  || runTrainer?.client_name
-                                  || t.client_name;
+                                const worker = workerNameFor(
+                                  workerInfoMap[t.service_id],
+                                  t.worker_name,
+                                  runTrainer?.worker_name,
+                                  runTrainer?.client_name,
+                                  t.client_name,
+                                );
+                                const number = trainerNumbers.get(t.service_id);
                                 return (
                                   <span
                                     key={t.service_id}
-                                    title={t.service_id}
+                                    title={[worker || 'Unknown worker', t.service_id].join('\n')}
                                     className="inline-block bg-gray-100 text-gray-700 border border-gray-200 px-1.5 py-0.5 rounded text-[11px] leading-none"
                                   >
-                                    {label}
+                                    {number ? `Trainer ${number}` : (worker || 'Trainer')}
                                   </span>
                                 );
                               })}
