@@ -83,6 +83,18 @@ export const MIN_IMAGE_VERSION: VersionFloor = {
 };
 
 /**
+ * Shared by the four trainer floors below, which were all raised for the same
+ * change and would otherwise repeat this paragraph four times.
+ */
+const TRAINER_WEIGHT_CACHE_REASON =
+  'Older trainers cache a downloaded checkpoint inside their own deployment ' +
+  'directory, which BioEngine gives a fresh name on every launch. Every ' +
+  'trainer a site deploys therefore downloads the full foundation checkpoint ' +
+  'again and keeps its own copy, so a site pays the wait and the disk once ' +
+  'per deployment rather than once. Newer trainers share one cache per ' +
+  'worker.';
+
+/**
  * Floors for the Chiron applications a worker hosts, keyed by artifact alias
  * (the part after the workspace in `chiron-platform/chiron-manager`).
  */
@@ -103,49 +115,28 @@ export const MIN_APP_VERSIONS: Record<string, VersionFloor> = {
       'the data, and the ruined model is then sent back to all of them. Below ' +
       '0.4.3 that happens with no error and the run still reports success.',
   },
-  // The four trainers moved to the shared API in the same release, so they
-  // share a floor and a reason. They are listed separately rather than
+  // The four trainers gained the shared weight cache in the same release, so
+  // they share a floor and a reason. They are listed separately rather than
   // collapsed, because a floor is keyed by artifact alias and the next reason
   // to raise one will not apply to all four at once.
+  //
+  // The floor before this one was about a trainer refusing a diverged global
+  // model, which every version at or above these numbers also does.
   'tabula-trainer': {
-    minimum: '0.6.2',
-    reason:
-      'From 0.6.2 a trainer refuses a global model whose numbers have gone ' +
-      'bad, and restores its own weights instead of keeping the result of a ' +
-      'round that diverged. An older one keeps the broken result, and since ' +
-      'federated updates only cover the shared layers, nothing can repair it ' +
-      'afterwards: that site returns nothing usable for good and drops out of ' +
-      'every later round.',
+    minimum: '0.6.6',
+    reason: TRAINER_WEIGHT_CACHE_REASON,
   },
   'scgpt-trainer': {
-    minimum: '0.2.2',
-    reason:
-      'From 0.2.2 a trainer refuses a global model whose numbers have gone ' +
-      'bad, and restores its own weights instead of keeping the result of a ' +
-      'round that diverged. An older one keeps the broken result, and since ' +
-      'federated updates only cover the shared layers, nothing can repair it ' +
-      'afterwards: that site returns nothing usable for good and drops out of ' +
-      'every later round.',
+    minimum: '0.3.3',
+    reason: TRAINER_WEIGHT_CACHE_REASON,
   },
   'geneformer-trainer': {
-    minimum: '0.2.2',
-    reason:
-      'From 0.2.2 a trainer refuses a global model whose numbers have gone ' +
-      'bad, and restores its own weights instead of keeping the result of a ' +
-      'round that diverged. An older one keeps the broken result, and since ' +
-      'federated updates only cover the shared layers, nothing can repair it ' +
-      'afterwards: that site returns nothing usable for good and drops out of ' +
-      'every later round.',
+    minimum: '0.2.6',
+    reason: TRAINER_WEIGHT_CACHE_REASON,
   },
   'scfoundation-trainer': {
-    minimum: '0.2.2',
-    reason:
-      'From 0.2.2 a trainer refuses a global model whose numbers have gone ' +
-      'bad, and restores its own weights instead of keeping the result of a ' +
-      'round that diverged. An older one keeps the broken result, and since ' +
-      'federated updates only cover the shared layers, nothing can repair it ' +
-      'afterwards: that site returns nothing usable for good and drops out of ' +
-      'every later round.',
+    minimum: '0.2.6',
+    reason: TRAINER_WEIGHT_CACHE_REASON,
   },
 };
 

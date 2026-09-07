@@ -85,6 +85,28 @@ The collection is read-only to everyone but a workspace admin (`{"*": "r+"}`), u
 
 Flipping a model from coming soon to supported is two edits that go together: `chiron.status` on its card, and `status` for that family in `src/config/chironModels.ts`.
 
+## The shared weight cache
+
+Every checkpoint a trainer downloads, whether from an artifact or from a URL named by an architecture card, lands in one cache per worker at `<BioEngine workspace dir>/weights`, which is `/home/.bioengine/weights` in the containers. It sits above the per-app directories, which BioEngine gives a fresh random name on every launch, so a trainer deployed today reuses what one deployed last month downloaded. Before this existed a host had accumulated 14 copies of the Tabula checkpoint and 4 of the scGPT one.
+
+```
+weights/
+  artifacts/<workspace>/<alias>/<version>/<file path>
+  urls/<sha256 or url digest>/<file name>
+  .locks/
+```
+
+Artifact entries are keyed by the artifact's current version, so a re-uploaded checkpoint lands under a new key rather than being served stale. URL entries are keyed by the card's `sha256` when it has one, which is a second reason to always declare it.
+
+Hypha is read on every load, hit or miss. That read resolves the version and is also the permission check, so a checkpoint cached by one user cannot be handed to a trainer that Hypha would have refused. Do not add a fast path that skips it.
+
+| Variable | Meaning |
+|----------|---------|
+| `CHIRON_WEIGHTS_CACHE` | Cache directory. Point several workers on one host at a shared bind mount to collapse their copies into one. Each per-model BioEngine home has its own cache by default, which is usually what you want since a family only ever needs its own weights. |
+| `CHIRON_WEIGHTS_CACHE_MAX_GB` | Ceiling on the whole cache, default 50. Least-recently-used entries are deleted once it is exceeded, and evictions are logged. `0` switches eviction off. |
+
+Deleting the directory is safe at any time, including while a run is in progress. The next load re-downloads what it needs. The old per-app `downloads/` directories left by trainers below the current floor are dead and go away with their app directories.
+
 ## Uploading and deploying BioEngine apps
 
 Always use the local BioEngine worker to upload apps. `npx hypha-cli art cp` bypasses the worker's upload pipeline and may not stage or commit correctly.
