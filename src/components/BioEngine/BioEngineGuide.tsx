@@ -708,8 +708,9 @@ ${bin} exec ${gpuFlag}\\
       <p className="text-sm font-medium text-gray-800 mt-3 mb-1">What the data&#8209;server precomputes</p>
       <ul className="text-sm text-gray-700 list-disc list-inside space-y-1">
         <li>Ranks genes by per-dataset over-dispersion and keeps the 1,200 most variable.</li>
-        <li>Discretises every cell into 50 quantile bins and pre-cuts a <code className="bg-white/60 px-1 rounded">chiron_binned</code> layer of shape <code className="bg-white/60 px-1 rounded">(n_cells, 1200)</code>, which is what <strong>Tabula</strong> trains on.</li>
-        <li>The other models read the counts themselves and do their own encoding. Cell- and gene-level quality control is left to whatever you applied upstream.</li>
+        <li>Discretises every cell into 50 quantile bins and pre-cuts a <code className="bg-white/60 px-1 rounded">chiron_binned</code> layer of shape <code className="bg-white/60 px-1 rounded">(n_cells, 1200)</code>. Both <strong>Tabula</strong> and <strong>scGPT</strong> train on that same layer, so a dataset is prepared once and not once per model.</li>
+        <li>What differs is how each model names a gene. Tabula takes the columns in order and reads their ids from <code className="bg-white/60 px-1 rounded">var/gene_id</code>. scGPT looks each column up by its HGNC symbol in <code className="bg-white/60 px-1 rounded">var/feature_name</code>, so a dataset without that column trains nothing under scGPT.</li>
+        <li>Cell- and gene-level quality control is left to whatever you applied upstream.</li>
       </ul>
 
       {/* Amber callout: zarr is mutated in place */}
@@ -775,8 +776,13 @@ ${bin} exec ${gpuFlag}\\
               </tr>
               <tr className="border-t border-blue-100">
                 <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.var[&quot;gene_id&quot;]</code></td>
-                <td className="py-1">Int gene token IDs the trainer feeds to the model. Without it cross-dataset gene matching breaks.</td>
+                <td className="py-1">Int gene token IDs <strong>Tabula</strong> feeds to the model. Without it Tabula falls back to each site&apos;s own column order, and cross-dataset gene matching breaks.</td>
                 <td className="py-1">Strongly recommended</td>
+              </tr>
+              <tr className="border-t border-blue-100">
+                <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.var[&quot;feature_name&quot;]</code></td>
+                <td className="py-1">HGNC gene symbols. <strong>scGPT</strong> matches every column against its vocabulary through this column, and a store without it has no usable cells at all.</td>
+                <td className="py-1 font-medium">Yes, for scGPT</td>
               </tr>
               <tr className="border-t border-blue-100">
                 <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.obs</code>, <code className="bg-blue-50 px-1 rounded">adata.var</code></td>
