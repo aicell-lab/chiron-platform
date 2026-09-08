@@ -4,10 +4,10 @@
  *
  * The two modes run on the SAME orchestrator and trainer apps. Nothing is
  * deployed differently: the orchestrator accepts `transport` on
- * `start_training` and dispatches only the weight-blob RPCs
- * (`start_fit`, `get_fit_status`, `start_evaluate`, `get_evaluate_status`,
- * `get_parameters`) accordingly. Control-plane calls always ride the
- * WebSocket, because they are small and need Hypha's routing.
+ * `start_training` and dispatches only the round-protocol RPCs
+ * (`start_fit`, `get_fit_status`, `get_fit_result`, `start_evaluate`,
+ * `get_evaluate_status`, `get_parameters`) accordingly. Control-plane calls
+ * always ride the WebSocket, because they are small and need Hypha's routing.
  *
  *  - `websocket` — weights travel through the Hypha server. Needs nothing but
  *    an outbound HTTPS path, so it works from any site that can reach the

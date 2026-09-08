@@ -95,6 +95,26 @@ const TRAINER_WEIGHT_CACHE_REASON =
   'worker.';
 
 /**
+ * Shared by the orchestrator floor and the four trainer floors, which were
+ * raised together because the two sides changed at once.
+ *
+ * The orchestrator and the trainers have to move as a pair here. A new trainer
+ * no longer puts the weights in its progress answer, and an old orchestrator
+ * reads them from exactly there, so pairing a new trainer with an old
+ * orchestrator fails the round at the moment training finishes. Both floors
+ * name the same release for that reason.
+ */
+const FIT_RESULT_SPLIT_REASON =
+  'Below these versions a trainer answered every request for training ' +
+  'progress with the whole trained model attached. Progress is polled every ' +
+  'few seconds, so from the moment a round finished the connection a worker ' +
+  'shares with Chiron filled with repeated copies of the model, which is ' +
+  '417 MB for Geneformer and larger for scFoundation. Rounds then timed out ' +
+  'while the training itself had already succeeded, live progress froze, and ' +
+  'the federation map emptied out mid-run. From these versions the weights ' +
+  'are collected once, in a request of their own, and progress stays small.';
+
+/**
  * Floors for the Chiron applications a worker hosts, keyed by artifact alias
  * (the part after the workspace in `chiron-platform/chiron-manager`).
  */
@@ -107,31 +127,41 @@ export const MIN_APP_VERSIONS: Record<string, VersionFloor> = {
       'mismatched trainer from being deployed onto it.',
   },
   'chiron-orchestrator': {
-    minimum: '0.4.3',
+    minimum: '0.4.6',
+    // The fit-result reason plus the one it replaces. The earlier floor was
+    // 0.4.3 and is subsumed by this number, but a run that quietly reports
+    // success on a ruined model is the worse of the two failures, so its text
+    // stays in what the UI shows.
     reason:
-      'From 0.4.3 the orchestrator drops a site whose numbers have gone bad ' +
-      'instead of averaging it in. Averaging is a weighted sum, so one such ' +
-      'site ruins the round for every institution however small its share of ' +
-      'the data, and the ruined model is then sent back to all of them. Below ' +
-      '0.4.3 that happens with no error and the run still reports success.',
+      FIT_RESULT_SPLIT_REASON +
+      ' From 0.4.3 the orchestrator also drops a site whose numbers have gone ' +
+      'bad instead of averaging it in. Averaging is a weighted sum, so one ' +
+      'such site ruins the round for every institution however small its ' +
+      'share of the data, and the ruined model is then sent back to all of ' +
+      'them. Below 0.4.3 that happens with no error and the run still reports ' +
+      'success.',
   },
-  // The four trainers gained the shared weight cache in the same release, so
-  // they share a floor and a reason. They are listed separately rather than
-  // collapsed, because a floor is keyed by artifact alias and the next reason
-  // to raise one will not apply to all four at once.
+  // The four trainers split the weights off the progress answer in the same
+  // release, and gained the shared weight cache in the one before it, so they
+  // share both reasons. They are listed separately rather than collapsed,
+  // because a floor is keyed by artifact alias and the next reason to raise
+  // one will not apply to all four at once.
   //
-  // The floor before this one was about a trainer refusing a diverged global
-  // model, which every version at or above these numbers also does.
+  // Earlier floors covered the shared weight cache and, before that, a trainer
+  // refusing a diverged global model. Every version at or above these numbers
+  // does both.
   'tabula-trainer': {
-    minimum: '0.6.6',
-    reason: TRAINER_WEIGHT_CACHE_REASON,
+    minimum: '0.6.8',
+    reason: FIT_RESULT_SPLIT_REASON + ' ' + TRAINER_WEIGHT_CACHE_REASON,
   },
   'scgpt-trainer': {
-    minimum: '0.3.3',
-    // The cache reason plus the one it replaced. The earlier floor was 0.3.0
-    // and is subsumed by this number, but its consequence is the worse of the
-    // two and silent, so it stays in the text the UI shows.
+    minimum: '0.3.5',
+    // The newer reasons plus the one they replaced. The earlier floor was
+    // 0.3.0 and is subsumed by this number, but its consequence is the worst
+    // of the three and silent, so it stays in the text the UI shows.
     reason:
+      FIT_RESULT_SPLIT_REASON +
+      ' ' +
       TRAINER_WEIGHT_CACHE_REASON +
       ' From 0.3.0 scGPT also reads genes through the same 60,694-symbol ' +
       'vocabulary its published whole-human weights were pretrained on, ' +
@@ -142,12 +172,12 @@ export const MIN_APP_VERSIONS: Record<string, VersionFloor> = {
       'error anywhere.',
   },
   'geneformer-trainer': {
-    minimum: '0.2.6',
-    reason: TRAINER_WEIGHT_CACHE_REASON,
+    minimum: '0.2.8',
+    reason: FIT_RESULT_SPLIT_REASON + ' ' + TRAINER_WEIGHT_CACHE_REASON,
   },
   'scfoundation-trainer': {
-    minimum: '0.2.6',
-    reason: TRAINER_WEIGHT_CACHE_REASON,
+    minimum: '0.2.8',
+    reason: FIT_RESULT_SPLIT_REASON + ' ' + TRAINER_WEIGHT_CACHE_REASON,
   },
 };
 

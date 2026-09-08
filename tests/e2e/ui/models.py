@@ -37,7 +37,12 @@ MODELS = [
         "display": "Geneformer",
         "image": "ghcr.io/aicell-lab/chiron-geneformer",
         "dataset": "Blood-Perturb",
-        "batch_size": 16,
+        # The platform's own default for Geneformer, so the leg exercises the
+        # number an operator is actually handed. 16 also completes here, but
+        # only because the demo blood store tokenises to a median of 228
+        # genes: at realistic depth it runs a 24 GB card out of memory, which
+        # is why the registry offers 8.
+        "batch_size": 8,
         "worker_memory_gb": 40,
     },
     {

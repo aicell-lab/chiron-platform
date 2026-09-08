@@ -1,4 +1,9 @@
-import { datasetIncompatibleReason } from '../chironModels';
+import {
+  CHIRON_MODELS,
+  CHIRON_MODEL_FAMILIES,
+  datasetIncompatibleReason,
+  defaultMaxBatchSize,
+} from '../chironModels';
 
 /**
  * The var/ column lists below are what a live Chiron worker actually reported
@@ -49,6 +54,19 @@ describe('datasetIncompatibleReason', () => {
     expect(datasetIncompatibleReason('scfoundation', SKIN_AGING)).toContain('var/feature_name');
   });
 
+  test('the reason names the identifier that column has to hold', () => {
+    // Naming the column is not enough on its own. A store can carry
+    // feature_id full of symbols, and the operator reading this needs to be
+    // told what has to be in there, not only where it goes. Geneformer is
+    // the reason the message stopped saying "by name": it never sees one.
+    expect(datasetIncompatibleReason('geneformer', SKIN_AGING))
+      .toContain('Ensembl gene ID');
+    expect(datasetIncompatibleReason('geneformer', SKIN_AGING))
+      .not.toContain('by name');
+    expect(datasetIncompatibleReason('scgpt', SKIN_AGING))
+      .toContain('HGNC gene symbol');
+  });
+
   test('a dataset carrying both columns is readable by every model', () => {
     for (const family of ['tabula', 'scgpt', 'geneformer', 'scfoundation']) {
       expect(datasetIncompatibleReason(family, THYMUS)).toBeUndefined();
@@ -84,5 +102,44 @@ describe('datasetIncompatibleReason', () => {
   test('judges a partially reporting worker on the stores it did report', () => {
     const partial = [{ name: 'unknown.zarr' }, ...SKIN_AGING];
     expect(datasetIncompatibleReason('scgpt', partial)).toContain('filter_4.zarr');
+  });
+});
+
+describe('geneIdentifier', () => {
+  test('every model that needs a var column says what belongs in it', () => {
+    for (const family of CHIRON_MODEL_FAMILIES) {
+      const model = CHIRON_MODELS[family];
+      if (!model.requiredVarColumn) continue;
+      expect(model.geneIdentifier).toBeTruthy();
+    }
+  });
+});
+
+describe('defaultMaxBatchSize', () => {
+  test('every family in the registry declares one', () => {
+    for (const family of CHIRON_MODEL_FAMILIES) {
+      expect(CHIRON_MODELS[family].defaultMaxBatchSize).toBeGreaterThan(0);
+    }
+  });
+
+  test('the default fits the largest batch the model was measured at', () => {
+    // The point of the field. A default above what was measured to fit a
+    // 24 GB card is an out-of-memory error handed to an operator who never
+    // touched the setting, which is what a flat 32 was for Geneformer.
+    for (const family of CHIRON_MODEL_FAMILIES) {
+      const model = CHIRON_MODELS[family];
+      const largest = Math.max(...model.referenceMemory.map(e => e.batchSize));
+      expect(model.defaultMaxBatchSize).toBeLessThanOrEqual(largest);
+    }
+  });
+
+  test('an unknown family gets the cautious default rather than Tabula-sized', () => {
+    expect(defaultMaxBatchSize('some-future-model')).toBe(8);
+    expect(defaultMaxBatchSize(undefined)).toBe(8);
+  });
+
+  test('Geneformer does not open at a batch size that will not fit', () => {
+    expect(defaultMaxBatchSize('geneformer')).toBe(8);
+    expect(defaultMaxBatchSize('tabula')).toBe(32);
   });
 });

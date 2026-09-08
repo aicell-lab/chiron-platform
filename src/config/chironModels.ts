@@ -63,20 +63,42 @@ export interface ChironModel {
    *  checkpoint picker, if one exists for this model yet. */
   foundationAlias?: string;
   /** Column under `var/` this model needs in order to find its gene panel in
-   *  a prepared dataset. Three of the four models match genes by name, and
-   *  they disagree on which name: HGNC symbols in `feature_name` for scGPT
-   *  and scFoundation, Ensembl ids in `feature_id` for Geneformer. Tabula
-   *  reads the binned layer positionally and needs neither, so it leaves this
-   *  undefined, which reads as "any prepared dataset will do".
+   *  a prepared dataset. Three of the four models look genes up by an
+   *  identifier and they disagree on which one: HGNC symbols in
+   *  `feature_name` for scGPT and scFoundation, Ensembl accessions in
+   *  `feature_id` for Geneformer. Tabula reads the binned layer positionally
+   *  and needs neither, so it leaves this undefined, which reads as "any
+   *  prepared dataset will do".
    *
    *  The platform compares this against the `var_columns` a worker reports
    *  per zarr store, so it can say before a deploy that a dataset and a model
    *  do not fit. Without it the mismatch only surfaces inside the trainer,
    *  minutes after the operator picked the dataset. */
   requiredVarColumn?: string;
+  /** What the required column holds, named the way a person preparing the
+   *  data would name it. Set on every model that declares
+   *  `requiredVarColumn`.
+   *
+   *  Separate from the column name because the two are not interchangeable to
+   *  the reader: `feature_id` says where to look and "Ensembl gene ID" says
+   *  what has to be in there, and someone whose store carries symbols under
+   *  that column needs to be told the second thing. Calling every one of
+   *  these a "gene name" was accurate for scGPT and scFoundation and wrong
+   *  for Geneformer, which never sees a symbol. */
+  geneIdentifier?: string;
   /** Measured GPU memory at a given batch size, above the trainer's idle
    *  baseline. Reference for the launch dialog's max-batch-size field. */
   referenceMemory: { batchSize: number; gb: number }[];
+  /** Batch size the launch dialog offers as the trainer's ceiling before the
+   *  operator touches the field. The largest size measured to fit a 24 GB
+   *  card, which is the smallest GPU the platform targets.
+   *
+   *  Per model rather than one constant, because the models are nowhere near
+   *  each other: Tabula and scGPT run 32 comfortably, while Geneformer at 16
+   *  runs out of memory on the same card at realistic sequence lengths. A
+   *  shared default of 32 was a working number for the first two models and a
+   *  guaranteed out-of-memory error for the third. */
+  defaultMaxBatchSize: number;
   /** Tailwind classes for the model's badge. One hue per model, so a glance
    *  at a badge is enough to tell two workers apart without reading the
    *  label. Kept next to the display name so a new model gets its colour in
@@ -156,6 +178,7 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
       { batchSize: 16, gb: 6 },
       { batchSize: 32, gb: 20 },
     ],
+    defaultMaxBatchSize: 32,
     badgeClass: 'bg-indigo-50 text-indigo-700 border-indigo-200',
     coverUrl: '/assets/tabula.png',
   },
@@ -175,10 +198,12 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     // scGPT matches genes by HGNC symbol, so a store without var/feature_name
     // is unreadable to it however well prepared it is otherwise.
     requiredVarColumn: 'feature_name',
+    geneIdentifier: 'HGNC gene symbol',
     // Only the batch size validated on a 24 GB RTX 3090 so far. The memory
     // curve is not measured yet, so no other sizes are quoted and the launch
     // dialog shows this as a validated size rather than a memory figure.
     referenceMemory: [{ batchSize: 32, gb: 0 }],
+    defaultMaxBatchSize: 32,
     badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-200',
     coverUrl: '/assets/scgpt.png',
   },
@@ -187,16 +212,38 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     displayName: 'Geneformer',
     summary:
       'BERT over rank-value-encoded gene tokens, trained by masked language modelling.',
-    status: 'coming-soon',
+    status: 'available',
     imageRepository: imageRepository('geneformer'),
     image: image('geneformer'),
     trainerArtifactId: 'chiron-platform/geneformer-trainer',
     workerMemoryGb: WORKER_RAM_GB.geneformer,
+    // The masked-LM head's decoder is tied to the token embedding, so the
+    // shared scope carries it: what stays local is the head's own transform
+    // and layer norm.
     sharedWeights: 'token embedding and encoder stack',
     localWeights: 'masked-LM head',
+    foundationAlias: 'geneformer-foundation',
+    // Geneformer matches genes by Ensembl id, not by symbol. Its vocabulary
+    // is keyed on ENSG accessions, so a store carrying only feature_name is
+    // unreadable to it.
     requiredVarColumn: 'feature_id',
-    referenceMemory: [{ batchSize: 16, gb: 0 }],
+    geneIdentifier: 'Ensembl gene ID',
+    // Measured on a 24 GB RTX 3090 against pbmc3k, whose cells tokenise to a
+    // median of 789 genes. Batch 16 runs out of memory there.
+    //
+    // Geneformer is the one model whose memory tracks the cell rather than
+    // the panel: a rank-value encoding is only as long as the cell has
+    // expressed genes, so a shallow dataset fits batch sizes a full-depth one
+    // does not. The demo blood store tokenises to a median of 228 and would
+    // have given a figure three times too generous, which is why these
+    // numbers come from real-depth data instead.
+    referenceMemory: [
+      { batchSize: 4, gb: 5 },
+      { batchSize: 8, gb: 13 },
+    ],
+    defaultMaxBatchSize: 8,
     badgeClass: 'bg-amber-50 text-amber-700 border-amber-200',
+    coverUrl: '/assets/geneformer.png',
   },
   scfoundation: {
     family: 'scfoundation',
@@ -211,7 +258,9 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     sharedWeights: 'value embedding, gene position embedding and encoder',
     localWeights: 'value-regression head',
     requiredVarColumn: 'feature_name',
+    geneIdentifier: 'HGNC gene symbol',
     referenceMemory: [{ batchSize: 8, gb: 0 }],
+    defaultMaxBatchSize: 8,
     badgeClass: 'bg-rose-50 text-rose-700 border-rose-200',
   },
 };
@@ -315,6 +364,18 @@ export const referenceMemoryEntries = (
   getChironModel(family)?.referenceMemory || [];
 
 /**
+ * Batch-size ceiling to prefill the launch dialog with, for a worker on this
+ * family. Falls back to 8, the smaller of the two defaults in the registry: a
+ * model this build has never heard of is more likely to be a later, larger one
+ * than a second Tabula, and an operator who wants more only has to raise it,
+ * where one who was silently given more gets an out-of-memory error a few
+ * minutes into a round.
+ */
+export const defaultMaxBatchSize = (
+  family: string | undefined | null
+): number => getChironModel(family)?.defaultMaxBatchSize ?? 8;
+
+/**
  * Prose description of what FedAvg averages for a model, for the Save Weights
  * cards. Falls back to the orchestrator's raw `shared_weight_scope` label when
  * the family is one this build does not know, so a worker on a newer image
@@ -397,9 +458,10 @@ export const datasetIncompatibleReason = (
       : `${missing.map(f => f.name || 'one store').join(', ')} ${
           missing.length === 1 ? 'does' : 'do'
         } not carry it`;
+  const identifier = model.geneIdentifier ? `${model.geneIdentifier}s` : 'gene names';
   return (
-    `${model.displayName} matches genes by name and reads them from ` +
-    `var/${column}, and ${where}. Prepare the dataset with that column, or ` +
-    `train it with a model that does not need one.`
+    `${model.displayName} looks genes up by ${identifier}, which it reads ` +
+    `from var/${column}, and ${where}. Prepare the dataset with that ` +
+    `column, or train it with a model that does not need one.`
   );
 };

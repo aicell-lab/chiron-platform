@@ -82,6 +82,7 @@ These are the Flower client glue methods the orchestrator drives. Calling them o
 - `start_fit(parameters, batch_size, config, limit_train_batches, server_round, orchestrator_service_id, session_id)` — identical on every Chiron trainer. Tabula's own hyperparameters go in `config`, and `get_properties()` reports which names it accepts.
 - `start_evaluate(parameters, batch_size, config, limit_val_batches, server_round, orchestrator_service_id, session_id)`
 - `get_fit_status()`, `get_evaluate_status()` — useful for monitoring, but the orchestrator already polls them and surfaces the progress through `get_training_status`.
+- `get_fit_result()` — the finished round's weights, sample count and metrics. The orchestrator collects this once per round. It is a full model, hundreds of megabytes on the larger architectures, so never poll it.
 - `cancel_fit(orchestrator_service_id)`, `cancel_evaluate(orchestrator_service_id)`
 - `set_session_active(active, orchestrator_service_id, per_round_timeout, aggregation_buffer)`
 - `get_parameters()` — returns the current transformer parameters as a list of numpy arrays. The orchestrator uses this during round 1. Calling it manually mid-session can race with `start_fit`.
@@ -96,5 +97,5 @@ End-to-end, the flow is:
 2. Each trainer self-registers via `register_to_orchestrator(<orchestrator_service_id>)`.
 3. The user calls [`orchestrator.start_training(...)`](chiron-orchestrator.md).
 4. If `initial_weights` is set, the orchestrator broadcasts them and each trainer calls its own `load_pretrained_weights(..., transformer_only=True)`.
-5. For each round: the orchestrator hands current weights to each trainer's `start_fit`, polls `get_fit_status`, then calls `start_evaluate` and polls `get_evaluate_status`. The orchestrator aggregates with FedAvg.
+5. For each round: the orchestrator hands current weights to each trainer's `start_fit`, polls `get_fit_status` until it reads `COMPLETED`, collects the trained weights with a single `get_fit_result`, then calls `start_evaluate` and polls `get_evaluate_status`. The orchestrator aggregates with FedAvg.
 6. At the end the user calls either [`orchestrator.save_global_weights`](chiron-orchestrator.md) (transformer-only Hub artifact) or `trainer.save_model_weights` on individual trainers (per-tissue full-model artifacts), or both.

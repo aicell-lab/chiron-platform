@@ -26,9 +26,10 @@ Every Chiron trainer must expose the following methods through Hypha RPC. Names,
 | `get_parameters` | `() -> Dict[str, Union[List[np.ndarray], str]]` | Current shared-transformer parameters as a list of numpy arrays plus the ordered key list. The orchestrator broadcasts this in round 1 to seed other trainers. Set `arbitrary_types_allowed=True` on the `@schema_method` decorator. |
 | `get_transformer_keys` | `() -> List[str]` | Ordered list of shared transformer `state_dict` keys. Used by the orchestrator to verify federation consistency before round 1. |
 | `start_fit` | see signature below | Train one local epoch. Non-blocking; returns `{"status": "started", "message": "..."}`. The signature is fixed and identical for every Chiron trainer. |
-| `get_fit_status` | `() -> dict` | Poll fit progress: status, `current_batch`, `total_batches`, `result` (final loss + updated parameters when status is `completed`). |
+| `get_fit_status` | `() -> dict` | Poll fit progress: `status`, `message`, `current_batch`, `total_batches`, `progress`. Must stay small. It is polled every few seconds by the orchestrator and by anything watching a run, so it must never carry the weights. |
+| `get_fit_result` | `() -> Optional[tuple]` | The finished round's `(parameters, num_samples, metrics)`, or `None` before a fit completes. Called once per round, after `get_fit_status` reports `COMPLETED`. |
 | `start_evaluate` | see signature below | Evaluate one local epoch on the validation split. |
-| `get_evaluate_status` | `() -> dict` | Same shape as `get_fit_status` but for the eval task. |
+| `get_evaluate_status` | `() -> dict` | Fit's status fields plus `result` inline, because an evaluation result is a loss, a sample count and a small metrics dict. Only fit needs the split. |
 | `cancel_fit` | `(timeout: float, orchestrator_service_id: str) -> dict` | Cancel an in-flight fit task. Enforce `orchestrator_service_id` matches the registered orchestrator. |
 | `cancel_evaluate` | same shape as `cancel_fit` | |
 | `is_busy` | `() -> bool` | True iff a fit or evaluate task is running OR the trainer is in an active session. |
@@ -80,19 +81,27 @@ Resolve `config` against those defaults when the round starts, and reject a key 
 
 An empty `evaluate` declaration means evaluation reuses whatever the fit half of the round set, which is what most models want.
 
-Returns immediately (non-blocking). The actual training runs in a background `asyncio.Task` or Ray task. The orchestrator polls `get_fit_status` to learn when it is done. When `status == "completed"`, the result dict must contain:
+Returns immediately (non-blocking). The actual training runs in a background `asyncio.Task` or Ray task. The orchestrator polls `get_fit_status` to learn when it is done, then makes one call to `get_fit_result` to collect the weights.
 
 ```python
+# get_fit_status, on every poll. Cheap, and free of the weights.
 {
-    "status": "completed",
-    "result": {
-        "parameters": List[np.ndarray],   # updated shared transformer params (same order as get_parameters)
-        "num_samples": int,                # how many training samples this trainer contributed (FedAvg weight)
-        "loss": float,
-        "metrics": dict,                   # any extra metrics to surface in training history
-    },
+    "status": "RUNNING",      # NOT_STARTED | RUNNING | COMPLETED | FAILED | CANCELLED
+    "message": str,
+    "current_batch": int,
+    "total_batches": int,
+    "progress": float,
 }
+
+# get_fit_result, once, after the status reads COMPLETED. None before then.
+(
+    parameters,    # List[np.ndarray], updated shared transformer params, same order as get_parameters
+    num_samples,   # int, how many training samples this trainer contributed (the FedAvg weight)
+    metrics,       # Dict[str, float], the round's loss and anything else to surface in training history
+)
 ```
+
+Keeping the weights out of the status answer is a hard requirement, not a style choice. A federated `state_dict` is 53 MB for Tabula and 417 MB for Geneformer. Attaching it to a method that is polled every few seconds fills the connection the trainer shares with the rest of the control plane the moment a round finishes, and the orchestrator's own bounded status poll then times out and retries against a trainer that is busy sending copies of the model.
 
 ### Orchestrator binding (called by user code or the trainer itself)
 
@@ -271,9 +280,14 @@ class MyFoundationModelTrainer:
         )
         return {"status": "started", "message": f"Round {server_round} fit started."}
 
-    @schema_method(arbitrary_types_allowed=True)
+    @schema_method
     async def get_fit_status(self) -> dict:
+        # Progress only. The weights are served by get_fit_result.
         return dict(self._fit_status)
+
+    @schema_method(arbitrary_types_allowed=True)
+    async def get_fit_result(self) -> Optional[tuple]:
+        return self._fit_result
 
     @schema_method
     async def cancel_fit(self, timeout: float, orchestrator_service_id: str) -> dict:
