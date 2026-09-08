@@ -63,17 +63,6 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
   const registryStatus = registryEntry?.status;
   const comingSoon: boolean =
     (registryStatus ?? manifest.chiron?.status) === 'coming-soon';
-  // Which model a set of weights came from, on the weights themselves. The
-  // grid used to answer this by placing the model's own card above its
-  // checkpoints, but that card no longer takes a slot once the model's
-  // foundation weights are published, and a checkpoint that only says
-  // "Tabula" inside a sentence of prose is not something a reader can scan.
-  // The badge carries the model's registry name and colour, so a page of
-  // checkpoints from several models stays legible, and it hovers to the one
-  // line describing what the architecture actually is. Not on a model's own
-  // card, where the badge would repeat the heading directly above it.
-  const familyBadge = manifest.chiron ? undefined : registryEntry;
-
   const body = (
     <>
       <div className="relative w-full overflow-hidden bg-gray-50" style={{ paddingTop: '56.25%' }}>
@@ -98,21 +87,22 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
           {name}
         </h3>
 
+        {/* Two lines tall, and scrolls rather than truncates. A checkpoint's
+            description carries what it was trained on and where it came from,
+            which a clamp cut off mid-sentence with no way to read the rest
+            short of opening the card. Capping the height keeps every card in
+            the grid the same size. */}
         {description && (
-          <p className="mt-1 text-sm text-gray-600 line-clamp-2 flex-grow">
+          <p className="mt-1 text-sm text-gray-600 flex-grow max-h-10 overflow-y-auto">
             {description}
           </p>
         )}
 
+        {/* Tissues, not architecture. The card used to carry the model family
+            as a badge too, which on a grid where most names already begin with
+            the family read as the same word twice. What a reader is scanning
+            for here is which tissue a checkpoint covers. */}
         <div className="mt-3 flex flex-wrap gap-1.5">
-          {familyBadge && (
-            <span
-              className={`px-2 py-0.5 text-xs rounded-full border ${familyBadge.badgeClass}`}
-              title={familyBadge.summary}
-            >
-              {familyBadge.displayName}
-            </span>
-          )}
           {comingSoon && (
             <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded-full border border-gray-200">
               Coming soon
