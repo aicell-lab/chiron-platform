@@ -9,6 +9,10 @@ import {
   DEFAULT_MODEL_FAMILY,
   ChironModelFamily,
   imageRef,
+  AVAILABLE_MODEL_NAMES,
+  AVAILABLE_MODEL_COUNT,
+  UPCOMING_MODEL_NAMES,
+  UPCOMING_MODEL_COUNT,
 } from '../../config/chironModels';
 import {
   CHIRON_IMAGE_VERSIONS,
@@ -1023,9 +1027,15 @@ ${bin} exec ${gpuFlag}\\
               Image: <code className="bg-gray-100 px-0.5 rounded">{effectiveImage}</code>
             </p>
             <p className="text-xs text-gray-500 mt-1">
-              Tabula is the model the platform guarantees today. scGPT, Geneformer
-              and scFoundation are in preparation and will be enabled one at a
-              time. See the <a href="#/models" className="text-blue-600 hover:underline">model page</a> for
+              {AVAILABLE_MODEL_NAMES} {AVAILABLE_MODEL_COUNT === 1 ? 'is the model' : 'are the models'} the
+              platform guarantees today.
+              {UPCOMING_MODEL_COUNT > 0 && (
+                <>
+                  {' '}{UPCOMING_MODEL_NAMES} {UPCOMING_MODEL_COUNT === 1 ? 'is' : 'are'} in
+                  preparation and will be enabled one at a time.
+                </>
+              )}{' '}
+              See the <a href="#/models" className="text-blue-600 hover:underline">model page</a> for
               what each one is.
             </p>
           </div>
