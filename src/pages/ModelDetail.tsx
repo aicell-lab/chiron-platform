@@ -151,11 +151,11 @@ const ModelDetail: React.FC = () => {
   // Architecture cards (chiron-architectures) carry a `chiron` block;
   // checkpoints in chiron-models do not. The two share this page but not what
   // is worth showing on it. An architecture card is editorial: a name, a cover
-  // and the documentation below. Its artifact id, owner, timestamps, attached
-  // files (a cover image and the markdown already rendered) and raw manifest
-  // are platform bookkeeping that says nothing to a visitor reading about the
-  // model. A checkpoint keeps all of it, because there the files are the
-  // weights and the provenance is the point.
+  // and the documentation below. Its artifact id, owner, timestamps and
+  // attached files (a cover image and the markdown already rendered) are
+  // platform bookkeeping that says nothing to a visitor reading about the
+  // model. A checkpoint keeps those, because there the files are the weights
+  // and the provenance is the point. Neither shows the raw manifest.
   const isArchitecture = !!manifest.chiron;
   // Publish state lives on `manifest.status`:
   //   • "in_review"        — uploaded from the trainer/orchestrator, hidden
@@ -176,12 +176,6 @@ const ModelDetail: React.FC = () => {
   const ownsArtifact = (
     (manifest.uploaded_by_user_id && manifest.uploaded_by_user_id === user?.id) ||
     (userEmail && manifest.uploaded_by_user_email && manifest.uploaded_by_user_email === userEmail)
-  );
-
-  // Surface a curated list of manifest fields plus everything else under "Other fields".
-  const featuredKeys = ['name', 'description', 'cover', 'tissue', 'tissues', 'global_transformer', 'source', 'author', 'created_at', 'uploaded_by_user_id', 'uploaded_by_user_email', 'status'];
-  const otherEntries = Object.entries(manifest).filter(
-    ([k]) => !featuredKeys.includes(k),
   );
 
   const handlePublish = async () => {
@@ -461,32 +455,6 @@ const ModelDetail: React.FC = () => {
               ))}
             </ul>
           )}
-        </div>
-      )}
-
-      {!isArchitecture && otherEntries.length > 0 && (
-        <div className="mt-6 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200">
-            <h2 className="text-lg font-medium text-gray-900">Manifest</h2>
-          </div>
-          <div className="px-6 py-4">
-            <dl className="grid grid-cols-1 sm:grid-cols-3 gap-x-4 gap-y-2 text-sm">
-              {otherEntries.map(([k, v]) => (
-                <React.Fragment key={k}>
-                  <dt className="font-medium text-gray-700">{k}</dt>
-                  <dd className="sm:col-span-2 text-gray-600 break-words">
-                    {typeof v === 'object' ? (
-                      <pre className="text-xs bg-gray-50 p-2 rounded overflow-x-auto">
-                        {JSON.stringify(v, null, 2)}
-                      </pre>
-                    ) : (
-                      String(v)
-                    )}
-                  </dd>
-                </React.Fragment>
-              ))}
-            </dl>
-          </div>
         </div>
       )}
 
