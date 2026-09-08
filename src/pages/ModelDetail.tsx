@@ -22,6 +22,61 @@ function formatBytes(bytes?: number): string {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
+/**
+ * An author as the card may carry it.
+ *
+ * Two spellings are accepted because the collection holds both. A checkpoint
+ * an orchestrator uploads knows only an email address, while a curated card is
+ * written by hand and names people properly, with affiliations and ORCIDs.
+ * Normalising here keeps that difference out of the markup.
+ */
+interface ManifestAuthor {
+  name: string;
+  affiliation?: string;
+  orcid?: string;
+}
+
+function normaliseAuthors(raw: unknown): ManifestAuthor[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((a): ManifestAuthor | null => {
+      if (typeof a === 'string') return a.trim() ? { name: a.trim() } : null;
+      if (a && typeof a === 'object') {
+        const name = (a as any).name;
+        if (typeof name !== 'string' || !name.trim()) return null;
+        return {
+          name: name.trim(),
+          affiliation: (a as any).affiliation,
+          orcid: (a as any).orcid,
+        };
+      }
+      return null;
+    })
+    .filter((a): a is ManifestAuthor => a !== null);
+}
+
+/** A citation entry, either `{ text, url }` or a bare string. */
+interface ManifestCitation {
+  text: string;
+  url?: string;
+}
+
+function normaliseCitations(raw: unknown): ManifestCitation[] {
+  const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  return list
+    .map((c): ManifestCitation | null => {
+      if (typeof c === 'string') return c.trim() ? { text: c.trim() } : null;
+      if (c && typeof c === 'object') {
+        const text = (c as any).text;
+        const url = (c as any).url || (c as any).doi;
+        if (typeof text !== 'string' || !text.trim()) return null;
+        return { text: text.trim(), url: typeof url === 'string' ? url : undefined };
+      }
+      return null;
+    })
+    .filter((c): c is ManifestCitation => c !== null);
+}
+
 function formatDate(ts?: number): string {
   if (!ts) return '';
   try {
@@ -151,12 +206,31 @@ const ModelDetail: React.FC = () => {
   // Architecture cards (chiron-architectures) carry a `chiron` block;
   // checkpoints in chiron-models do not. The two share this page but not what
   // is worth showing on it. An architecture card is editorial: a name, a cover
-  // and the documentation below. Its artifact id, owner, timestamps and
-  // attached files (a cover image and the markdown already rendered) are
-  // platform bookkeeping that says nothing to a visitor reading about the
-  // model. A checkpoint keeps those, because there the files are the weights
-  // and the provenance is the point. Neither shows the raw manifest.
+  // and the documentation below. Its owner, timestamps and attached files (a
+  // cover image and the markdown already rendered) are platform bookkeeping
+  // that says nothing to a visitor reading about the model. A checkpoint keeps
+  // those, because there the files are the weights and who uploaded them when
+  // is the provenance. Neither shows the raw manifest, and neither shows the
+  // artifact id, which is an internal handle.
   const isArchitecture = !!manifest.chiron;
+  // Credit and terms, carried by the artifact itself. A checkpoint states its
+  // own, rather than inheriting from the architecture card, because a
+  // checkpoint someone fine-tuned and published is not automatically covered
+  // by the terms of the model it started from. `upstream` is the block a
+  // mirrored third-party release carries, so it is the last place to look for
+  // a repository, a licence or a citation.
+  const upstream = (manifest.upstream || {}) as Record<string, any>;
+  const authors = normaliseAuthors(manifest.authors);
+  const citations = normaliseCitations(manifest.cite || manifest.citation || upstream.citation);
+  const license: string | undefined = manifest.license || upstream.license;
+  const licenseUrl: string | undefined = manifest.license_url || upstream.license_url;
+  const repository: string | undefined = manifest.repository || upstream.repository;
+  // `manifest.author` is a single address written by whichever service pushed
+  // the artifact, so it is the uploader and not an author in the credit sense.
+  const uploader: string | undefined = isArchitecture
+    ? undefined
+    : manifest.author || artifact.created_by;
+  const createdAt: number | undefined = manifest.created_at || artifact.created_at;
   // Publish state lives on `manifest.status`:
   //   • "in_review"        — uploaded from the trainer/orchestrator, hidden
   //                          from the public Model Hub, awaiting owner review.
@@ -384,30 +458,102 @@ const ModelDetail: React.FC = () => {
             )}
           </div>
 
-          {!isArchitecture && (
-            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-gray-600">
-              <div>
-                <span className="font-medium text-gray-700">Artifact ID:</span>{' '}
-                <code className="text-xs bg-gray-50 px-1.5 py-0.5 rounded">{artifact.id}</code>
-              </div>
-              {(manifest.author || artifact.created_by) && (
+          {/* Who made the model, under what terms, and where it came from.
+              This sits high on the page rather than in the documentation
+              because it is what a visitor has to check before they can use a
+              checkpoint at all, and Tabula's terms are not the permissive
+              default anyone would assume. Shown for architecture cards too:
+              credit and licensing describe the model, not the bookkeeping of
+              the artifact that carries it. */}
+          {(authors.length > 0 || license || repository || citations.length > 0 || uploader) && (
+            <div className="mt-4 space-y-1.5 text-sm text-gray-600">
+              {authors.length > 0 && (
                 <div>
-                  <span className="font-medium text-gray-700">Created by:</span>{' '}
-                  {manifest.author || artifact.created_by}
+                  <span className="font-medium text-gray-700">Authors:</span>{' '}
+                  {authors.map((a, i) => (
+                    <React.Fragment key={`${a.name}-${i}`}>
+                      {i > 0 && ', '}
+                      {a.orcid ? (
+                        <a
+                          href={a.orcid.startsWith('http') ? a.orcid : `https://orcid.org/${a.orcid}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:underline"
+                          title={a.affiliation}
+                        >
+                          {a.name}
+                        </a>
+                      ) : (
+                        <span title={a.affiliation}>{a.name}</span>
+                      )}
+                    </React.Fragment>
+                  ))}
                 </div>
               )}
-              {(manifest.created_at || artifact.created_at) && (
+              {license && (
                 <div>
-                  <span className="font-medium text-gray-700">Created:</span>{' '}
-                  {formatDate(manifest.created_at || artifact.created_at)}
+                  <span className="font-medium text-gray-700">License:</span>{' '}
+                  {licenseUrl ? (
+                    <a
+                      href={licenseUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-600 hover:underline"
+                    >
+                      {license}
+                    </a>
+                  ) : (
+                    license
+                  )}
                 </div>
               )}
-              {artifact.last_modified && (
+              {repository && (
                 <div>
-                  <span className="font-medium text-gray-700">Last modified:</span>{' '}
-                  {formatDate(artifact.last_modified)}
+                  <span className="font-medium text-gray-700">Repository:</span>{' '}
+                  <a
+                    href={repository}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-600 hover:underline break-all"
+                  >
+                    {repository.replace(/^https?:\/\//, '')}
+                  </a>
                 </div>
               )}
+              {citations.map((c, i) => (
+                <div key={`cite-${i}`}>
+                  <span className="font-medium text-gray-700">Cite:</span>{' '}
+                  {c.url ? (
+                    <a
+                      href={c.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-600 hover:underline"
+                    >
+                      {c.text}
+                    </a>
+                  ) : (
+                    c.text
+                  )}
+                </div>
+              ))}
+              {uploader && (
+                <div>
+                  <span className="font-medium text-gray-700">Uploader:</span>{' '}
+                  {uploader}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Dates last and small. They are provenance for a checkpoint rather
+              than something a reader came for, so they close the box instead of
+              competing with the authors and the licence above. */}
+          {!isArchitecture && (createdAt || artifact.last_modified) && (
+            <div className="mt-4 pt-3 border-t border-gray-100 text-xs text-gray-500">
+              {createdAt && <>Created {formatDate(createdAt)}</>}
+              {createdAt && artifact.last_modified && <span className="mx-2">·</span>}
+              {artifact.last_modified && <>Last edited {formatDate(artifact.last_modified)}</>}
             </div>
           )}
         </div>
