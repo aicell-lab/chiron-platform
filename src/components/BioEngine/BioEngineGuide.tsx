@@ -405,6 +405,14 @@ ${dataServerService}  worker:
     container_name: ${workerSlug}-worker
     user: "\${UID}:\${GID}"
     shm_size: ${shmSize}
+    # Cap the container so Ray measures its own cgroup rather than the whole
+    # machine. With no limit Ray finds cgroup memory.max unset, falls back to
+    # psutil and takes the host's total as "the node", so its memory monitor
+    # kills this worker's own replicas whenever anything else on the machine
+    # pushes the host past 95%. On a shared host that ends a federated round
+    # that was succeeding. The cap sits above --head-memory-in-gb so Ray's
+    # graceful kill still runs before the kernel's OOM killer.
+    mem_limit: ${memory + 4}g
     volumes:
       - "${workspaceDirPath}:/home/.bioengine"${dataDir ? `\n      - "${dataDir}:/data"` : ''}
     environment:
@@ -708,8 +716,8 @@ ${bin} exec ${gpuFlag}\\
       <p className="text-sm font-medium text-gray-800 mt-3 mb-1">What the data&#8209;server precomputes</p>
       <ul className="text-sm text-gray-700 list-disc list-inside space-y-1">
         <li>Ranks genes by per-dataset over-dispersion and keeps the 1,200 most variable.</li>
-        <li>Discretises every cell into 50 quantile bins and pre-cuts a <code className="bg-white/60 px-1 rounded">chiron_binned</code> layer of shape <code className="bg-white/60 px-1 rounded">(n_cells, 1200)</code>. Both <strong>Tabula</strong> and <strong>scGPT</strong> train on that same layer, so a dataset is prepared once and not once per model.</li>
-        <li>What differs is how each model names a gene. Tabula takes the columns in order and reads their ids from <code className="bg-white/60 px-1 rounded">var/gene_id</code>. scGPT looks each column up by its HGNC symbol in <code className="bg-white/60 px-1 rounded">var/feature_name</code>, so a dataset without that column trains nothing under scGPT.</li>
+        <li>Discretises every cell into 50 quantile bins and pre-cuts a <code className="bg-white/60 px-1 rounded">chiron_binned</code> layer of shape <code className="bg-white/60 px-1 rounded">(n_cells, 1200)</code>. Every model trains off that same layer, so a dataset is prepared once and not once per model.</li>
+        <li>What differs is how each model names a gene, and each answer lives in its own column. <strong>Tabula</strong> takes the columns in order and reads their ids from <code className="bg-white/60 px-1 rounded">var/gene_id</code>. <strong>scGPT</strong> looks each column up by its HGNC symbol in <code className="bg-white/60 px-1 rounded">var/feature_name</code>. <strong>Geneformer</strong> looks it up by Ensembl gene id in <code className="bg-white/60 px-1 rounded">var/feature_id</code>, directly in its own vocabulary with no symbol mapping in between. A store missing the column its model needs trains nothing under that model, and carrying all three columns costs nothing.</li>
         <li>Cell- and gene-level quality control is left to whatever you applied upstream.</li>
       </ul>
 
@@ -783,6 +791,11 @@ ${bin} exec ${gpuFlag}\\
                 <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.var[&quot;feature_name&quot;]</code></td>
                 <td className="py-1">HGNC gene symbols. <strong>scGPT</strong> matches every column against its vocabulary through this column, and a store without it has no usable cells at all.</td>
                 <td className="py-1 font-medium">Yes, for scGPT</td>
+              </tr>
+              <tr className="border-t border-blue-100">
+                <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.var[&quot;feature_id&quot;]</code></td>
+                <td className="py-1">Ensembl gene IDs. <strong>Geneformer</strong> looks every column up in its own 20,275-token vocabulary through this column, with no symbol mapping in between, and a store without it has no usable cells at all.</td>
+                <td className="py-1 font-medium">Yes, for Geneformer</td>
               </tr>
               <tr className="border-t border-blue-100">
                 <td className="py-1 font-mono"><code className="bg-blue-50 px-1 rounded">adata.obs</code>, <code className="bg-blue-50 px-1 rounded">adata.var</code></td>
