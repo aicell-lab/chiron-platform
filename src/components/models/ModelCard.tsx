@@ -13,19 +13,6 @@ function aliasFromId(id: string): string {
   return parts[parts.length - 1];
 }
 
-function formatDate(ts?: number): string {
-  if (!ts) return '';
-  try {
-    return new Date(ts * 1000).toLocaleDateString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    });
-  } catch {
-    return '';
-  }
-}
-
 const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
   const manifest = artifact.manifest || {};
   const name: string = manifest.name || artifact.alias || aliasFromId(artifact.id);
@@ -125,15 +112,12 @@ const ModelCard: React.FC<ModelCardProps> = ({ artifact }) => {
           )}
         </div>
 
-        {/* No date on a card for a model that is not here yet. The only
-            timestamp such an artifact has is when its entry was written, which
-            says nothing about when the model arrives, and a date under a
-            "Coming soon" pill reads as the date it is coming. */}
-        {!comingSoon && (
-          <div className="mt-3 text-xs text-gray-500 text-right">
-            {formatDate(manifest.created_at || artifact.created_at)}
-          </div>
-        )}
+        {/* No timestamp on a card. A grid is for telling models apart, and an
+            upload date does not do that: it is the same information for every
+            checkpoint published in one batch, and for a foundation model it
+            reads as the model's age when it is really the mirror's. The detail
+            page carries it, which is where a reader has already chosen one
+            model and a date starts to mean something. */}
       </div>
     </>
   );

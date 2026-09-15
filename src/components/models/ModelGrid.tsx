@@ -132,22 +132,33 @@ const ModelGrid: React.FC<ModelGridProps> = ({
       const shown = visible.filter(
         a => !(isArchitecture(a) && led.has(familyOf(a) as string))
       );
-      // Those representatives lead the grid, in registry order, and everything
-      // trained from them follows alphabetically. They are what a visitor came
-      // to see, they are the entry point to every checkpoint below them, and
-      // one of them being absent from the top of the page is how a reader
-      // would conclude the platform does not have it. A model's other
-      // checkpoints sort below all four however they are named, exactly as
-      // they did when they had their own section.
-      const rank = (a: ArtifactRef) => {
+      // Two tiers, and registry order inside both.
+      //
+      // The representatives lead the grid. They are what a visitor came to
+      // see, they are the entry point to every checkpoint below them, and one
+      // of them being absent from the top of the page is how a reader would
+      // conclude the platform does not have it.
+      //
+      // The tissue-specific checkpoints follow, grouped by the model they were
+      // trained from rather than interleaved by name. Sorting the tail purely
+      // alphabetically mixed the families together, so scGPT's five organs sat
+      // above Tabula's seven for no reason a reader could see, and a visitor
+      // scanning for one model's checkpoints had to read every card to find
+      // them. Grouping puts a model's foundation weights and its organs in the
+      // same reading order as the row above.
+      //
+      // Anything with no family sorts after all four in its own tier, which is
+      // every artifact predating the registry.
+      const tierOf = (a: ArtifactRef) =>
+        isArchitecture(a) || isFoundation(a) ? 0 : 1;
+      const familyRank = (a: ArtifactRef) => {
         const family = familyOf(a);
-        if (!family || !(isArchitecture(a) || isFoundation(a))) {
-          return FAMILY_RANK.size;
-        }
-        return FAMILY_RANK.get(family) ?? FAMILY_RANK.size;
+        return (family && FAMILY_RANK.get(family)) ?? FAMILY_RANK.size;
       };
       const sorted = shown.sort((a, b) => {
-        const byFamily = rank(a) - rank(b);
+        const byTier = tierOf(a) - tierOf(b);
+        if (byTier !== 0) return byTier;
+        const byFamily = familyRank(a) - familyRank(b);
         if (byFamily !== 0) return byFamily;
         const an = (a.manifest?.name || a.alias || '').toLowerCase();
         const bn = (b.manifest?.name || b.alias || '').toLowerCase();
