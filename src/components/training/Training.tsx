@@ -12,6 +12,7 @@ import LossChart from './LossChart';
 import {
   ChironImageIdentity,
   datasetIncompatibleReason,
+  defaultMaxBatchSize,
   DEFAULT_MODEL_FAMILY,
   imageRepository,
   localWeightsLabel,
@@ -888,6 +889,10 @@ const Training: React.FC = () => {
   // once at deploy time based on the worker's GPU memory; the trainer
   // clamps any per-session fit_config batch_size at this value so a session
   // organizer doesn't have to know each site's hardware.
+  //
+  // The value here is only what the field holds before any worker is chosen.
+  // The default an operator actually sees comes from the model the worker
+  // runs, seeded by the effect next to `launchDialogFamily`.
   const [newTrainerMaxBatchSize, setNewTrainerMaxBatchSize] = useState<number>(32);
   const [localModelWeights, setLocalModelWeights] = useState<Array<{path: string; client_name: string; saved_at: string | null; description: string | null; datasets: Record<string, any>; train_samples: number; num_rounds: number; total_samples_seen: number}> | null>(null);
   const [selectedWeightsPath, setSelectedWeightsPath] = useState<string | null>(null);
@@ -1393,6 +1398,28 @@ const Training: React.FC = () => {
       a => (a.manifest?.model_family || DEFAULT_MODEL_FAMILY) === family
     );
   }, [chironModelArtifacts, launchDialogManagerId, workerImageFor]);
+
+  /** Model the launch dialog's worker runs, or undefined when no worker is
+   *  selected or the worker reports no image identity. */
+  const launchDialogFamily = workerImageFor(launchDialogManagerId)?.model_family;
+
+  /**
+   * Prefill the batch-size ceiling from the model, whenever the dialog turns
+   * to a worker running a different one.
+   *
+   * The field used to open at 32 for every model, which was a fair number for
+   * Tabula and scGPT and an out-of-memory error for Geneformer: its cells
+   * tokenise to whatever length they have rather than to a fixed panel width,
+   * and at realistic depth even 16 does not fit a 24 GB card. An operator who
+   * left the default alone would deploy a trainer that fails minutes into the
+   * first round, having been given no reason to touch the field.
+   *
+   * Only on a change of family, so a value the operator typed survives the
+   * polling that refreshes the worker list underneath the open dialog.
+   */
+  useEffect(() => {
+    setNewTrainerMaxBatchSize(defaultMaxBatchSize(launchDialogFamily));
+  }, [launchDialogFamily]);
 
   /**
    * Datasets on the worker this dialog is aimed at, and for each one the

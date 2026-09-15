@@ -32,7 +32,11 @@ const Models: React.FC = () => {
             <>
               {' '}
               {asList(upcoming)} {upcoming.length === 1 ? 'is' : 'are'} in
-              preparation and will be enabled one at a time.
+              preparation
+              {/* The models are brought online one after another, which is
+                  worth saying while several are still waiting and reads as a
+                  mistake once only one is. */}
+              {upcoming.length > 1 && ' and will be enabled one at a time'}.
             </>
           )}
         </p>
