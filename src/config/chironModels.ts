@@ -62,6 +62,15 @@ export interface ChironModel {
   /** Alias of the published foundation checkpoint to surface first in the
    *  checkpoint picker, if one exists for this model yet. */
   foundationAlias?: string;
+  /** Further published base checkpoints of the same model, in the order they
+   *  should read on the models page, after `foundationAlias`. A model can have
+   *  more than one generation published at once: Geneformer has V2-104M and
+   *  the older V1-10M, which differ in vocabulary and input width as well as
+   *  size, so neither is a variant of the other in the way a tissue-specific
+   *  checkpoint is. They lead the grid beside the primary rather than sorting
+   *  in among the checkpoints trained from it. `foundationAlias` stays the one
+   *  the checkpoint picker defaults to. */
+  olderFoundationAliases?: string[];
   /** Column under `var/` this model needs in order to find its gene panel in
    *  a prepared dataset. Three of the four models look genes up by an
    *  identifier and they disagree on which one: HGNC symbols in
@@ -223,6 +232,11 @@ export const CHIRON_MODELS: Record<ChironModelFamily, ChironModel> = {
     sharedWeights: 'token embedding and encoder stack',
     localWeights: 'masked-LM head',
     foundationAlias: 'geneformer-foundation',
+    // V1-10M is the 2023 model and is published beside V2, not under it.
+    // It is a different model rather than a smaller one: 25,426 tokens
+    // including non-coding RNA against V2's 20,275 protein-coding, and a
+    // 2,048-token input against 4,096.
+    olderFoundationAliases: ['geneformer-v1-10m'],
     // Geneformer matches genes by Ensembl id, not by symbol. Its vocabulary
     // is keyed on ENSG accessions, so a store carrying only feature_name is
     // unreadable to it.

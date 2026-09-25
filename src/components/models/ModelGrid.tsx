@@ -39,10 +39,23 @@ const aliasOf = (a: ArtifactRef): string =>
  *  weights every other checkpoint of the family was trained from. The registry
  *  names it per model, so a family that has not published one yet has no
  *  candidate and this is false for all of its artifacts. */
-const isFoundation = (a: ArtifactRef): boolean => {
-  const family = familyOf(a);
-  const expected = family && CHIRON_MODELS[family]?.foundationAlias;
-  return !!expected && aliasOf(a) === expected;
+const baseAliases = (family: ChironModelFamily | undefined): string[] => {
+  const model = family && CHIRON_MODELS[family];
+  if (!model) return [];
+  return [model.foundationAlias, ...(model.olderFoundationAliases || [])].filter(
+    (x): x is string => !!x
+  );
+};
+
+const isFoundation = (a: ArtifactRef): boolean =>
+  baseAliases(familyOf(a)).includes(aliasOf(a));
+
+/** Position within a family's own base checkpoints, so a model publishing more
+ *  than one generation keeps them in registry order rather than alphabetical.
+ *  Anything that is not a base checkpoint sorts after all of them. */
+const baseRank = (a: ArtifactRef): number => {
+  const i = baseAliases(familyOf(a)).indexOf(aliasOf(a));
+  return i === -1 ? Number.MAX_SAFE_INTEGER : i;
 };
 
 /** Whether this artifact is the model's own card rather than weights. */
@@ -160,6 +173,10 @@ const ModelGrid: React.FC<ModelGridProps> = ({
         if (byTier !== 0) return byTier;
         const byFamily = familyRank(a) - familyRank(b);
         if (byFamily !== 0) return byFamily;
+        // Within one family's leading row, registry order, so Geneformer's
+        // V2-104M precedes its V1-10M rather than the two sorting by name.
+        const byBase = baseRank(a) - baseRank(b);
+        if (byBase !== 0) return byBase;
         const an = (a.manifest?.name || a.alias || '').toLowerCase();
         const bn = (b.manifest?.name || b.alias || '').toLowerCase();
         return an.localeCompare(bn);
