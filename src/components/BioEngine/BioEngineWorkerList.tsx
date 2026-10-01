@@ -90,11 +90,20 @@ const fetchChironImages = async (
 
   // Managers are named "<workerClientId>-<replicaId>:chiron-manager". Dedup by
   // worker so a rotation that briefly exposes two replicas is asked once.
+  //
+  // Cut at the LAST dash, not the first. A worker id may contain dashes
+  // ("reef-core-chiron-gpu0") while the replica id appended to it is a single
+  // dash-free segment, so splitting on the first dash reduced every reef worker
+  // to "reef". Both then deduped to one entry and the call below went to
+  // "<ws>/reef-*:chiron-manager", which routes nowhere, so get_worker_info
+  // failed for every one of them.
   const workerClientIds = new Set<string>();
   for (const svc of services) {
     if (typeof svc?.id !== 'string') continue;
     if (!svc.id.endsWith(':chiron-manager') || svc.id.includes('rtc')) continue;
-    const clientId = stripWs(svc.id).split(':')[0].split('-')[0];
+    const clientPart = stripWs(svc.id).split(':')[0];
+    const cut = clientPart.lastIndexOf('-');
+    const clientId = cut > 0 ? clientPart.slice(0, cut) : clientPart;
     if (clientId) workerClientIds.add(clientId);
   }
   if (workerClientIds.size === 0) return {};

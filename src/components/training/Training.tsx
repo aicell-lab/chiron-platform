@@ -121,11 +121,22 @@ interface ManagerConnection {
   datasetsInfo?: Record<string, any>;
 }
 
+// Take the client part before the LAST dash, not the first. A worker id may
+// itself contain dashes ("reef-core-chiron-gpu0"), while the suffix appended to
+// it is always a single dash-free segment: an 8-hex replica id, or "*" in the
+// wildcard form. Splitting on the FIRST dash reduced that worker to "reef",
+// which collapsed both reef cards into one, named it "Chiron Worker (reef-c)"
+// and built manager and dashboard ids that route nowhere. It was invisible on
+// hosts whose workers register opaque dash-free ids.
 const workerClientIdOf = (serviceId: string): string => {
   // serviceId is "workspace/<workerClientId>-<replicaId>:chiron-manager"
   // OR the wildcard form "workspace/<workerClientId>-*:chiron-manager".
+  // A bare "<workerClientId>-<suffix>" with no workspace or service is also
+  // accepted, which is how the two callers below use it.
   const stripped = serviceId.includes('/') ? serviceId.slice(serviceId.indexOf('/') + 1) : serviceId;
-  return stripped.split(':')[0].split('-')[0];
+  const clientPart = stripped.split(':')[0];
+  const cut = clientPart.lastIndexOf('-');
+  return cut > 0 ? clientPart.slice(0, cut) : clientPart;
 };
 
 /** Hypha routes a wildcard `<clientId>-*:service` URI to ANY live replica of
@@ -1512,7 +1523,7 @@ const Training: React.FC = () => {
         if (!s.id || typeof s.id !== 'string') continue;
         if (!s.id.endsWith(':chiron-manager') || s.id.includes('rtc')) continue;
         const fullClient = stripWs(s.id).split(':')[0];
-        const workerClientId = fullClient.split('-')[0];
+        const workerClientId = workerClientIdOf(fullClient);
         if (!workerClientId || seenClientIds.has(workerClientId)) continue;
         seenClientIds.add(workerClientId);
         const w = workerByClientId[workerClientId];
@@ -1632,7 +1643,7 @@ const Training: React.FC = () => {
     const workspace = slash >= 0 ? managerId.slice(0, slash) : '';
     const rest = slash >= 0 ? managerId.slice(slash + 1) : managerId;
     const clientPart = rest.split(':')[0]; // "<workerClientId>-<replicaSuffix>" or "<workerClientId>-*"
-    const workerClientId = clientPart.split('-')[0];
+    const workerClientId = workerClientIdOf(clientPart);
     return workspace ? `${workspace}/${workerClientId}:bioengine-worker` : `${workerClientId}:bioengine-worker`;
   };
 
