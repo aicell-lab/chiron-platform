@@ -831,6 +831,11 @@ const Runs: React.FC = () => {
       //    have.
       const serviceIds: string[] = [];
       const nameByClient: Record<string, string> = {};
+      // Every worker client id the listing returned, NAMED OR NOT. workerSvcIdFor
+      // matches an app's client id against these rather than guessing where the
+      // worker id ends, so this must not be keyed on having a name: an unnamed
+      // worker still has to be resolvable.
+      const workerClientIds: string[] = [];
       try {
         const services = await listHyphaServices(ws, { timeoutMs: 12000 });
         const stripWs = (s: string) => s.includes('/') ? s.slice(s.indexOf('/') + 1) : s;
@@ -839,6 +844,7 @@ const Runs: React.FC = () => {
           serviceIds.push(s.id);
           if (!s.id.endsWith(':bioengine-worker') || s.id.includes('rtc')) continue;
           const clientId = stripWs(s.id).split(':')[0];
+          if (clientId) workerClientIds.push(clientId);
           if (clientId && s.name) nameByClient[clientId] = s.name;
         }
       } catch {
@@ -868,9 +874,21 @@ const Runs: React.FC = () => {
             ? live.slice(ws.length + 1, live.length - suffix.length)
             : '';
         }
-        // A bioengine app's client id is "{workerClientId}-{appHash}".
-        const workerClientId = clientPart.split('-')[0];
-        if (!workerClientId || workerClientId === '*') return null;
+        if (!clientPart || clientPart === '*') return null;
+        // A bioengine app's client id is "{workerClientId}-{appHash}", but a
+        // worker id may itself contain hyphens, so splitting on the first one
+        // guesses wrong. It reduced "reef-core-chiron-gpu0-dee83fa6" to "reef",
+        // which matches no worker, so WorkerBadge fell through to "Location
+        // unavailable". This was invisible on europa only because its workers
+        // register hyphen-free random ids, and it would hit every future
+        // human-named worker.
+        //
+        // Match against the client ids the listing actually returned. Longest
+        // first, so a worker whose id is a prefix of another cannot shadow it.
+        const workerClientId = workerClientIds
+          .filter(w => clientPart === w || clientPart.startsWith(`${w}-`))
+          .sort((a, b) => b.length - a.length)[0];
+        if (!workerClientId) return null;
         return `${ws}/${workerClientId}:bioengine-worker`;
       };
 
