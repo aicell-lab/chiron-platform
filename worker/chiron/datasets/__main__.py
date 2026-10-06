@@ -232,6 +232,62 @@ HVG_SELECTED_KEY = "chiron_hvg_selected"  # bool, length n_vars, under var/
 # without sending one float per gene. 20 log-spaced bins is enough to see the
 # long-tail shape; covers >0 scores only (the data-server zeros out all-zero
 # genes so they never enter the histogram).
+# Quality control, stage 2 of the manuscript's pipeline and the step that has
+# to run before HVG selection rather than after it. The Methods are explicit
+# about the order: "we identified 1,200 highly variable genes (HVGs) within
+# each dataset after quality control".
+#
+# Masks only. Writing a filtered copy of X would make this server's output
+# specific to one model's preprocessing, which is the thing the per-model
+# design exists to avoid. A mask costs one bit per cell and per gene, leaves
+# the source readable by a model that wants the full panel, and lets a reader
+# see what was excluded instead of only what survived.
+QC_VERSION = 1
+QC_MIN_GENES_PER_CELL = 250
+QC_MIN_CELLS_PER_GENE = 250
+QC_CELL_MASK_KEY = "chiron_qc_cell_mask"  # bool, length n_obs, under obs/
+QC_GENE_MASK_KEY = "chiron_qc_gene_mask"  # bool, length n_vars, under var/
+
+# A store can arrive already reduced to some model's gene panel, and the
+# pipeline below must not treat it as raw. The failure mode is silent rather
+# than loud, which is why this is detected explicitly rather than left to
+# whoever reads the numbers afterwards.
+#
+# "Drop cells with fewer than 250 detected genes" is defined against a full
+# panel of roughly 20,000 genes, where it removes empty droplets and degraded
+# cells. Against a store already cut to 1,200 highly variable genes the same
+# threshold removes most of the real cells: measured on the blood shard of the
+# 1M corpus it drops 178,970 of 250,000, or 71.6 per cent. The manuscript's
+# order is quality control first and HVG selection second, so a store that has
+# already been reduced is past the point where the cell filter means anything.
+#
+# The same applies to selecting 1,200 HVGs out of 1,200 genes, which is a
+# no-op that would nonetheless overwrite an upstream selection with one scored
+# on a different matrix.
+UPSTREAM_REDUCED_KEY = "chiron_upstream_reduced"
+UPSTREAM_REDUCED_WHY_KEY = "chiron_upstream_reduced_reason"
+
+
+def _detect_upstream_reduction(root, n_vars: int):
+    """Why this store already looks reduced to a model panel, or None if raw.
+
+    Any one signal is sufficient. They are checked in descending order of how
+    directly they say "a selection has already happened here", and the first
+    match is returned so the recorded reason names the strongest evidence
+    rather than an incidental one.
+    """
+    if _find_key(root, "var", "highly_variable") is not None:
+        return "var/highly_variable is present, so a selection was already applied upstream"
+    if "layers" in root and _find_key(root, "layers", "X_binned") is not None:
+        return "layers/X_binned is present, so values were already discretised upstream"
+    if n_vars <= MODEL_IN_FEATURE:
+        return (
+            f"n_vars={n_vars} is not above the model panel width "
+            f"{MODEL_IN_FEATURE}, so there is nothing to select from"
+        )
+    return None
+
+
 HVG_HIST_VERSION = 2  # bumped: counts are now a root attr, not a compressed chunked array
 HVG_HIST_KEY = "chiron_hvg_histogram_counts"  # legacy var/ name kept for cleanup of older zarrs
 HVG_HIST_BINS = 20
@@ -555,6 +611,64 @@ def _sparse_column_ids(X):
     return np.repeat(np.arange(len(indptr) - 1, dtype=np.intp), np.diff(indptr))
 
 
+def _compute_qc_masks(X):
+    """Which cells and which genes survive the manuscript's quality control.
+
+    Two filters, from the Methods: "we filtered cells with fewer than 250
+    detected genes to exclude potential empty droplets, non-viable cells, or
+    severely degraded cells. Concurrently, we also removed genes detected in
+    fewer than 250 cells to mitigate the influence of lowly expressed or rare
+    transcripts."
+
+    Note what the gene filter counts. It is the number of CELLS in which a gene
+    is detected, not that gene's total counts. The two differ sharply for a
+    gene that is highly expressed in a handful of cells, which this filter is
+    meant to remove and a counts threshold would keep.
+
+    Both masks are computed against the ORIGINAL matrix and returned together,
+    which is what "concurrently" asks for. Applying one and then recomputing
+    the other would make the result depend on which went first, and the counts
+    would differ from the manuscript's.
+
+    Nothing is deleted here. The caller stores these as masks so the source
+    stays intact for a second model whose preprocessing needs the full panel.
+
+    Sparse input is read through its stored structure alone: the per-cell
+    detected count is the row length, and the per-gene cell count is how often
+    a column id appears. Neither needs the values and neither builds a dense
+    matrix, so cost is proportional to stored entries rather than cells x genes.
+
+    Args:
+        X: (n_cells, n_genes) array-like, raw counts.
+
+    Returns:
+        (cell_mask, gene_mask) as bool arrays of length n_cells and n_genes.
+        True means keep.
+    """
+    n_cells, n_genes = int(X.shape[0]), int(X.shape[1])
+    columns = _sparse_column_ids(X)
+
+    if columns is not None and getattr(X, "format", None) == "csr":
+        # One pass each, both off the CSR structure.
+        detected_per_cell = np.diff(np.asarray(X.indptr, dtype=np.intp))
+        cells_per_gene = np.bincount(columns, minlength=n_genes)
+    elif columns is not None:
+        # CSC: column ids are derived, so the per-gene count is still a
+        # bincount, but the per-cell count has to come from the row indices.
+        rows = np.asarray(X.indices, dtype=np.intp)
+        detected_per_cell = np.bincount(rows, minlength=n_cells)
+        cells_per_gene = np.bincount(columns, minlength=n_genes)
+    else:
+        dense = np.asarray(X)
+        nonzero = dense > 0
+        detected_per_cell = nonzero.sum(axis=1)
+        cells_per_gene = nonzero.sum(axis=0)
+
+    cell_mask = np.asarray(detected_per_cell) >= QC_MIN_GENES_PER_CELL
+    gene_mask = np.asarray(cells_per_gene) >= QC_MIN_CELLS_PER_GENE
+    return cell_mask.astype(bool), gene_mask.astype(bool)
+
+
 def _compute_hvg_score(X) -> np.ndarray:
     """Per-gene over-dispersion score (variance / mean) for ranking.
 
@@ -611,6 +725,90 @@ def _compute_hvg_score(X) -> np.ndarray:
     return score.astype(np.float32)
 
 
+def _ensure_qc(zarr_path: Path, logger) -> bool:
+    """Write obs/chiron_qc_cell_mask and var/chiron_qc_gene_mask.
+
+    Stage 2 of the manuscript's pipeline, and the step HVG selection has to run
+    behind. Idempotent on QC_VERSION. Returns True if a write occurred.
+
+    Refuses on a store that was already reduced upstream, which is not a
+    conservative default but a correctness one. The cell filter counts detected
+    genes against the full panel it was defined on. Applied to a store already
+    cut to 1,200 highly variable genes it removes most real cells rather than
+    empty droplets: on the blood shard of the 1M corpus, 178,970 of 250,000.
+    """
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r+")
+    except Exception as e:
+        logger.warning(f"Cannot open {zarr_path.name} for QC: {e}")
+        return False
+
+    if "var" not in root or "obs" not in root:
+        logger.warning(f"{zarr_path.name}: no var/ or obs/ group; QC skipped")
+        return False
+
+    var_group, obs_group = root["var"], root["obs"]
+    try:
+        var_index = _find_key(root, "var", "_index") or "_index"
+        n_vars = int(var_group[var_index].shape[0])
+    except Exception as e:
+        logger.warning(f"{zarr_path.name}: cannot size var/ for QC: {e}")
+        return False
+
+    reason = _detect_upstream_reduction(root, n_vars)
+    if reason is not None:
+        if _read_attr(root, UPSTREAM_REDUCED_KEY) is not True:
+            root.attrs[UPSTREAM_REDUCED_KEY] = True
+            root.attrs[UPSTREAM_REDUCED_WHY_KEY] = reason
+        logger.info(f"{zarr_path.name}: QC skipped, already reduced ({reason})")
+        return False
+
+    has_cell = _find_key(root, "obs", QC_CELL_MASK_KEY) is not None
+    has_gene = _find_key(root, "var", QC_GENE_MASK_KEY) is not None
+    if has_cell and has_gene and _read_attr(root, "chiron_qc_version") == QC_VERSION:
+        return False
+
+    X = _open_x(root, zarr_path, logger)
+    if X is None:
+        return False
+
+    cell_mask, gene_mask = _compute_qc_masks(X)
+
+    obs_group.create_array(
+        QC_CELL_MASK_KEY, shape=cell_mask.shape, dtype=cell_mask.dtype, overwrite=True
+    )[:] = cell_mask
+    var_group.create_array(
+        QC_GENE_MASK_KEY, shape=gene_mask.shape, dtype=gene_mask.dtype, overwrite=True
+    )[:] = gene_mask
+
+    n_cells_kept, n_genes_kept = int(cell_mask.sum()), int(gene_mask.sum())
+    root.attrs["chiron_qc_version"] = QC_VERSION
+    root.attrs["chiron_qc_min_genes_per_cell"] = QC_MIN_GENES_PER_CELL
+    root.attrs["chiron_qc_min_cells_per_gene"] = QC_MIN_CELLS_PER_GENE
+    root.attrs["chiron_qc_n_cells_kept"] = n_cells_kept
+    root.attrs["chiron_qc_n_genes_kept"] = n_genes_kept
+    root.attrs["chiron_qc_n_cells_total"] = int(cell_mask.size)
+    root.attrs["chiron_qc_n_genes_total"] = int(gene_mask.size)
+
+    # These stores carry consolidated metadata, so an array written after the
+    # fact is invisible to any reader that goes through the consolidated index,
+    # including a plain zarr.open_group. Without this the masks are on disk and
+    # unreadable, which is the quietest possible way for this step to fail.
+    try:
+        zarr.consolidate_metadata(root.store)
+    except Exception as e:
+        logger.warning(
+            f"{zarr_path.name}: consolidate_metadata failed after QC, so the "
+            f"masks may be invisible to readers using consolidated metadata: {e}"
+        )
+
+    logger.info(
+        f"{zarr_path.name}: QC kept {n_cells_kept:,}/{cell_mask.size:,} cells and "
+        f"{n_genes_kept:,}/{gene_mask.size:,} genes"
+    )
+    return True
+
+
 def _ensure_hvg_rank(zarr_path: Path, logger) -> bool:
     """Add var/chiron_hvg_rank + var/chiron_hvg_score to an existing zarr if missing.
 
@@ -632,6 +830,30 @@ def _ensure_hvg_rank(zarr_path: Path, logger) -> bool:
         return False
 
     var_group = root["var"]
+
+    # Refuse before measuring anything, not after. A store that arrives already
+    # reduced to a model panel is recorded as such and left alone: re-scoring
+    # HVGs on an upstream selection would silently replace it with a ranking
+    # computed over a different matrix, and the quality-control step that will
+    # sit in front of this one would discard most of the cells. See
+    # UPSTREAM_REDUCED_KEY for the measured consequence.
+    n_vars = None
+    try:
+        index_key = _find_key(root, "var", "_index") or "_index"
+        n_vars = int(var_group[index_key].shape[0])
+    except Exception:
+        pass
+    reason = _detect_upstream_reduction(root, n_vars) if n_vars is not None else None
+    if reason is not None:
+        if _read_attr(root, UPSTREAM_REDUCED_KEY) is not True:
+            root.attrs[UPSTREAM_REDUCED_KEY] = True
+            root.attrs[UPSTREAM_REDUCED_WHY_KEY] = reason
+            logger.info(
+                f"{zarr_path.name}: already reduced upstream ({reason}). "
+                f"Leaving the gene panel as it is."
+            )
+        return False
+
     existing_version = _read_attr(root, "chiron_hvg_version")
     has_selected = _find_key(root, "var", HVG_SELECTED_KEY) is not None
     has_rank = _find_key(root, "var", HVG_RANK_KEY) is not None
@@ -1023,6 +1245,10 @@ def convert_anndata_to_zarr(data_dir: str, log_file: str = None):
         #    operator does upstream of Chiron.
         for zarr_path in sorted(dataset_dir.glob("*.zarr")):
             for fn, label in (
+                # QC runs ahead of HVG because the Methods put it there: the
+                # 1,200 genes are selected from what survives quality control,
+                # not from the full matrix.
+                (_ensure_qc,            "quality control"),
                 (_ensure_hvg_rank,      "HVG ranking"),
                 (_ensure_var_columns_visible, "var column registration"),
                 (_ensure_hvg_histogram, "HVG histogram"),

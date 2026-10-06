@@ -420,7 +420,73 @@ export interface ZarrStoreInfo {
   /** Column names present under `var/`. Absent on a manager older than
    *  0.2.14, which is the case this helper treats as "unknown". */
   var_columns?: string[];
+  /** Cells in this store, from X's shape. The manager has reported it all
+   *  along; it is modelled here because the quality-control thresholds are
+   *  absolute counts, so their severity depends on it. */
+  n_samples?: number;
+  /** Genes in this store, from X's shape. */
+  n_vars?: number;
 }
+
+/** Cells a gene must appear in to survive the data server's quality control,
+ *  mirroring QC_MIN_CELLS_PER_GENE in worker/chiron/datasets/__main__.py. The
+ *  two have to agree, and this is the only place the frontend needs it. */
+const QC_MIN_CELLS_PER_GENE = 250;
+
+/** Below this many cells the gene filter starts removing a large fraction of
+ *  the panel. 12,500 is where the threshold passes 2 per cent of the dataset,
+ *  which is the point at which the measured behaviour stops resembling the
+ *  manuscript's, whose datasets were far larger. */
+const QC_SMALL_DATASET_CELLS = 12_500;
+
+/**
+ * A caution about how this dataset will preprocess, or undefined when there
+ * is nothing worth saying.
+ *
+ * Separate from `datasetIncompatibleReason` because this is not a refusal. The
+ * run will work. It is that the quality-control thresholds the manuscript
+ * specifies are absolute counts rather than fractions, so on a small dataset
+ * "detected in at least 250 cells" removes most of the gene panel: on a 1,600
+ * cell store it keeps 3,346 of 32,088 genes, 10.4 per cent. The operator can
+ * only know that before pressing the button if the platform says so.
+ *
+ * Only models whose gene panel the data server selects are affected. A model
+ * that reads raw counts and does its own gene handling, as Geneformer does,
+ * never sees these masks.
+ */
+export const datasetPreprocessingWarning = (
+  family: string | undefined | null,
+  zarrFiles: ZarrStoreInfo[] | undefined | null
+): string | undefined => {
+  // Server-side gene selection is Tabula's alone today. When a second model
+  // adopts the binned layer, add it here.
+  if (family !== 'tabula') return undefined;
+  if (!Array.isArray(zarrFiles) || zarrFiles.length === 0) return undefined;
+
+  const known = zarrFiles.filter(f => typeof f?.n_samples === 'number');
+  if (known.length === 0) return undefined;
+
+  const small = known.filter(f => (f.n_samples as number) < QC_SMALL_DATASET_CELLS);
+  if (small.length === 0) return undefined;
+
+  const smallest = Math.min(...small.map(f => f.n_samples as number));
+  const percent = ((QC_MIN_CELLS_PER_GENE / smallest) * 100).toFixed(1);
+  const where =
+    small.length === zarrFiles.length
+      ? 'every store in this dataset is'
+      : `${small.length} of ${zarrFiles.length} stores are`;
+
+  return (
+    `Quality control will be unusually strict here, because ${where} small. ` +
+    `Tabula drops genes detected in fewer than ${QC_MIN_CELLS_PER_GENE} cells, ` +
+    `which in the smallest store means a gene has to appear in ${percent}% of ` +
+    `its ${smallest.toLocaleString()} cells. Most of the gene panel will be ` +
+    `removed before the 1,200 highly variable genes are chosen, and if fewer ` +
+    `than 1,200 survive the model trains on a narrower input than it was ` +
+    `designed for. This matches the published preprocessing, which was applied ` +
+    `to far larger datasets.`
+  );
+};
 
 /**
  * Why the selected model cannot train on a dataset, or undefined when it can,

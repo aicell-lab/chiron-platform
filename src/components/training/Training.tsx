@@ -12,6 +12,7 @@ import LossChart from './LossChart';
 import {
   ChironImageIdentity,
   datasetIncompatibleReason,
+  datasetPreprocessingWarning,
   defaultMaxBatchSize,
   DEFAULT_MODEL_FAMILY,
   imageRepository,
@@ -1453,6 +1454,10 @@ const Training: React.FC = () => {
       datasetId,
       manifest,
       incompatibleReason: datasetIncompatibleReason(family, manifest?.zarr_files),
+      // Not a refusal. The run works, but the manuscript's absolute QC
+      // thresholds bite hard on a small store and the operator should know
+      // before pressing the button rather than after.
+      preprocessingWarning: datasetPreprocessingWarning(family, manifest?.zarr_files),
     }));
   }, [managers, launchDialogManagerId, workerImageFor]);
 
@@ -5391,7 +5396,7 @@ const Training: React.FC = () => {
                     <div className="max-h-44 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-50">
                       {(() => {
                         if (launchDialogDatasets.length === 0) return <p className="text-sm text-gray-400 text-center py-4">No datasets available on this worker</p>;
-                        return launchDialogDatasets.map(({ datasetId, manifest, incompatibleReason }) => {
+                        return launchDialogDatasets.map(({ datasetId, manifest, incompatibleReason, preprocessingWarning }) => {
                           const hasAccess = hasDatasetAccess(manifest);
                           // Both reasons a dataset cannot be trained on are
                           // stated in the row rather than only disabling it, so
@@ -5409,6 +5414,13 @@ const Training: React.FC = () => {
                                     <span className="ml-2 text-xs text-red-500">(Not readable by this model)</span>
                                     <p className="mt-1 text-xs text-red-700">{incompatibleReason}</p>
                                   </>
+                                )}
+                                {/* Amber, not red, and the row stays selectable:
+                                    this run will work, it will just preprocess
+                                    more aggressively than the dataset size
+                                    makes obvious. */}
+                                {hasAccess && !incompatibleReason && preprocessingWarning && (
+                                  <p className="mt-1 text-xs text-amber-700">{preprocessingWarning}</p>
                                 )}
                               </div>
                             </label>
