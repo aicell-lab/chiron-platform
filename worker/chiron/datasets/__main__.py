@@ -9,10 +9,14 @@ Run as `python -m chiron.datasets --data-dir /data`.
 """
 
 import argparse
+import hashlib
 import os
+import pickle
 import sys
+import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 import anndata as ad
@@ -283,7 +287,8 @@ def _detect_upstream_reduction(root, n_vars: int):
     if n_vars <= MODEL_IN_FEATURE:
         return (
             f"n_vars={n_vars} is not above the model panel width "
-            f"{MODEL_IN_FEATURE}, so there is nothing to select from"
+            f"{MODEL_IN_FEATURE}, so this store is already a selected panel "
+            "rather than a full gene set"
         )
     return None
 
@@ -319,6 +324,113 @@ PCA_BATCH_BYTES_BUDGET = 256 * 1024 * 1024   # 256 MB / batch is generous
 BINNING_VERSION = 3  # bumped 2 -> 3: layer covers all cells (no internal QC)
 BINNING_N_BINS = 50
 BINNING_LAYER_KEY = "chiron_binned"  # under layers/
+
+# ---------------------------------------------------------------------------
+# Geneformer rank-value preprocessing
+# ---------------------------------------------------------------------------
+#
+# Geneformer does not read expression values at all. It reads an ORDER: a cell
+# is the list of genes it expresses, sorted by that gene's count divided by the
+# gene's median across Geneformer's reference corpus. Dividing by the median is
+# what makes the order comparable between cells and between sequencing depths,
+# because a gene ranks early when it is high *for that gene* rather than high
+# in absolute terms.
+#
+# Nothing in Tabula's pipeline is a step toward that and nothing here is a step
+# toward Tabula's. Tabula bins values over a fixed 1,200-gene panel, Geneformer
+# throws the values away and keeps an order over a variable-length gene set, and
+# neither output can be derived from the other. That is the whole reason the two
+# are written to different places in the store and share no key: coexistence has
+# to be structural, not a convention somebody remembers to follow.
+#
+# What is precomputed here is the normalisation and the ordering, and
+# deliberately not the tokens. The order is stored as column indices into var,
+# so the trainer still maps through its own token dictionary and still truncates
+# to whatever input width the checkpoint it is about to train declares. One
+# stored artifact therefore serves both Geneformer generations' input widths,
+# and the vocabulary stays where the model is.
+#
+# The dictionaries are model *data*, not model code, so fetching them does not
+# cross the line this module's docstring draws. They are pinned by revision and
+# verified by digest before unpickling, because pickle.load executes arbitrary
+# code and the digest is the only thing between a tampered download and this
+# process. Never relax that to a size or mtime check.
+#
+# These pins are deliberately identical to the ones in the Geneformer trainer's
+# apps/geneformer_trainer/dataset.py. If the two ever drift, the server
+# precomputes an order against one corpus and the trainer trains against
+# another, which produces no error anywhere and which FedAvg cannot see.
+GENEFORMER_VERSION = 1
+GENEFORMER_REVISION = "04c2b2e84da7c0f385c3f9ad8f3ec24bab6650e5"
+GENEFORMER_DICTIONARY_SET = "gc104M"
+GENEFORMER_DICTIONARIES = {
+    "token_dictionary_gc104M.pkl":
+        "67c445f4385127adfc48dcc072320cd65d6822829bf27dd38070e6e787bc597f",
+    "gene_median_dictionary_gc104M.pkl":
+        "a51c53f6a771d64508dfaf61529df70e394c53bd20856926117ae5d641a24bf5",
+}
+GENEFORMER_HF_URL = (
+    "https://huggingface.co/ctheodoris/Geneformer/resolve/{revision}/geneformer/{name}"
+)
+
+# The widest input any Geneformer checkpoint accepts: 4,096 positions for
+# V2-104M, 2,048 for V1-10M, and the trainer's collate spends two of them on
+# <cls> and <eos>. Storing this many ranks per cell therefore bounds the
+# artifact without ever being the binding constraint, so the trainer's own
+# truncation stays the only one that decides a sequence's length.
+GENEFORMER_MAX_RANKS = 4096
+
+# One group under uns/ per dictionary set, because the median dictionary is
+# what fixes the order and V1's gc30M medians differ from V2's gc104M. Two
+# generations prepared on one store therefore land in two groups rather than
+# overwriting each other, which is the same property the recipe id below gives
+# over time.
+#
+# uns/ and not a top-level group: everything this server writes lives in an
+# AnnData-legal container (layers/, var/, obs/, obsm/) so a prepared store is
+# still a store anndata can open, and a top-level group breaks anndata.read_zarr
+# outright. uns/ is AnnData's free-form namespace and is the only one that
+# accepts a ragged array. The cost is that anndata.read_zarr materialises uns
+# eagerly, so a local inspection of a prepared store pulls the ranking into
+# memory. Nothing in Chiron reads these stores that way: the data server opens
+# them with zarr directly, and so does the trainer.
+GENEFORMER_GROUP = f"chiron_geneformer_{GENEFORMER_DICTIONARY_SET}"
+GENEFORMER_INDPTR_KEY = "rank_indptr"
+GENEFORMER_INDICES_KEY = "rank_indices"
+
+# Everything that changes the stored order, in one string. Idempotence is
+# checked against this and not against the version alone, so repinning the
+# dictionaries or widening the cap recomputes rather than silently leaving an
+# order that was built from something else.
+GENEFORMER_RECIPE = (
+    f"geneformer-{GENEFORMER_DICTIONARY_SET}-{GENEFORMER_REVISION[:12]}"
+    f"-top{GENEFORMER_MAX_RANKS}-v{GENEFORMER_VERSION}"
+)
+
+GENEFORMER_RECIPE_ATTR = "chiron_geneformer_recipe"
+GENEFORMER_VERSION_ATTR = "chiron_geneformer_version"
+GENEFORMER_UNSUITABLE_KEY = "chiron_geneformer_unsuitable"
+GENEFORMER_UNSUITABLE_WHY_KEY = "chiron_geneformer_unsuitable_reason"
+
+# Off by default. This step costs roughly one int per stored expression value
+# on disk, and most sites train one model, so making every site pay for every
+# model's preprocessing is the opposite of what the per-model design is for.
+# A site that trains Geneformer turns it on, the same way the image sets
+# CHIRON_HVG_IN_FEATURE for Tabula.
+#
+# The scan loop is not the intended trigger. _ensure_geneformer_ranks is
+# written to be called directly, which is what the on-demand path will do when
+# a Geneformer trainer asks for a dataset it has not prepared yet. Until that
+# lands, this switch is how an operator gets the artifact.
+GENEFORMER_PREP_ENV = "CHIRON_GENEFORMER_PREP"
+
+# How many stored values to look at when deciding whether X holds raw counts.
+# A sample and not the whole array: the question is "has this matrix been
+# normalised", and a normalised matrix is fractional essentially everywhere,
+# so a spread sample answers it at a fraction of the cost. The stride below
+# spreads the sample across the array rather than reading a prefix, because a
+# prefix would only see the first few cells.
+GENEFORMER_COUNT_CHECK_SAMPLE = 200_000
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -1204,6 +1316,460 @@ def _ensure_umap_embedding(zarr_path: Path, logger) -> bool:
     return True
 
 
+def _geneformer_prep_enabled() -> bool:
+    """Whether the scan loop should precompute Geneformer rank orderings."""
+    return os.environ.get(GENEFORMER_PREP_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _geneformer_cache_dir() -> Path:
+    """Where the verified dictionaries are kept between restarts."""
+    root = os.environ.get("CHIRON_CACHE_DIR") or tempfile.gettempdir()
+    path = Path(root) / "geneformer" / GENEFORMER_REVISION[:12]
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _fetch_geneformer_dictionary(name: str, logger):
+    """One Geneformer dictionary, fetched and digest-verified once.
+
+    Fetched at runtime rather than baked into the image, so this package stays
+    model-code-free, and pinned by revision *and* digest so every site ends up
+    with a byte-identical corpus. That identity is a correctness requirement
+    rather than a convenience: the order this server writes has to be the order
+    the trainer would have computed, and a different median dictionary produces
+    a different order with no error anywhere.
+
+    The digest is checked before ``pickle.loads`` and never after. Unpickling
+    executes arbitrary code, so verifying afterwards verifies nothing.
+
+    Raises:
+        RuntimeError: if the download fails or its digest does not match.
+    """
+    expected = GENEFORMER_DICTIONARIES[name]
+    path = _geneformer_cache_dir() / name
+
+    if path.exists():
+        payload = path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() == expected:
+            return pickle.loads(payload)
+        logger.warning(f"Cached Geneformer {name} failed its checksum, re-fetching")
+
+    url = GENEFORMER_HF_URL.format(revision=GENEFORMER_REVISION, name=name)
+    logger.info(f"Fetching Geneformer dictionary {name}")
+    try:
+        with urllib.request.urlopen(url, timeout=180) as response:
+            payload = response.read()
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not fetch the Geneformer dictionary {name} from {url}. The "
+            "rank ordering cannot be computed without it."
+        ) from e
+
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != expected:
+        raise RuntimeError(
+            f"{name} downloaded from {url} has sha256 {digest}, expected "
+            f"{expected}. Refusing to unpickle it."
+        )
+
+    # Write under a temporary name and rename, so two processes starting at
+    # once cannot leave a half-written file for the other to read.
+    fd, staged = tempfile.mkstemp(dir=str(_geneformer_cache_dir()))
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(payload)
+    os.replace(staged, path)
+
+    return pickle.loads(payload)
+
+
+def _load_geneformer_vocabulary(logger):
+    """``(token_dictionary, gene_medians)`` for the pinned dictionary set.
+
+    Both, not just the medians. The medians alone decide the order, but they
+    cover 42,005 genes against the token dictionary's 20,275, so ranking every
+    gene that has a median would order 21,734 genes the model has no token for.
+    The trainer drops those, and it does so *after* truncating, so an order
+    built on the wider set would hand it a short sequence. Keeping the usable
+    set identical to the trainer's is what makes the stored order the one the
+    trainer would have produced itself.
+    """
+    tokens = _fetch_geneformer_dictionary("token_dictionary_gc104M.pkl", logger)
+    medians = _fetch_geneformer_dictionary("gene_median_dictionary_gc104M.pkl", logger)
+    return tokens, medians
+
+
+def _sample_nonintegral(X):
+    """Why ``X`` does not look like raw counts, or None if it does.
+
+    Geneformer's normalisation divides a raw count by a gene median taken over
+    a raw-count corpus. Run against a matrix somebody already library-size
+    normalised or log1p-transformed, it produces a confident ordering of the
+    wrong quantity, and nothing downstream can tell. Normalisation leaves
+    fractional values essentially everywhere, so integrality separates the two
+    cases cleanly.
+
+    Sampled across the array with a stride rather than read as a prefix, since
+    a prefix only ever sees the first handful of cells.
+    """
+    values = X.data if hasattr(X, "data") and hasattr(X, "indptr") else np.asarray(X)
+    values = np.asarray(values).reshape(-1)
+    if values.size == 0:
+        return "X holds no stored values"
+
+    stride = max(1, values.size // GENEFORMER_COUNT_CHECK_SAMPLE)
+    sample = values[::stride]
+    if not np.all(np.isfinite(sample)):
+        return "X contains non-finite values, so it is not a count matrix"
+    if np.any(sample < 0):
+        return (
+            "X contains negative values, so it has been centred or scaled "
+            "rather than left as counts"
+        )
+    fractional = int(np.count_nonzero(sample != np.rint(sample)))
+    if fractional:
+        return (
+            f"{fractional:,} of {sample.size:,} sampled values are not whole "
+            "numbers, so X has been normalised or log-transformed rather than "
+            "left as raw counts"
+        )
+    return None
+
+
+def _looks_like_ensembl(values: np.ndarray) -> bool:
+    """Whether a var column holds Ensembl gene ids rather than symbols.
+
+    A majority test and not a universal one. Real panels carry spike-ins and
+    the occasional hand-added row, and demanding every entry match would reject
+    an otherwise perfectly good store over a handful of them.
+    """
+    if values.size == 0:
+        return False
+    sample = values[:: max(1, values.size // 2000)]
+    hits = sum(
+        1
+        for value in sample
+        if value.startswith("ENS") and any(ch.isdigit() for ch in value)
+    )
+    return hits >= 0.8 * len(sample)
+
+
+def _read_ensembl_ids(root, var_group, var_index: str, logger):
+    """``(ensembl_ids, source_column)`` for this store, or ``(None, None)``.
+
+    Ensembl ids are the join key between a store and Geneformer's corpus, and
+    where they live depends on who staged the data. Chiron-prepared datasets
+    carry them in ``var/feature_id``. Data taken straight from CELLxGENE
+    carries them in the ``var`` index instead and has no ``feature_id`` column
+    at all, which is the common case for a site bringing its own data.
+
+    Both are accepted, ``feature_id`` first, and the fallback is used only when
+    the index actually looks like Ensembl ids. The alternative is to trust the
+    index blindly and silently rank nothing on a store indexed by gene symbol.
+    """
+    for key, label in (
+        (_find_key(root, "var", "feature_id"), "feature_id"),
+        (var_index, var_index),
+    ):
+        if key is None or key not in var_group:
+            continue
+        try:
+            values = np.asarray(var_group[key][:]).astype(str)
+        except Exception as e:
+            logger.warning(f"Cannot read var/{key}: {e}")
+            continue
+        if _looks_like_ensembl(values):
+            return values, label
+    return None, None
+
+
+def _detect_geneformer_unsuitable(root, n_vars: int, X):
+    """Why this store cannot carry a Geneformer ordering, or None if it can.
+
+    The same refusal the Tabula steps make, for the same reason and against a
+    wider set of signals. A store that was already reduced to a model's gene
+    panel is not a transcriptome, and Geneformer ranks a cell's transcriptome:
+    the order over 1,200 selected genes is a different object from the order
+    over 20,000, not a truncation of it. A store whose values were already
+    normalised is worse still, because the ranking is then computed against a
+    quantity the gene medians were never derived from.
+
+    Refusing is cheap here because it is not fatal. The trainer can still read
+    raw X and derive the order itself, which is what it does today, so a
+    refused store trains exactly as it does now and simply gains no artifact.
+    """
+    reduced = _detect_upstream_reduction(root, n_vars)
+    if reduced is not None:
+        # One detector, two consequences. The signals that say "a selection
+        # already happened here" are the same ones Tabula's steps look for, but
+        # what follows from them is not, so the consequence is spelled out here
+        # rather than inherited from a function that speaks about gene panels.
+        return (
+            f"{reduced}, and Geneformer ranks a cell's whole transcriptome, so "
+            "an order over an already-selected panel is a different object "
+            "rather than a truncation of the right one"
+        )
+    return _sample_nonintegral(X)
+
+
+def _compute_geneformer_ranks(X, col_to_slot, medians_by_slot, max_ranks, row_block=4096):
+    """Each cell's expressed genes as column indices in Geneformer rank order.
+
+    One cell at a time, in row blocks so the per-block temporaries stay small:
+    take the row's stored counts, drop the columns Geneformer has no token or
+    no median for, divide each remaining count by that gene's median, and sort
+    descending.
+
+    Two constant factors of Geneformer's own encoding are omitted on purpose.
+    It divides a cell by its total counts and multiplies by a fixed target sum
+    before dividing by the median. Both are strictly positive per-cell
+    constants, so neither can change the order this returns, and recovering
+    them from obs/n_counts would be wrong anyway because those totals refer to
+    the full transcriptome and disagree with a gene-subset store.
+
+    The sort is stable, so genes whose normalised value ties keep their column
+    order. The trainer's is stable for the same reason, over the same set, so
+    the two agree entry for entry and not merely as multisets.
+
+    Args:
+        X: a :class:`_SparseX` in CSR form, or a dense 2D array.
+        col_to_slot: for each column of X, its position in ``medians_by_slot``,
+            or -1 for a column Geneformer cannot use.
+        medians_by_slot: the gene median of each usable column.
+        max_ranks: keep at most this many genes per cell.
+        row_block: cells per pass.
+
+    Returns:
+        ``(indptr, indices, stats)``. ``indptr`` is int64 of length n_cells + 1,
+        ``indices`` holds the ranked column indices, and ``stats`` counts the
+        cells that were truncated and the cells that had nothing usable.
+    """
+    n_cells = int(X.shape[0])
+    n_vars = int(X.shape[1])
+    is_sparse = hasattr(X, "indptr") and hasattr(X, "indices")
+
+    # uint16 wherever the panel fits it, which is every store with fewer than
+    # 65,536 genes and so every store built on a human or mouse gene panel.
+    # Halving this array halves the artifact, and it is the whole artifact.
+    index_dtype = np.uint16 if n_vars <= np.iinfo(np.uint16).max else np.int32
+
+    per_cell = []
+    n_truncated = 0
+    n_empty = 0
+
+    for start in range(0, n_cells, row_block):
+        stop = min(start + row_block, n_cells)
+        if is_sparse:
+            indptr = np.asarray(X.indptr, dtype=np.int64)
+            block_rows = [
+                (np.asarray(X.indices[indptr[r]:indptr[r + 1]], dtype=np.int64),
+                 np.asarray(X.data[indptr[r]:indptr[r + 1]], dtype=np.float64))
+                for r in range(start, stop)
+            ]
+        else:
+            dense = np.asarray(X[start:stop])
+            block_rows = []
+            for row in dense:
+                cols = np.flatnonzero(row > 0)
+                block_rows.append((cols.astype(np.int64), row[cols].astype(np.float64)))
+
+        for cols, counts in block_rows:
+            if cols.size == 0:
+                per_cell.append(np.empty(0, dtype=index_dtype))
+                n_empty += 1
+                continue
+            slots = col_to_slot[cols]
+            alive = slots >= 0
+            if not np.any(alive):
+                per_cell.append(np.empty(0, dtype=index_dtype))
+                n_empty += 1
+                continue
+            cols, slots, counts = cols[alive], slots[alive], counts[alive]
+            scores = counts / medians_by_slot[slots]
+            order = np.argsort(-scores, kind="stable")
+            if order.size > max_ranks:
+                order = order[:max_ranks]
+                n_truncated += 1
+            per_cell.append(cols[order].astype(index_dtype))
+
+    lengths = np.fromiter((len(c) for c in per_cell), dtype=np.int64, count=len(per_cell))
+    indptr = np.zeros(n_cells + 1, dtype=np.int64)
+    np.cumsum(lengths, out=indptr[1:])
+    indices = (
+        np.concatenate(per_cell) if per_cell else np.empty(0, dtype=index_dtype)
+    ).astype(index_dtype)
+
+    return indptr, indices, {"n_truncated": n_truncated, "n_empty": n_empty}
+
+
+def _ensure_geneformer_ranks(zarr_path: Path, logger) -> bool:
+    """Write uns/chiron_geneformer_gc104M/{rank_indptr,rank_indices} if missing.
+
+    Idempotent on the recipe id, which is the guard the request asks for: a
+    store already prepared under this protocol is left alone rather than
+    recomputed. It is the recipe and not the version that is compared, so
+    repinning the dictionaries or changing the rank cap is recomputed too,
+    while an unchanged protocol is a no-op forever.
+
+    Touches nothing outside its own group. X, var, obs, layers and obsm are
+    read and never written, so running this after Tabula's quality control,
+    HVG ranking, binning and UMAP leaves all four byte-identical, and running
+    it before them changes nothing they go on to compute.
+
+    Returns True if a write occurred.
+    """
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r+")
+    except Exception as e:
+        logger.warning(f"Cannot open {zarr_path.name} for Geneformer ranking: {e}")
+        return False
+
+    if "var" not in root:
+        logger.warning(f"{zarr_path.name}: no var/ group; Geneformer ranking skipped")
+        return False
+
+    # Already prepared under this exact protocol. Checked before anything is
+    # read off disk, so a second pass over a prepared store costs one attribute
+    # lookup.
+    uns = root["uns"] if "uns" in root else None
+    if (
+        uns is not None
+        and GENEFORMER_GROUP in uns
+        and _read_attr(root, GENEFORMER_RECIPE_ATTR) == GENEFORMER_RECIPE
+    ):
+        return False
+
+    var_group = root["var"]
+    try:
+        var_index = _find_key(root, "var", "_index") or "_index"
+        n_vars = int(var_group[var_index].shape[0])
+    except Exception as e:
+        logger.warning(f"{zarr_path.name}: cannot size var/ for Geneformer: {e}")
+        return False
+
+    X = _open_x(root, zarr_path, logger)
+    if X is None:
+        return False
+    if getattr(X, "format", "csr") == "csc":
+        logger.info(
+            f"{zarr_path.name}: Geneformer ranking skipped, X is stored CSC and "
+            "ranking reads cells as rows"
+        )
+        return False
+
+    reason = _detect_geneformer_unsuitable(root, n_vars, X)
+    if reason is not None:
+        if _read_attr(root, GENEFORMER_UNSUITABLE_KEY) is not True:
+            root.attrs[GENEFORMER_UNSUITABLE_KEY] = True
+            root.attrs[GENEFORMER_UNSUITABLE_WHY_KEY] = reason
+        logger.info(f"{zarr_path.name}: Geneformer ranking skipped ({reason})")
+        return False
+
+    n_cols = int(X.shape[1])
+    ensembl, feature_key = _read_ensembl_ids(root, var_group, var_index, logger)
+    if ensembl is None:
+        reason = (
+            "neither var/feature_id nor the var index holds Ensembl gene ids, "
+            "and Geneformer's corpus is keyed by them, so there is nothing to "
+            "join this store's genes against"
+        )
+        root.attrs[GENEFORMER_UNSUITABLE_KEY] = True
+        root.attrs[GENEFORMER_UNSUITABLE_WHY_KEY] = reason
+        logger.info(f"{zarr_path.name}: Geneformer ranking skipped ({reason})")
+        return False
+    if len(ensembl) != n_cols:
+        logger.warning(
+            f"{zarr_path.name}: var/{feature_key} has {len(ensembl):,} entries but "
+            f"X has {n_cols:,} columns; Geneformer ranking skipped"
+        )
+        return False
+
+    try:
+        tokens, medians = _load_geneformer_vocabulary(logger)
+    except Exception as e:
+        logger.warning(f"{zarr_path.name}: Geneformer ranking skipped, {e}")
+        return False
+
+    token_ids = np.array([tokens.get(g, -1) for g in ensembl], dtype=np.int64)
+    gene_medians = np.array(
+        [medians.get(g, np.nan) for g in ensembl], dtype=np.float64
+    )
+    usable = (token_ids >= 0) & np.isfinite(gene_medians) & (gene_medians > 0)
+    keep = np.flatnonzero(usable)
+    if keep.size == 0:
+        reason = (
+            "not one gene in this store is in Geneformer's vocabulary, so "
+            f"var/{feature_key} is probably not Ensembl gene ids"
+        )
+        root.attrs[GENEFORMER_UNSUITABLE_KEY] = True
+        root.attrs[GENEFORMER_UNSUITABLE_WHY_KEY] = reason
+        logger.info(f"{zarr_path.name}: Geneformer ranking skipped ({reason})")
+        return False
+
+    col_to_slot = np.full(n_cols, -1, dtype=np.int64)
+    col_to_slot[keep] = np.arange(keep.size, dtype=np.int64)
+
+    indptr, indices, stats = _compute_geneformer_ranks(
+        X, col_to_slot, gene_medians[keep], GENEFORMER_MAX_RANKS
+    )
+
+    uns_group = root["uns"] if "uns" in root else root.create_group("uns")
+    group = uns_group.create_group(GENEFORMER_GROUP, overwrite=True)
+    # AnnData's own encoding markers, so a prepared store still opens with
+    # anndata.read_zarr instead of failing on an unannotated group.
+    group.attrs["encoding-type"] = "dict"
+    group.attrs["encoding-version"] = "0.1.0"
+    for name, array in (
+        (GENEFORMER_INDPTR_KEY, indptr),
+        (GENEFORMER_INDICES_KEY, indices),
+    ):
+        written = group.create_array(
+            name, shape=array.shape, dtype=array.dtype, overwrite=True
+        )
+        written[:] = array
+        written.attrs["encoding-type"] = "array"
+        written.attrs["encoding-version"] = "0.2.0"
+
+    root.attrs[GENEFORMER_VERSION_ATTR] = GENEFORMER_VERSION
+    root.attrs[GENEFORMER_RECIPE_ATTR] = GENEFORMER_RECIPE
+    root.attrs["chiron_geneformer_revision"] = GENEFORMER_REVISION
+    root.attrs["chiron_geneformer_dictionary_set"] = GENEFORMER_DICTIONARY_SET
+    root.attrs["chiron_geneformer_max_ranks"] = GENEFORMER_MAX_RANKS
+    root.attrs["chiron_geneformer_n_cells"] = int(X.shape[0])
+    root.attrs["chiron_geneformer_n_genes_usable"] = int(keep.size)
+    root.attrs["chiron_geneformer_n_genes_total"] = n_cols
+    root.attrs["chiron_geneformer_n_ranked"] = int(indices.size)
+    root.attrs["chiron_geneformer_n_cells_truncated"] = stats["n_truncated"]
+    root.attrs["chiron_geneformer_n_cells_empty"] = stats["n_empty"]
+    # A store refused by an earlier, stricter pin that now passes should not
+    # keep advertising a refusal that no longer holds.
+    if _read_attr(root, GENEFORMER_UNSUITABLE_KEY) is not None:
+        root.attrs[GENEFORMER_UNSUITABLE_KEY] = False
+        root.attrs[GENEFORMER_UNSUITABLE_WHY_KEY] = ""
+
+    # These stores carry consolidated metadata, so a group written after the
+    # fact is invisible to any reader that goes through the consolidated index.
+    # Without this the ordering is on disk and unreadable.
+    try:
+        zarr.consolidate_metadata(root.store)
+    except Exception as e:
+        logger.warning(
+            f"{zarr_path.name}: consolidate_metadata failed after Geneformer "
+            f"ranking, so the ordering may be invisible to readers using "
+            f"consolidated metadata: {e}"
+        )
+
+    logger.info(
+        f"{zarr_path.name}: Geneformer ranked {X.shape[0]:,} cells over "
+        f"{keep.size:,}/{n_cols:,} genes in Geneformer's vocabulary, "
+        f"{indices.size:,} ranked entries "
+        f"({stats['n_truncated']:,} cells truncated at {GENEFORMER_MAX_RANKS}, "
+        f"{stats['n_empty']:,} with nothing usable)"
+    )
+    return True
+
+
 def convert_anndata_to_zarr(data_dir: str, log_file: str = None):
     """
     Scan the data directory for AnnData files and convert them to Zarr format,
@@ -1236,25 +1802,32 @@ def convert_anndata_to_zarr(data_dir: str, log_file: str = None):
                 adata = ad.read_h5ad(anndata_file)
                 adata.write_zarr(zarr_file)
 
-        # 2) Apply Chiron's preprocessing pipeline to every zarr in this
-        #    dataset folder. Steps run in dependency order — HVG ranking
-        #    first because value binning + UMAP both consume the selection
-        #    mask — and each step is independently idempotent on its own
-        #    version attr, so re-running this loop only does the missing
-        #    work. Cell- and gene-level QC is left to whatever the site
-        #    operator does upstream of Chiron.
+        # 2) Apply Chiron's preprocessing to every zarr in this dataset folder.
+        #    Each step is independently idempotent on its own version attr, so
+        #    re-running this loop only does the missing work, and each refuses
+        #    a store that does not suit it rather than producing a confident
+        #    wrong answer.
+        #
+        #    Tabula's chain runs in dependency order: quality control first
+        #    because the Methods select HVGs from what survives it, then HVG
+        #    ranking, because value binning and UMAP both consume the selection
+        #    mask. Geneformer's step is appended rather than interleaved: it
+        #    shares no input and no output with any of them, so its position
+        #    here cannot change what they produce, and putting it last keeps
+        #    the cheap steps ahead of the expensive one.
+        steps = [
+            (_ensure_qc,            "quality control"),
+            (_ensure_hvg_rank,      "HVG ranking"),
+            (_ensure_var_columns_visible, "var column registration"),
+            (_ensure_hvg_histogram, "HVG histogram"),
+            (_ensure_binning,       "value binning"),
+            (_ensure_umap_embedding, "UMAP embedding"),
+        ]
+        if _geneformer_prep_enabled():
+            steps.append((_ensure_geneformer_ranks, "Geneformer rank ordering"))
+
         for zarr_path in sorted(dataset_dir.glob("*.zarr")):
-            for fn, label in (
-                # QC runs ahead of HVG because the Methods put it there: the
-                # 1,200 genes are selected from what survives quality control,
-                # not from the full matrix.
-                (_ensure_qc,            "quality control"),
-                (_ensure_hvg_rank,      "HVG ranking"),
-                (_ensure_var_columns_visible, "var column registration"),
-                (_ensure_hvg_histogram, "HVG histogram"),
-                (_ensure_binning,       "value binning"),
-                (_ensure_umap_embedding, "UMAP embedding"),
-            ):
+            for fn, label in steps:
                 try:
                     fn(zarr_path, logger)
                 except Exception as e:
