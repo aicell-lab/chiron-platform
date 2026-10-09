@@ -38,12 +38,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-#: Marker for a stage that declined to run on this store, as opposed to one
-#: that failed. A refusal is a statement about the data, carries a reason, and
-#: is not an error.
-REFUSED = "refused"
-
-
 @dataclass(frozen=True)
 class Param:
     """One number a recipe exposes, and whether a human may change it.
@@ -165,11 +159,6 @@ class StageResult:
     @property
     def satisfied(self) -> bool:
         return self.wrote and self.refused is None
-
-
-#: A stage that did nothing because its result was already correct. Distinct
-#: from a refusal: the stage is satisfied, it simply had no work.
-UNCHANGED = StageResult(wrote=True)
 
 
 @dataclass(frozen=True)
@@ -314,12 +303,22 @@ def resolve_params(
                 f"{recipe.model_family} preprocessing has no parameter "
                 f"{name!r}. It accepts: {known}"
             )
-        if not param.adjustable:
+        # A fixed parameter at its own default is not a change, and must not
+        # be an error. The recorded state of a prepared store holds EVERY
+        # parameter, fixed ones included, and the periodic rescan feeds that
+        # record straight back here to keep the store current at the settings
+        # it was prepared with. Rejecting the fixed names unconditionally made
+        # every prepared store fail from its second scan onward, which is the
+        # opposite of what carrying the parameters forward is for: the store
+        # looked prepared and silently stopped tracking the code.
+        if not param.adjustable and param.coerce(value) != param.default:
             raise ValueError(
                 f"{param.name} is fixed at {param.default} for "
                 f"{recipe.model_family} and cannot be changed per run. "
                 f"{param.description}"
             )
+        if not param.adjustable:
+            continue
         coerced = param.coerce(value)
         param.validate(coerced)
         resolved[name] = coerced

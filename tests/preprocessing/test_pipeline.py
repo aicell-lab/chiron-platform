@@ -532,3 +532,266 @@ def test_the_schema_the_manager_will_serve_is_json_safe():
         described = recipe.describe()
         json.dumps(described)  # raises if anything is not serialisable
         assert described["defaults"] == resolve_params(recipe)
+
+
+# --------------------------------------------------------------------------
+# Regressions found by review
+#
+# Every test below corresponds to a defect the suite above did not catch. They
+# are grouped rather than scattered because what they have in common is the
+# point: each one was invisible to a test that looked like it covered the area.
+# --------------------------------------------------------------------------
+
+
+def test_the_rescan_keeps_a_prepared_store_current(tmp_path, monkeypatch):
+    """A prepared store must keep tracking the code, not freeze.
+
+    The recorded parameter block holds EVERY parameter, including the ones the
+    recipe declares fixed, and the rescan feeds that block back in to re-apply
+    at the settings the store was prepared with. Rejecting a fixed name
+    unconditionally made that round trip fail, so from the second scan onward
+    every prepared store errored and silently stopped being updated. The store
+    still looked prepared, which is worse than looking unprepared.
+
+    "Does not revert a threshold" cannot see this, because a refresh that never
+    runs also never reverts anything.
+    """
+    from chiron.datasets import __main__ as server
+
+    data_dir, dataset_dir = _data_dir_with(tmp_path, _write_synthetic)
+    _write_request(data_dir, "demo", "tabula", {"min_cells_per_gene": 40})
+    convert_anndata_to_zarr(str(data_dir))
+    store = dataset_dir / "demo.zarr"
+    before = state(store, "tabula")["stages"]["binning"]["fingerprint"]
+
+    # The code moves, the way a version bump moves it.
+    bumped = tuple(
+        server.Stage(
+            name=s.name,
+            version=s.version + 1 if s.name == "binning" else s.version,
+            label=s.label,
+            description=s.description,
+            run=s.run,
+            requires=s.requires,
+            params=s.params,
+            outputs=s.outputs,
+        )
+        for s in server.RECIPES["tabula"].stages
+    )
+    monkeypatch.setitem(
+        server.RECIPES,
+        "tabula",
+        server.Recipe(
+            model_family="tabula",
+            version=server.TABULA_RECIPE.version,
+            label="Tabula",
+            description="",
+            stages=bumped,
+        ),
+    )
+
+    convert_anndata_to_zarr(str(data_dir))
+
+    after = state(store, "tabula")["stages"]["binning"]["fingerprint"]
+    assert after != before, (
+        "the rescan did not recompute a stage whose version moved, so a "
+        "prepared store has stopped tracking the code"
+    )
+    # And the organiser's threshold is still the one in force.
+    assert attrs(store)["chiron_qc_min_cells_per_gene"] == 40
+
+
+def test_no_gene_quality_control_excluded_is_in_the_panel(tmp_path):
+    """Capping the COUNT of selected genes is not constraining membership.
+
+    Excluded genes score zero, and when fewer genes have a strictly positive
+    score than there are slots, the ranking fills the rest by tie-breaking
+    across the zero-score genes, which are exactly the ones quality control
+    removed. The trainer then reads columns of a gene set the filter excluded.
+
+    The store is built to guarantee the condition rather than by hunting for a
+    threshold that happens to produce it. A block of genes is expressed ONLY in
+    the shallow cells, so those genes pass the gene filter on cell count and
+    then have no cell left to be scored across once the cell filter runs.
+    """
+    # Three blocks of genes, and the ORDER of them is load-bearing.
+    #
+    # A, at the lowest column indices: detected in only 100 cells, so the gene
+    #    filter excludes them. Their score is forced to zero.
+    # B: broadly expressed in the deep cells, so they survive and score.
+    # C: expressed only in the shallow cells, which the cell filter drops. They
+    #    pass the gene filter on cell count and then have no cell left to be
+    #    scored across, so their score is zero too.
+    #
+    # 1,400 genes pass the gene filter, so the cap does not bite and the model
+    # asks for 1,200. Only 800 of them can be scored, which leaves 400 slots
+    # for the ranking to fill from the zero-score genes. Those ties break by
+    # column index, and A sits at the lowest ones, so A wins them.
+    rng = np.random.default_rng(7)
+    n_excluded, n_scored, n_ghost = 200, 800, 600
+    n_shallow, n_deep = 600, 600
+    n_cells = n_shallow + n_deep
+    n_genes = n_excluded + n_scored + n_ghost
+    dense = np.zeros((n_cells, n_genes), dtype=np.float32)
+    dense[n_shallow:n_shallow + 100, :n_excluded] = rng.integers(
+        1, 30, size=(100, n_excluded)
+    )
+    dense[n_shallow:, n_excluded:n_excluded + n_scored] = (
+        rng.random((n_deep, n_scored)) < 0.9
+    ) * rng.integers(1, 30, size=(n_deep, n_scored))
+    dense[:n_shallow, n_excluded + n_scored:] = (
+        rng.random((n_shallow, n_ghost)) < 0.5
+    ) * rng.integers(1, 30, size=(n_shallow, n_ghost))
+
+    adata = ad.AnnData(X=sp.csr_matrix(dense))
+    adata.var_names = [f"GENE{i:05d}" for i in range(n_genes)]
+    adata.obs_names = [f"CELL{i:05d}" for i in range(n_cells)]
+    path = tmp_path / "ghosts.zarr"
+    adata.write_zarr(path)
+
+    apply_recipe(path, RECIPES["tabula"], {"min_genes_per_cell": 500}, LOG)
+    root = zarr.open_group(str(path), mode="r")
+    cell_mask = np.asarray(root["obs"]["chiron_qc_cell_mask"][:], dtype=bool)
+    gene_mask = np.asarray(root["var"]["chiron_qc_gene_mask"][:], dtype=bool)
+    score = np.asarray(root["var"]["chiron_hvg_score"][:])
+    selected = np.asarray(root["var"]["chiron_hvg_selected"][:], dtype=bool)
+
+    assert not cell_mask[:n_shallow].any(), "the shallow cells were not dropped"
+    assert int((~gene_mask).sum()) > 0, "the gene filter excluded nothing"
+    n_scorable = int((score > 0).sum())
+    assert n_scorable < min(1200, int(gene_mask.sum())), (
+        "there are at least as many scorable genes as slots, so the ranking "
+        "never has to break a zero-score tie and this test proves nothing"
+    )
+
+    leaked = int((selected & ~gene_mask).sum())
+    assert leaked == 0, (
+        f"{leaked} genes quality control excluded are in the model's panel"
+    )
+    assert selected.sum() > 0, "nothing was selected, so this proves nothing"
+
+
+def test_the_histogram_edges_are_fixed_and_hold_no_measurement(synthetic_store):
+    """A data-derived bin edge is a data point.
+
+    The lowest edge of a data-derived grid IS the exact value of one cell or
+    one gene in this dataset, and the highest is another's. Sending only bin
+    counts and then sending those two as the axis sends two per-cell
+    measurements out of the site under the name of a label.
+    """
+    from chiron.datasets.__main__ import QC_HIST_EDGES, HVG_SCORE_HIST_EDGES
+
+    apply_recipe(synthetic_store, RECIPES["tabula"], None, LOG)
+    a = attrs(synthetic_store)
+
+    assert a["chiron_qc_detected_per_cell_edges"] == list(QC_HIST_EDGES)
+    assert a["chiron_qc_cells_per_gene_edges"] == list(QC_HIST_EDGES)
+
+    # The HVG scores get their own grid: over-dispersion sits mostly below 1,
+    # so the count grid would clip most genes into the first bin.
+    expected_log10 = [float(np.log10(e)) for e in HVG_SCORE_HIST_EDGES]
+    recorded = a["chiron_hvg_histogram_edges_log10"]
+    assert len(recorded) == len(expected_log10)
+    assert np.allclose(recorded, expected_log10)
+    assert min(HVG_SCORE_HIST_EDGES) < 1.0, (
+        "the score grid starts at or above 1, so it cannot represent the "
+        "genes that vary less than Poisson noise"
+    )
+
+
+def test_the_histogram_counts_every_observation(synthetic_store):
+    """An edge that overshoots the minimum through floating point drops every
+    value tied at it, which on a cells-per-gene distribution is thousands."""
+    apply_recipe(synthetic_store, RECIPES["tabula"], None, LOG)
+    a = attrs(synthetic_store)
+    root = zarr.open_group(str(synthetic_store), mode="r")
+    n_vars = int(root["var"]["_index"].shape[0])
+
+    binned = sum(a["chiron_qc_cells_per_gene_counts"])
+    zeros = a["chiron_qc_cells_per_gene_zero"]
+    assert binned + zeros == n_vars, (
+        f"{n_vars - binned - zeros} genes fell outside every bin"
+    )
+
+
+def test_an_artifact_no_reader_can_see_is_not_a_satisfied_stage(
+    synthetic_store, monkeypatch
+):
+    """The one error this pipeline must not swallow.
+
+    A store whose consolidated index could not be rebuilt has its artifact on
+    disk and invisible to every reader. Recording that as satisfied leaves the
+    store advertising a preparation that is not there.
+    """
+    import zarr as zarr_module
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(zarr_module, "consolidate_metadata", refuse)
+    result = apply_recipe(synthetic_store, RECIPES["tabula"], None, LOG)
+
+    assert not result["stages"]["quality_control"]["satisfied"]
+    assert "invisible" in result["stages"]["quality_control"]["reason"]
+    assert result["complete"] is False
+
+
+def test_the_embedding_refuses_rather_than_drawing_excluded_cells(
+    synthetic_store,
+):
+    """A missing mask means quality control did not run, not that it kept
+    everything. Empty droplets cluster, so embedding them would show the
+    operator a confident blob the run will never see."""
+    apply_recipe(synthetic_store, RECIPES["tabula"], None, LOG)
+    root = zarr.open_group(str(synthetic_store), mode="r+")
+    del root["obs"]["chiron_qc_cell_mask"]
+    zarr.consolidate_metadata(root.store)
+
+    from chiron.datasets.__main__ import _ensure_umap_embedding
+
+    result = _ensure_umap_embedding(synthetic_store, {}, LOG)
+    assert result.refused and "cell mask" in result.refused
+
+
+def test_geneformers_cell_floor_works_on_a_dense_store(tmp_path):
+    """The only knob the Geneformer recipe exposes assumed a sparse matrix."""
+    if not CELLXGENE_H5AD.exists():
+        pytest.skip(f"{CELLXGENE_H5AD} not present")
+    adata = ad.read_h5ad(CELLXGENE_H5AD)[:150].copy()
+    adata.X = np.asarray(adata.X.todense())
+    path = tmp_path / "dense.zarr"
+    adata.write_zarr(path)
+
+    result = apply_recipe(
+        path, RECIPES["geneformer"], {"geneformer_min_genes_per_cell": 400}, LOG
+    )
+    stage = result["stages"]["rank_ordering"]
+    assert stage["satisfied"], stage.get("reason")
+    assert stage["stats"]["n_cells_empty"] > 0
+
+
+def test_a_failed_request_can_be_retried_unchanged(tmp_path):
+    """The request id is a digest of what was asked for, so a retry of a
+    request that failed for an external reason is the same request. Treating it
+    as already handled made it unfixable without changing a parameter the
+    operator does not want to change."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    status_file = _write_request(data_dir, "demo", "tabula", {"min_cells_per_gene": 40})
+
+    convert_anndata_to_zarr(str(data_dir))
+    assert json.loads(status_file.read_text())["state"] == "error"
+
+    # The operator stages the dataset and presses Apply again, unchanged.
+    dataset_dir = data_dir / "demo"
+    dataset_dir.mkdir()
+    (dataset_dir / "manifest.yaml").write_text(
+        "id: demo\nname: Demo\nauthorized_users:\n- '*'\n"
+    )
+    _write_synthetic(dataset_dir / "demo.zarr")
+
+    convert_anndata_to_zarr(str(data_dir))
+
+    status = json.loads(status_file.read_text())
+    assert status["state"] == "done", status
+    assert attrs(dataset_dir / "demo.zarr")["chiron_qc_min_cells_per_gene"] == 40
