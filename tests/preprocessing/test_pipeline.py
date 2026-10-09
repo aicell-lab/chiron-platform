@@ -1,0 +1,534 @@
+"""The recipes applied to real zarr stores.
+
+test_recipes.py proves the machinery decides correctly. This proves the data
+server then does what was decided, on disk, where the things that actually go
+wrong live: a stage that writes but is not recorded, a recompute that leaves
+the old artifact behind, one model's preprocessing stepping on another's, and a
+re-apply that silently reverts to defaults.
+
+Two fixtures. ``synthetic_store`` is built from scratch and is enough for
+everything about Tabula and about the chain rule. ``cellxgene_store`` is a
+subset of a real CELLxGENE download and is the only one Geneformer can use,
+because its gene set is its own vocabulary and synthetic gene ids match
+nothing; those tests skip when the download is absent.
+"""
+
+import hashlib
+import json
+import shutil
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worker"))
+
+import anndata as ad  # noqa: E402
+import scipy.sparse as sp  # noqa: E402
+import zarr  # noqa: E402
+
+ad.settings.zarr_write_format = 3
+
+from chiron.datasets.__main__ import (  # noqa: E402
+    GENEFORMER_GROUP,
+    PREP_ATTR_PREFIX,
+    PREP_REQUEST_PREFIX,
+    PREP_STATUS_PREFIX,
+    RECIPES,
+    apply_recipe,
+    convert_anndata_to_zarr,
+)
+from chiron.datasets.recipes import resolve_params  # noqa: E402
+
+CELLXGENE_H5AD = Path("/home/nmechtel/gf-val/entorhinal.h5ad")
+
+try:  # pragma: no cover - import shape only
+    from bioengine.utils import create_logger
+
+    LOG = create_logger("test-preprocessing")
+except Exception:  # pragma: no cover
+    import logging
+
+    LOG = logging.getLogger("test-preprocessing")
+
+
+# --------------------------------------------------------------------------
+# Fixtures
+# --------------------------------------------------------------------------
+
+
+def _write_synthetic(path: Path, n_cells=1500, n_genes=4000, seed=0):
+    """A raw-counts store calibrated so every threshold in these tests bites.
+
+    Wider than the model's 1,200-gene input on purpose: a store at or below
+    that width is already a selected panel, the guard says so, and every stage
+    would refuse, which would make these tests pass for the wrong reason.
+
+    Both axes are deliberately uneven, and both have to be. Per-gene detection
+    rates spread so that moving the gene filter changes which genes survive;
+    per-cell sequencing depth spread so that moving the cell filter changes
+    which cells do. A fixture uniform on either axis would let a test that
+    changed that threshold pass while measuring nothing, because the before and
+    after would be identical.
+
+    At the published defaults this keeps roughly 1,357 of 1,500 cells and 2,413
+    of 4,000 genes, which leaves more genes than the model's input width, so
+    the selection is a real selection rather than "whatever survived".
+    """
+    rng = np.random.default_rng(seed)
+    rates = rng.uniform(0.10, 0.90, size=n_genes)        # per-gene detection
+    depth = 10 ** rng.uniform(-1.0, 0.0, size=n_cells)   # per-cell depth
+    probability = np.clip(rates[None, :] * depth[:, None], 0.0, 1.0)
+    dense = (rng.random((n_cells, n_genes)) < probability).astype(np.float32)
+    dense *= rng.integers(1, 40, size=(n_cells, n_genes)).astype(np.float32)
+    adata = ad.AnnData(X=sp.csr_matrix(dense))
+    adata.var_names = [f"GENE{i:05d}" for i in range(n_genes)]
+    adata.obs_names = [f"CELL{i:05d}" for i in range(n_cells)]
+    if path.exists():
+        shutil.rmtree(path)
+    adata.write_zarr(path)
+    return path
+
+
+@pytest.fixture
+def synthetic_store(tmp_path):
+    return _write_synthetic(tmp_path / "synthetic.zarr")
+
+
+@pytest.fixture
+def cellxgene_store(tmp_path):
+    if not CELLXGENE_H5AD.exists():
+        pytest.skip(f"{CELLXGENE_H5AD} not present")
+    adata = ad.read_h5ad(CELLXGENE_H5AD)
+    # 400 cells is enough to exercise every path and keeps the file small.
+    subset = adata[:400].copy()
+    path = tmp_path / "cellxgene.zarr"
+    subset.write_zarr(path)
+    return path
+
+
+# --------------------------------------------------------------------------
+# Snapshot helpers
+# --------------------------------------------------------------------------
+
+
+def _digest(node):
+    value = np.asarray(node[...])
+    # An object-dtype array's buffer holds pointers, so hashing it compares
+    # heap addresses and calls two identical string columns different.
+    if value.dtype == object or value.dtype.kind in "USO":
+        payload = repr(value.astype(str).tolist()).encode()
+    else:
+        payload = np.ascontiguousarray(value).tobytes()
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _walk(group, prefix=""):
+    out = {}
+    for name in sorted(group):
+        node = group[name]
+        path = f"{prefix}{name}"
+        if isinstance(node, zarr.Group):
+            out.update(_walk(node, path + "/"))
+        else:
+            out[path] = _digest(node)
+    return out
+
+
+def snapshot(path):
+    """Every array in the store, by path, as a content digest."""
+    return _walk(zarr.open_group(str(path), mode="r"))
+
+
+def attrs(path):
+    return dict(zarr.open_group(str(path), mode="r").attrs)
+
+
+def state(path, family):
+    return attrs(path).get(f"{PREP_ATTR_PREFIX}{family}") or {}
+
+
+def tabula_keys(snap):
+    return {
+        k: v
+        for k, v in snap.items()
+        if GENEFORMER_GROUP not in k and "chiron_" in k
+    }
+
+
+def geneformer_keys(snap):
+    return {k: v for k, v in snap.items() if GENEFORMER_GROUP in k}
+
+
+def source_keys(snap):
+    return {
+        k: v
+        for k, v in snap.items()
+        if GENEFORMER_GROUP not in k and "chiron_" not in k
+    }
+
+
+# --------------------------------------------------------------------------
+# A fresh store
+# --------------------------------------------------------------------------
+
+
+def test_a_fresh_store_gets_the_whole_tabula_chain(synthetic_store):
+    result = apply_recipe(synthetic_store, RECIPES["tabula"], None, LOG)
+
+    assert result["changed"] is True
+    stages = result["stages"]
+    assert set(stages) == {s.name for s in RECIPES["tabula"].stages}
+    for name in ("quality_control", "hvg_ranking", "binning"):
+        assert stages[name]["satisfied"], f"{name}: {stages[name].get('reason')}"
+
+    snap = snapshot(synthetic_store)
+    assert "obs/chiron_qc_cell_mask" in snap
+    assert "var/chiron_qc_gene_mask" in snap
+    assert "var/chiron_hvg_selected" in snap
+    assert "layers/chiron_binned" in snap
+
+
+def test_the_recorded_parameters_are_the_ones_that_ran(synthetic_store):
+    apply_recipe(synthetic_store, RECIPES["tabula"], {"min_cells_per_gene": 111}, LOG)
+    recorded = state(synthetic_store, "tabula")
+    assert recorded["params"]["min_cells_per_gene"] == 111
+    assert recorded["stages"]["quality_control"]["params"]["min_cells_per_gene"] == 111
+    # And the store's own quality-control attrs agree with the recipe's record,
+    # so there is no way for the two to drift and both look right.
+    assert attrs(synthetic_store)["chiron_qc_min_cells_per_gene"] == 111
+
+
+def test_a_second_apply_writes_nothing_and_changes_nothing(synthetic_store):
+    apply_recipe(synthetic_store, RECIPES["tabula"], None, LOG)
+    before = snapshot(synthetic_store)
+    before_attrs = attrs(synthetic_store)
+
+    result = apply_recipe(synthetic_store, RECIPES["tabula"], None, LOG)
+
+    assert result["changed"] is False
+    assert snapshot(synthetic_store) == before
+    assert attrs(synthetic_store) == before_attrs
+
+
+# --------------------------------------------------------------------------
+# The chain rule, on disk
+# --------------------------------------------------------------------------
+
+
+def test_changing_the_gene_filter_reselects_the_gene_panel(synthetic_store):
+    """The defect the chain rule exists to prevent, measured.
+
+    The HVG stage has no parameters, so a presence check would leave its
+    output alone and the store would carry a panel selected behind one filter
+    while recording another. Here the panel has to actually change.
+    """
+    apply_recipe(synthetic_store, RECIPES["tabula"], {"min_cells_per_gene": 60}, LOG)
+    loose_selected = np.asarray(
+        zarr.open_group(str(synthetic_store), mode="r")["var"]["chiron_hvg_selected"][:]
+    )
+    loose_genes = int(attrs(synthetic_store)["chiron_qc_n_genes_kept"])
+
+    apply_recipe(synthetic_store, RECIPES["tabula"], {"min_cells_per_gene": 400}, LOG)
+    strict_selected = np.asarray(
+        zarr.open_group(str(synthetic_store), mode="r")["var"]["chiron_hvg_selected"][:]
+    )
+    strict_genes = int(attrs(synthetic_store)["chiron_qc_n_genes_kept"])
+
+    assert strict_genes < loose_genes, "a stricter filter must keep fewer genes"
+    assert not np.array_equal(loose_selected, strict_selected), (
+        "the gene panel did not move when the filter it is selected from did, "
+        "which is exactly the silent failure the chain rule is for"
+    )
+    # No gene the filter excluded can be in the panel.
+    gene_mask = np.asarray(
+        zarr.open_group(str(synthetic_store), mode="r")["var"]["chiron_qc_gene_mask"][:]
+    )
+    assert not (strict_selected & ~gene_mask).any()
+
+
+def test_changing_the_gene_filter_reruns_everything_downstream(synthetic_store):
+    apply_recipe(synthetic_store, RECIPES["tabula"], {"min_cells_per_gene": 60}, LOG)
+    before = snapshot(synthetic_store)
+
+    apply_recipe(synthetic_store, RECIPES["tabula"], {"min_cells_per_gene": 400}, LOG)
+    after = snapshot(synthetic_store)
+
+    for key in (
+        "var/chiron_qc_gene_mask",
+        "var/chiron_hvg_score",
+        "var/chiron_hvg_selected",
+        "layers/chiron_binned",
+    ):
+        assert before[key] != after[key], f"{key} was not recomputed"
+
+
+def test_the_cell_filter_decides_which_cells_the_panel_is_scored_across(
+    synthetic_store,
+):
+    """The Methods order, measured rather than asserted from a comment."""
+    apply_recipe(synthetic_store, RECIPES["tabula"], {"min_genes_per_cell": 0}, LOG)
+    all_cells = snapshot(synthetic_store)["var/chiron_hvg_score"]
+    n_all = int(attrs(synthetic_store)["chiron_hvg_n_cells_scored"])
+
+    apply_recipe(synthetic_store, RECIPES["tabula"], {"min_genes_per_cell": 600}, LOG)
+    some_cells = snapshot(synthetic_store)["var/chiron_hvg_score"]
+    n_some = int(attrs(synthetic_store)["chiron_hvg_n_cells_scored"])
+
+    assert n_some < n_all, "a cell filter that drops nothing proves nothing here"
+    assert all_cells != some_cells, (
+        "variability was scored across the same cells before and after a cell "
+        "filter changed, so quality control is not in front of it"
+    )
+
+
+def test_a_bad_parameter_raises_and_leaves_the_store_alone(synthetic_store):
+    apply_recipe(synthetic_store, RECIPES["tabula"], None, LOG)
+    before = snapshot(synthetic_store)
+
+    with pytest.raises(ValueError, match="n_hvg is fixed"):
+        apply_recipe(synthetic_store, RECIPES["tabula"], {"n_hvg": 42}, LOG)
+
+    assert snapshot(synthetic_store) == before
+
+
+def test_a_store_already_reduced_is_refused_and_blocks_the_rest():
+    """Refusal propagates, so no stage downstream produces a confident wrong
+    answer on data its input never got applied to."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 800 genes, below the 1,200-gene input width, so this is a panel and
+        # not a transcriptome.
+        path = _write_synthetic(Path(tmp) / "reduced.zarr", n_cells=300, n_genes=800)
+        result = apply_recipe(path, RECIPES["tabula"], None, LOG)
+
+        stages = result["stages"]
+        assert stages["quality_control"]["refused"] is True
+        assert "already a selected panel" in stages["quality_control"]["reason"]
+        for name in ("hvg_ranking", "binning", "umap"):
+            assert not stages[name]["satisfied"]
+            assert stages[name].get("blocked") is True
+        assert result["complete"] is False
+        # And nothing was written.
+        assert "layers/chiron_binned" not in snapshot(path)
+
+
+# --------------------------------------------------------------------------
+# Two models on one store
+# --------------------------------------------------------------------------
+
+
+def test_geneformer_leaves_every_tabula_artifact_alone(cellxgene_store):
+    apply_recipe(cellxgene_store, RECIPES["tabula"], None, LOG)
+    before = snapshot(cellxgene_store)
+    before_tabula = tabula_keys(before)
+    before_source = source_keys(before)
+
+    result = apply_recipe(cellxgene_store, RECIPES["geneformer"], None, LOG)
+    assert result["stages"]["rank_ordering"]["satisfied"], result["stages"]
+
+    after = snapshot(cellxgene_store)
+    assert tabula_keys(after) == before_tabula
+    assert source_keys(after) == before_source
+    assert geneformer_keys(after), "the ordering was not written"
+
+
+def test_tabula_leaves_the_geneformer_ordering_alone(cellxgene_store):
+    apply_recipe(cellxgene_store, RECIPES["geneformer"], None, LOG)
+    before = geneformer_keys(snapshot(cellxgene_store))
+    before_state = state(cellxgene_store, "geneformer")
+
+    apply_recipe(cellxgene_store, RECIPES["tabula"], None, LOG)
+
+    assert geneformer_keys(snapshot(cellxgene_store)) == before
+    assert state(cellxgene_store, "geneformer") == before_state
+
+
+def test_the_two_recipes_share_no_key(cellxgene_store):
+    """Structural, not conventional. If this holds, no ordering of the two can
+    make one overwrite the other, whatever either does later."""
+    apply_recipe(cellxgene_store, RECIPES["tabula"], None, LOG)
+    apply_recipe(cellxgene_store, RECIPES["geneformer"], None, LOG)
+
+    snap = snapshot(cellxgene_store)
+    assert not (set(tabula_keys(snap)) & set(geneformer_keys(snap)))
+
+    tabula_attrs = {k for k in attrs(cellxgene_store) if k.startswith("chiron_")
+                    and "geneformer" not in k}
+    gene_attrs = {k for k in attrs(cellxgene_store) if "geneformer" in k}
+    assert not (tabula_attrs & gene_attrs)
+
+
+def test_changing_tabula_s_filter_does_not_touch_geneformer(cellxgene_store):
+    apply_recipe(cellxgene_store, RECIPES["geneformer"], None, LOG)
+    apply_recipe(cellxgene_store, RECIPES["tabula"], {"min_cells_per_gene": 60}, LOG)
+    before = geneformer_keys(snapshot(cellxgene_store))
+
+    apply_recipe(cellxgene_store, RECIPES["tabula"], {"min_cells_per_gene": 150}, LOG)
+
+    assert geneformer_keys(snapshot(cellxgene_store)) == before
+
+
+def test_geneformer_is_idempotent_under_this_protocol(cellxgene_store):
+    """The request's own wording: a dataset preprocessed with this protocol
+    before should not be processed again."""
+    apply_recipe(cellxgene_store, RECIPES["geneformer"], None, LOG)
+    before, before_attrs = snapshot(cellxgene_store), attrs(cellxgene_store)
+
+    result = apply_recipe(cellxgene_store, RECIPES["geneformer"], None, LOG)
+
+    assert result["changed"] is False
+    assert snapshot(cellxgene_store) == before
+    assert attrs(cellxgene_store) == before_attrs
+
+
+def test_geneformer_s_cell_floor_changes_the_ordering(cellxgene_store):
+    apply_recipe(cellxgene_store, RECIPES["geneformer"], None, LOG)
+    before = geneformer_keys(snapshot(cellxgene_store))
+    empty_before = attrs(cellxgene_store)["chiron_geneformer_n_cells_empty"]
+
+    apply_recipe(
+        cellxgene_store,
+        RECIPES["geneformer"],
+        {"geneformer_min_genes_per_cell": 400},
+        LOG,
+    )
+
+    assert geneformer_keys(snapshot(cellxgene_store)) != before
+    assert attrs(cellxgene_store)["chiron_geneformer_n_cells_empty"] > empty_before
+
+
+# --------------------------------------------------------------------------
+# The request path
+# --------------------------------------------------------------------------
+
+
+def _data_dir_with(tmp_path, store_builder, dataset_id="demo"):
+    """A data directory shaped the way the data server expects one."""
+    data_dir = tmp_path / "data"
+    dataset_dir = data_dir / dataset_id
+    dataset_dir.mkdir(parents=True)
+    (dataset_dir / "manifest.yaml").write_text(
+        f"id: {dataset_id}\nname: Demo\nauthorized_users:\n- '*'\n"
+    )
+    store_builder(dataset_dir / "demo.zarr")
+    return data_dir, dataset_dir
+
+
+def _write_request(data_dir, dataset_id, family, params, request_id="req-1"):
+    """What the manager writes through bioengine's /save endpoint."""
+    user_dir = data_dir / "saved" / "someone"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    name = f"{PREP_REQUEST_PREFIX}{dataset_id}-{family}.json"
+    (user_dir / name).write_text(
+        json.dumps(
+            {
+                "request_id": request_id,
+                "dataset_id": dataset_id,
+                "model_family": family,
+                "params": params,
+            }
+        )
+    )
+    return user_dir / (PREP_STATUS_PREFIX + name[len(PREP_REQUEST_PREFIX):])
+
+
+def test_a_request_is_applied_and_its_status_written(tmp_path):
+    data_dir, dataset_dir = _data_dir_with(tmp_path, _write_synthetic)
+    status_file = _write_request(data_dir, "demo", "tabula", {"min_cells_per_gene": 40})
+
+    convert_anndata_to_zarr(str(data_dir))
+
+    assert status_file.exists(), "the data server wrote no status back"
+    status = json.loads(status_file.read_text())
+    assert status["state"] == "done", status
+    assert status["request_id"] == "req-1"
+    assert status["fingerprint"]
+    assert "demo.zarr" in status["stores"]
+
+    store = dataset_dir / "demo.zarr"
+    assert attrs(store)["chiron_qc_min_cells_per_gene"] == 40
+
+
+def test_a_handled_request_is_not_applied_twice(tmp_path):
+    data_dir, _ = _data_dir_with(tmp_path, _write_synthetic)
+    status_file = _write_request(data_dir, "demo", "tabula", {"min_cells_per_gene": 40})
+
+    convert_anndata_to_zarr(str(data_dir))
+    first = status_file.read_text()
+    convert_anndata_to_zarr(str(data_dir))
+
+    assert status_file.read_text() == first
+
+
+def test_the_periodic_scan_does_not_revert_a_requested_threshold(tmp_path):
+    """The scan runs every thirty seconds. If it re-applied defaults it would
+    undo an organiser's setting within half a minute, and the store would look
+    correct the whole time."""
+    data_dir, dataset_dir = _data_dir_with(tmp_path, _write_synthetic)
+    _write_request(data_dir, "demo", "tabula", {"min_cells_per_gene": 40})
+
+    convert_anndata_to_zarr(str(data_dir))
+    store = dataset_dir / "demo.zarr"
+    after_request = snapshot(store)
+
+    convert_anndata_to_zarr(str(data_dir))  # the next poll
+    convert_anndata_to_zarr(str(data_dir))  # and the one after that
+
+    assert attrs(store)["chiron_qc_min_cells_per_gene"] == 40
+    assert snapshot(store) == after_request
+
+
+def test_a_request_for_an_unknown_dataset_reports_why(tmp_path):
+    data_dir, _ = _data_dir_with(tmp_path, _write_synthetic)
+    status_file = _write_request(data_dir, "nope", "tabula", {})
+
+    convert_anndata_to_zarr(str(data_dir))
+
+    status = json.loads(status_file.read_text())
+    assert status["state"] == "error"
+    assert "no dataset 'nope'" in status["error"]
+    assert "demo" in status["error"], "it should say what the site does hold"
+
+
+def test_a_request_with_a_bad_parameter_reports_why(tmp_path):
+    data_dir, _ = _data_dir_with(tmp_path, _write_synthetic)
+    status_file = _write_request(data_dir, "demo", "tabula", {"n_hvg": 10})
+
+    convert_anndata_to_zarr(str(data_dir))
+
+    status = json.loads(status_file.read_text())
+    assert status["state"] == "error"
+    assert "n_hvg is fixed" in status["error"]
+
+
+def test_a_request_for_an_unknown_model_reports_why(tmp_path):
+    data_dir, _ = _data_dir_with(tmp_path, _write_synthetic)
+    status_file = _write_request(data_dir, "demo", "scgpt", {})
+
+    convert_anndata_to_zarr(str(data_dir))
+
+    status = json.loads(status_file.read_text())
+    assert status["state"] == "error"
+    assert "scgpt" in status["error"]
+
+
+def test_a_fresh_scan_prepares_tabula_by_default(tmp_path):
+    """What this server did before recipes existed, and what every site's
+    prepared data already expects."""
+    data_dir, dataset_dir = _data_dir_with(tmp_path, _write_synthetic)
+
+    convert_anndata_to_zarr(str(data_dir))
+
+    store = dataset_dir / "demo.zarr"
+    assert state(store, "tabula")["stages"]["quality_control"]["satisfied"]
+    assert not state(store, "geneformer")
+
+
+def test_the_schema_the_manager_will_serve_is_json_safe():
+    for recipe in RECIPES.values():
+        described = recipe.describe()
+        json.dumps(described)  # raises if anything is not serialisable
+        assert described["defaults"] == resolve_params(recipe)

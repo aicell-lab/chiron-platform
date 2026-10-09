@@ -10,6 +10,7 @@ Run as `python -m chiron.datasets --data-dir /data`.
 
 import argparse
 import hashlib
+import json
 import os
 import pickle
 import sys
@@ -17,13 +18,26 @@ import tempfile
 import threading
 import time
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional
 
 import anndata as ad
 import numpy as np
 import zarr
 from bioengine.datasets.proxy_server import start_proxy_server
 from bioengine.utils import create_logger
+
+from chiron.datasets.recipes import (
+    Param,
+    Recipe,
+    Stage,
+    StageResult,
+    blank_state,
+    check_recipe,
+    plan,
+    resolve_params,
+)
 
 # Set zarr format to v3
 ad.settings.zarr_write_format = 3
@@ -182,33 +196,33 @@ def _register_var_columns(root, names, logger) -> bool:
     return bool(registered)
 
 
-def _ensure_var_columns_visible(zarr_path: Path, logger) -> bool:
-    """Pipeline step: register the HVG arrays as var columns.
+def _ensure_var_columns_visible(
+    zarr_path: Path, params: Mapping[str, Any], logger
+) -> StageResult:
+    """Pipeline step: register the HVG and quality-control arrays as var columns.
 
-    Separate from `_ensure_hvg_rank` rather than folded into it, because the
-    ranking is idempotent on HVG_VERSION and every dataset already prepared is
-    at the current version. Folding this in would fix new datasets only and
-    leave every existing one unreadable, for a change that costs no recompute.
+    Separate from the stages that write them, because registration is pure
+    metadata: a store already ranked at the current version needs its columns
+    registered without paying for a recompute. Keeping it separate is also what
+    lets a reader going through anndata see the masks at all.
     """
-    try:
-        root = zarr.open_group(str(zarr_path), mode="a")
-    except Exception as e:
-        logger.warning(f"Cannot open {zarr_path.name} to register var columns: {e}")
-        return False
-
-    if not _register_var_columns(
-        root, (HVG_RANK_KEY, HVG_SCORE_KEY, HVG_SELECTED_KEY), logger
-    ):
-        return False
-
-    try:
-        zarr.consolidate_metadata(root.store)
-    except Exception as e:
-        logger.warning(
-            f"{zarr_path.name}: consolidate_metadata failed after registering var "
-            f"columns, so anndata readers may still not see the HVG mask: {e}"
-        )
-    return True
+    root = zarr.open_group(str(zarr_path), mode="a")
+    registered = _register_var_columns(
+        root,
+        (HVG_RANK_KEY, HVG_SCORE_KEY, HVG_SELECTED_KEY, QC_GENE_MASK_KEY),
+        logger,
+    )
+    if registered:
+        try:
+            zarr.consolidate_metadata(root.store)
+        except Exception as e:
+            logger.warning(
+                f"{zarr_path.name}: consolidate_metadata failed after registering "
+                f"var columns, so anndata readers may still not see the masks: {e}"
+            )
+    # Satisfied either way. "Nothing needed registering" is success, not a
+    # refusal, and treating it as one would block every stage behind it.
+    return StageResult(True, stats={"registered": bool(registered)})
 
 
 # The HVG ranking is written into each zarr's var/ group so the trainer
@@ -220,7 +234,8 @@ def _ensure_var_columns_visible(zarr_path: Path, logger) -> bool:
 # manuscript's 1200-HVG preprocessing without giving operators a knob they
 # could tune. Whatever cell- or gene-level quality control the site operator
 # applies upstream of Chiron is preserved untouched.
-HVG_VERSION = 4  # bumped 3 -> 4: HVG scored on full matrix, no internal QC filter
+HVG_VERSION = 5  # bumped 4 -> 5: scored behind the quality-control masks, as
+#                  the Methods order it, which changes which genes are selected
 # Plain over-dispersion: variance / mean. For NB-distributed counts (raw single
 # cell) a value > 1 means the gene varies more than Poisson noise predicts,
 # which is the classical "highly variable" signal. Works on raw counts and on
@@ -246,11 +261,17 @@ HVG_SELECTED_KEY = "chiron_hvg_selected"  # bool, length n_vars, under var/
 # design exists to avoid. A mask costs one bit per cell and per gene, leaves
 # the source readable by a model that wants the full panel, and lets a reader
 # see what was excluded instead of only what survived.
-QC_VERSION = 1
-QC_MIN_GENES_PER_CELL = 250
-QC_MIN_CELLS_PER_GENE = 250
+QC_VERSION = 2  # bumped 1 -> 2: thresholds are parameters, and the two
+#                 distributions they cut through are recorded alongside them
+QC_MIN_GENES_PER_CELL = 250  # the manuscript's value, and the default
+QC_MIN_CELLS_PER_GENE = 250  # the manuscript's value, and the default
 QC_CELL_MASK_KEY = "chiron_qc_cell_mask"  # bool, length n_obs, under obs/
 QC_GENE_MASK_KEY = "chiron_qc_gene_mask"  # bool, length n_vars, under var/
+# Bins in the two distributions quality control records. Both quantities are
+# heavy-tailed, so the bins are log-spaced and 20 of them covers four orders of
+# magnitude at five bins per decade, which is enough to see where a threshold
+# falls without sending a number per cell.
+QC_HIST_BINS = 20
 
 # A store can arrive already reduced to some model's gene panel, and the
 # pipeline below must not treat it as raw. The failure mode is silent rather
@@ -293,7 +314,7 @@ def _detect_upstream_reduction(root, n_vars: int):
     return None
 
 
-HVG_HIST_VERSION = 2  # bumped: counts are now a root attr, not a compressed chunked array
+HVG_HIST_VERSION = 3  # bumped 2 -> 3: scores it summarises are now post-QC
 HVG_HIST_KEY = "chiron_hvg_histogram_counts"  # legacy var/ name kept for cleanup of older zarrs
 HVG_HIST_BINS = 20
 
@@ -304,7 +325,7 @@ HVG_HIST_BINS = 20
 # UMAP run on the pre-cut binned layer (all cells x top MODEL_IN_FEATURE
 # HVGs), so the dataset card shows the operator exactly the matrix the
 # trainer consumes.
-UMAP_VERSION = 3  # bumped 2 -> 3: binned layer now covers all cells (no internal QC)
+UMAP_VERSION = 4  # bumped 3 -> 4: embeds the cells that passed quality control
 UMAP_METHOD = "incrementalpca50+umap"
 UMAP_COORDS_KEY = "chiron_umap_coords"
 UMAP_INDICES_KEY = "chiron_umap_indices"
@@ -321,7 +342,7 @@ PCA_BATCH_BYTES_BUDGET = 256 * 1024 * 1024   # 256 MB / batch is generous
 # the same model-ready matrix shape the manuscript's value-binning + 1200-HVG
 # preprocessing produces. Cell-level filtering is left to whatever the site
 # operator does upstream.
-BINNING_VERSION = 3  # bumped 2 -> 3: layer covers all cells (no internal QC)
+BINNING_VERSION = 4  # bumped 3 -> 4: cut to a panel selected behind the QC masks
 BINNING_N_BINS = 50
 BINNING_LAYER_KEY = "chiron_binned"  # under layers/
 
@@ -618,50 +639,49 @@ def _compute_per_cell_binning(X, n_bins: int = BINNING_N_BINS) -> np.ndarray:
     return out
 
 
-def _ensure_binning(zarr_path: Path, logger) -> bool:
+def _ensure_binning(
+    zarr_path: Path, params: Mapping[str, Any], logger
+) -> StageResult:
     """Write layers/chiron_binned into the zarr.
 
-    Shape is (n_cells, n_selected_genes) where n_selected_genes =
-    min(MODEL_IN_FEATURE, n_vars). This is the trainer-ready view of the
-    data so the trainer can stream a row at a time and feed it straight
-    into the model without any column or row reshaping. Requires the HVG
-    selection mask to have been written first; cell-level filtering is
-    left to whatever the site operator did upstream.
+    Shape is (n_cells, n_selected_genes), the trainer-ready view: the trainer
+    streams a row at a time and feeds it straight into the model with no column
+    or row reshaping.
 
-    Idempotent on BINNING_VERSION. Returns True if a write occurred.
+    The layer covers EVERY cell, including the ones quality control dropped, so
+    row *i* of the layer is still cell *i* of ``obs``. The cell mask is applied
+    by the trainer when it builds its index, not here. Cutting rows out of the
+    layer would silently break every reader that joins it back to ``obs`` by
+    position, and there is no spare column to carry the old index in.
+
+    The gene panel it is cut to was selected behind the masks, so the binning
+    depends on quality control even though it reads no mask itself.
     """
-    try:
-        root = zarr.open_group(str(zarr_path), mode="r+")
-    except Exception as e:
-        logger.warning(f"Cannot open {zarr_path.name} for binning: {e}")
-        return False
+    root = zarr.open_group(str(zarr_path), mode="r+")
 
-    existing_version = _read_attr(root, "chiron_binning_version")
-    has_binned = _find_key(root, "layers", BINNING_LAYER_KEY) is not None
-    if existing_version == BINNING_VERSION and has_binned:
-        return False
-
-    # Need HVG selection upstream of binning.
+    # Need the HVG selection upstream of binning.
     selected_key = _find_key(root, "var", HVG_SELECTED_KEY)
     if selected_key is None:
-        logger.warning(
-            f"{zarr_path.name}: HVG selection mask missing; binning skipped "
-            f"(run HVG rank first)"
+        return StageResult(
+            False,
+            refused="the HVG selection mask is absent, so there is no panel to cut to",
         )
-        return False
 
     X = _open_x(root, zarr_path, logger)
     if X is None:
-        return False
+        return StageResult(False, refused="X could not be read from this store")
     if X.shape[0] == 0 or X.shape[1] == 0:
-        return False
+        return StageResult(False, refused="this store has no cells or no genes")
 
     selected_mask = np.asarray(root["var"][selected_key][:], dtype=np.bool_)
     if not selected_mask.any():
-        logger.warning(
-            f"{zarr_path.name}: HVG selection is empty; binning skipped"
+        return StageResult(
+            False,
+            refused=(
+                "the HVG selection is empty, so quality control left no gene "
+                "the model could be given"
+            ),
         )
-        return False
 
     # All cells, top-n_selected genes. Only the selected panel is made dense,
     # so the working copy is as wide as the panel and not as wide as the store.
@@ -682,16 +702,20 @@ def _ensure_binning(zarr_path: Path, logger) -> bool:
     root.attrs["chiron_binning_n_cells"] = int(binned.shape[0])
     root.attrs["chiron_binning_n_genes"] = int(binned.shape[1])
 
-    try:
-        zarr.consolidate_metadata(root.store)
-    except Exception as e:
-        logger.warning(f"{zarr_path.name}: consolidate_metadata failed after binning: {e}")
+    _consolidate(root, zarr_path, "binning", logger)
 
     logger.info(
         f"{zarr_path.name}: wrote per-cell {BINNING_N_BINS}-bin discretisation "
         f"({binned.shape[0]} cells x {binned.shape[1]} selected HVGs)"
     )
-    return True
+    return StageResult(
+        True,
+        stats={
+            "n_bins": BINNING_N_BINS,
+            "n_cells": int(binned.shape[0]),
+            "n_genes": int(binned.shape[1]),
+        },
+    )
 
 
 def _sparse_column_ids(X):
@@ -723,7 +747,7 @@ def _sparse_column_ids(X):
     return np.repeat(np.arange(len(indptr) - 1, dtype=np.intp), np.diff(indptr))
 
 
-def _compute_qc_masks(X):
+def _compute_qc_masks(X, min_genes_per_cell: int, min_cells_per_gene: int):
     """Which cells and which genes survive the manuscript's quality control.
 
     Two filters, from the Methods: "we filtered cells with fewer than 250
@@ -752,10 +776,17 @@ def _compute_qc_masks(X):
 
     Args:
         X: (n_cells, n_genes) array-like, raw counts.
+        min_genes_per_cell: a cell is kept when it has at least this many
+            detected genes. The manuscript's value is 250.
+        min_cells_per_gene: a gene is kept when it is detected in at least this
+            many cells. The manuscript's value is 250.
 
     Returns:
-        (cell_mask, gene_mask) as bool arrays of length n_cells and n_genes.
-        True means keep.
+        ``(cell_mask, gene_mask, detected_per_cell, cells_per_gene)``. The two
+        masks are bool, True means keep. The two counts are returned rather
+        than discarded because they are what the thresholds were compared
+        against, and showing an operator the distribution their threshold cuts
+        through is the only way the number means anything to them.
     """
     n_cells, n_genes = int(X.shape[0]), int(X.shape[1])
     columns = _sparse_column_ids(X)
@@ -776,12 +807,57 @@ def _compute_qc_masks(X):
         detected_per_cell = nonzero.sum(axis=1)
         cells_per_gene = nonzero.sum(axis=0)
 
-    cell_mask = np.asarray(detected_per_cell) >= QC_MIN_GENES_PER_CELL
-    gene_mask = np.asarray(cells_per_gene) >= QC_MIN_CELLS_PER_GENE
-    return cell_mask.astype(bool), gene_mask.astype(bool)
+    cell_mask = np.asarray(detected_per_cell) >= int(min_genes_per_cell)
+    gene_mask = np.asarray(cells_per_gene) >= int(min_cells_per_gene)
+    return (
+        cell_mask.astype(bool),
+        gene_mask.astype(bool),
+        np.asarray(detected_per_cell),
+        np.asarray(cells_per_gene),
+    )
 
 
-def _compute_hvg_score(X) -> np.ndarray:
+def _log_histogram(values, n_bins: int = QC_HIST_BINS):
+    """A log-spaced histogram of a per-cell or per-gene count, as plain lists.
+
+    The two quantities the quality-control thresholds are compared against are
+    heavy-tailed: most genes are detected in a handful of cells and a few are
+    detected in nearly all of them. A linear histogram of that puts everything
+    in the first bin and says nothing, which is the whole reason the operator
+    cannot currently see where their threshold falls.
+
+    Zeros are counted separately rather than dropped. A store's number of
+    never-detected genes is exactly the kind of thing worth seeing, and log
+    bins have nowhere to put it.
+
+    Returns:
+        ``(counts, edges, n_zero)``. Lists, not arrays, because these go
+        straight into a zarr root attribute and over the wire as JSON.
+    """
+    values = np.asarray(values)
+    if values.size == 0:
+        return [], [], 0
+    n_zero = int(np.count_nonzero(values <= 0))
+    positive = values[values > 0]
+    if positive.size == 0:
+        return [], [], n_zero
+
+    low = float(positive.min())
+    high = float(positive.max())
+    if high <= low:
+        # Every value identical. One bin wide enough to hold it, so the UI has
+        # something to draw rather than a degenerate empty range.
+        return [int(positive.size)], [low, low + 1.0], n_zero
+
+    edges = np.logspace(np.log10(low), np.log10(high), n_bins + 1)
+    # The top edge must not fall below the maximum through floating point, or
+    # the largest value lands outside every bin and quietly vanishes.
+    edges[-1] = high * (1.0 + 1e-9)
+    counts, _ = np.histogram(positive, bins=edges)
+    return [int(c) for c in counts], [float(e) for e in edges], n_zero
+
+
+def _compute_hvg_score(X, cell_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """Per-gene over-dispersion score (variance / mean) for ranking.
 
     Dependency-free (numpy only). For Poisson-distributed counts the expected
@@ -796,52 +872,110 @@ def _compute_hvg_score(X) -> np.ndarray:
     implicit zero adds nothing to either one, only to the divisor. That makes
     the cost proportional to the stored values rather than to cells x genes,
     which is the difference between preparing a real full-panel store on a
-    normal machine and not being able to prepare it at all. The numbers are the
-    same ones the dense path produced, so nothing already ranked needs redoing.
+    normal machine and not being able to prepare it at all.
+
+    ``cell_mask`` restricts the score to the cells that survived quality
+    control, which is where the Methods put it: "we identified 1,200 highly
+    variable genes (HVGs) within each dataset after quality control". A gene
+    that varies wildly across empty droplets is an artefact of the droplets,
+    and scoring it against them is how it ends up in the panel. The mask is
+    applied a row block at a time, so excluding cells does not cost the
+    full-length row-index array this function exists to avoid.
 
     Args:
-        X: (n_cells, n_genes) array-like. A scipy CSR or CSC matrix is read
+        X: (n_cells, n_genes) array-like. A sparse CSR or CSC matrix is read
            through its stored arrays; anything else is treated as dense.
+        cell_mask: optional bool array of length n_cells, True to include.
+            None scores every cell.
 
     Returns:
         float32 array of length n_genes.
     """
-    columns = _sparse_column_ids(X)
-    if columns is not None:
-        n_cells, n_genes = int(X.shape[0]), int(X.shape[1])
-        if n_cells == 0 or n_genes == 0:
-            return np.zeros(n_genes, dtype=np.float32)
+    n_cells, n_genes = int(X.shape[0]), int(X.shape[1])
+    if n_cells == 0 or n_genes == 0:
+        return np.zeros(n_genes, dtype=np.float32)
 
+    if cell_mask is not None:
+        cell_mask = np.asarray(cell_mask, dtype=bool)
+        if cell_mask.shape[0] != n_cells:
+            raise ValueError(
+                f"cell_mask has {cell_mask.shape[0]} entries but X has "
+                f"{n_cells} rows"
+            )
+        n_used = int(cell_mask.sum())
+        if n_used == 0:
+            return np.zeros(n_genes, dtype=np.float32)
+    else:
+        n_used = n_cells
+
+    columns = _sparse_column_ids(X)
+    is_csr = columns is not None and getattr(X, "format", None) == "csr"
+
+    if columns is not None and (cell_mask is None or not is_csr):
+        # No mask, or CSC where a row restriction cannot be done blockwise.
         # float64 throughout: the stored values are float32, and E[X^2] on a
         # count matrix is large enough that accumulating it at float32 would
         # lose digits the subtraction below then depends on.
         values = np.asarray(X.data, dtype=np.float64)
+        if cell_mask is not None:
+            # CSC: X.indices holds row ids, which is exactly the selector.
+            keep = cell_mask[np.asarray(X.indices, dtype=np.intp)]
+            values, columns = values[keep], columns[keep]
         total = np.bincount(columns, weights=values, minlength=n_genes)
         total_sq = np.bincount(columns, weights=values * values, minlength=n_genes)
-
-        means = total / n_cells
-        # Population variance (ddof=0), matching what np.var returned here.
-        # Rounding can push an all-equal column a hair below zero.
-        vars_ = np.maximum(total_sq / n_cells - means * means, 0.0)
+    elif columns is not None:
+        # CSR with a mask. One row block at a time, so the temporaries are
+        # bounded by the block rather than by the number of stored values.
+        indptr = np.asarray(X.indptr, dtype=np.int64)
+        total = np.zeros(n_genes, dtype=np.float64)
+        total_sq = np.zeros(n_genes, dtype=np.float64)
+        block = 8192
+        for start in range(0, n_cells, block):
+            stop = min(n_cells, start + block)
+            lo, hi = int(indptr[start]), int(indptr[stop])
+            if hi <= lo:
+                continue
+            rows = np.repeat(
+                np.arange(start, stop), np.diff(indptr[start : stop + 1])
+            )
+            keep = cell_mask[rows]
+            if not keep.any():
+                continue
+            cols = columns[lo:hi][keep]
+            vals = np.asarray(X.data[lo:hi], dtype=np.float64)[keep]
+            total += np.bincount(cols, weights=vals, minlength=n_genes)
+            total_sq += np.bincount(cols, weights=vals * vals, minlength=n_genes)
     else:
-        X = np.asarray(X, dtype=np.float64)
-        if X.ndim != 2:
-            raise ValueError(f"Expected 2D expression matrix, got shape {X.shape}")
-        if X.shape[0] == 0 or X.shape[1] == 0:
-            return np.zeros(X.shape[1], dtype=np.float32)
+        dense = np.asarray(X, dtype=np.float64)
+        if dense.ndim != 2:
+            raise ValueError(f"Expected 2D expression matrix, got shape {dense.shape}")
+        if cell_mask is not None:
+            dense = dense[cell_mask]
+        means = dense.mean(axis=0)
+        vars_ = dense.var(axis=0)
+        score = np.where(means > 1e-12, vars_ / (means + 1e-12), 0.0)
+        return score.astype(np.float32)
 
-        means = X.mean(axis=0)
-        vars_ = X.var(axis=0)
-
+    means = total / n_used
+    # Population variance (ddof=0), matching what np.var returned here.
+    # Rounding can push an all-equal column a hair below zero.
+    vars_ = np.maximum(total_sq / n_used - means * means, 0.0)
     score = np.where(means > 1e-12, vars_ / (means + 1e-12), 0.0)
     return score.astype(np.float32)
 
 
-def _ensure_qc(zarr_path: Path, logger) -> bool:
+def _ensure_qc(zarr_path: Path, params: Mapping[str, Any], logger) -> StageResult:
     """Write obs/chiron_qc_cell_mask and var/chiron_qc_gene_mask.
 
     Stage 2 of the manuscript's pipeline, and the step HVG selection has to run
-    behind. Idempotent on QC_VERSION. Returns True if a write occurred.
+    behind. Both thresholds come from ``params`` rather than from a constant,
+    because they are the site's call: the manuscript's 250 was chosen against
+    datasets far larger than many sites hold, and on a small store "detected in
+    at least 250 cells" removes most of the gene panel.
+
+    Whether this needs to run at all is decided by the recipe planner, not
+    here. A stage that re-checked its own version attribute would be checking
+    the wrong thing, because two different thresholds write the same two keys.
 
     Refuses on a store that was already reduced upstream, which is not a
     conservative default but a correctness one. The cell filter counts detected
@@ -849,23 +983,16 @@ def _ensure_qc(zarr_path: Path, logger) -> bool:
     cut to 1,200 highly variable genes it removes most real cells rather than
     empty droplets: on the blood shard of the 1M corpus, 178,970 of 250,000.
     """
-    try:
-        root = zarr.open_group(str(zarr_path), mode="r+")
-    except Exception as e:
-        logger.warning(f"Cannot open {zarr_path.name} for QC: {e}")
-        return False
+    min_genes_per_cell = int(params["min_genes_per_cell"])
+    min_cells_per_gene = int(params["min_cells_per_gene"])
 
+    root = zarr.open_group(str(zarr_path), mode="r+")
     if "var" not in root or "obs" not in root:
-        logger.warning(f"{zarr_path.name}: no var/ or obs/ group; QC skipped")
-        return False
+        return StageResult(False, refused="this store has no var/ or obs/ group")
 
     var_group, obs_group = root["var"], root["obs"]
-    try:
-        var_index = _find_key(root, "var", "_index") or "_index"
-        n_vars = int(var_group[var_index].shape[0])
-    except Exception as e:
-        logger.warning(f"{zarr_path.name}: cannot size var/ for QC: {e}")
-        return False
+    var_index = _find_key(root, "var", "_index") or "_index"
+    n_vars = int(var_group[var_index].shape[0])
 
     reason = _detect_upstream_reduction(root, n_vars)
     if reason is not None:
@@ -873,18 +1000,15 @@ def _ensure_qc(zarr_path: Path, logger) -> bool:
             root.attrs[UPSTREAM_REDUCED_KEY] = True
             root.attrs[UPSTREAM_REDUCED_WHY_KEY] = reason
         logger.info(f"{zarr_path.name}: QC skipped, already reduced ({reason})")
-        return False
-
-    has_cell = _find_key(root, "obs", QC_CELL_MASK_KEY) is not None
-    has_gene = _find_key(root, "var", QC_GENE_MASK_KEY) is not None
-    if has_cell and has_gene and _read_attr(root, "chiron_qc_version") == QC_VERSION:
-        return False
+        return StageResult(False, refused=reason)
 
     X = _open_x(root, zarr_path, logger)
     if X is None:
-        return False
+        return StageResult(False, refused="X could not be read from this store")
 
-    cell_mask, gene_mask = _compute_qc_masks(X)
+    cell_mask, gene_mask, detected_per_cell, cells_per_gene = _compute_qc_masks(
+        X, min_genes_per_cell, min_cells_per_gene
+    )
 
     obs_group.create_array(
         QC_CELL_MASK_KEY, shape=cell_mask.shape, dtype=cell_mask.dtype, overwrite=True
@@ -894,96 +1018,163 @@ def _ensure_qc(zarr_path: Path, logger) -> bool:
     )[:] = gene_mask
 
     n_cells_kept, n_genes_kept = int(cell_mask.sum()), int(gene_mask.sum())
+    cell_counts, cell_edges, cell_zero = _log_histogram(detected_per_cell)
+    gene_counts, gene_edges, gene_zero = _log_histogram(cells_per_gene)
+
+    stats = {
+        "min_genes_per_cell": min_genes_per_cell,
+        "min_cells_per_gene": min_cells_per_gene,
+        "n_cells_total": int(cell_mask.size),
+        "n_cells_kept": n_cells_kept,
+        "n_genes_total": int(gene_mask.size),
+        "n_genes_kept": n_genes_kept,
+        # The distributions the thresholds cut through. Aggregate counts per
+        # bin, never a per-cell or per-gene value, so this says what the filter
+        # did without saying anything about any one cell.
+        "detected_per_cell_counts": cell_counts,
+        "detected_per_cell_edges": cell_edges,
+        "detected_per_cell_zero": cell_zero,
+        "cells_per_gene_counts": gene_counts,
+        "cells_per_gene_edges": gene_edges,
+        "cells_per_gene_zero": gene_zero,
+    }
+
     root.attrs["chiron_qc_version"] = QC_VERSION
-    root.attrs["chiron_qc_min_genes_per_cell"] = QC_MIN_GENES_PER_CELL
-    root.attrs["chiron_qc_min_cells_per_gene"] = QC_MIN_CELLS_PER_GENE
-    root.attrs["chiron_qc_n_cells_kept"] = n_cells_kept
-    root.attrs["chiron_qc_n_genes_kept"] = n_genes_kept
-    root.attrs["chiron_qc_n_cells_total"] = int(cell_mask.size)
-    root.attrs["chiron_qc_n_genes_total"] = int(gene_mask.size)
+    for key, value in stats.items():
+        root.attrs[f"chiron_qc_{key}"] = value
 
     # These stores carry consolidated metadata, so an array written after the
     # fact is invisible to any reader that goes through the consolidated index,
     # including a plain zarr.open_group. Without this the masks are on disk and
     # unreadable, which is the quietest possible way for this step to fail.
+    _consolidate(root, zarr_path, "QC", logger)
+
+    logger.info(
+        f"{zarr_path.name}: QC kept {n_cells_kept:,}/{cell_mask.size:,} cells "
+        f"(>= {min_genes_per_cell} detected genes) and "
+        f"{n_genes_kept:,}/{gene_mask.size:,} genes "
+        f"(detected in >= {min_cells_per_gene} cells)"
+    )
+    return StageResult(True, stats=stats)
+
+
+def _consolidate(root, zarr_path: Path, what: str, logger) -> None:
+    """Rebuild the consolidated metadata index after writing to a store.
+
+    Every stage that creates an array has to call this. These stores carry
+    consolidated metadata, so an array written after the fact is invisible to
+    any reader that goes through the consolidated index, which is every reader
+    including a plain ``zarr.open_group``. Forgetting it leaves the artifact on
+    disk and unreadable, which is the quietest way for a stage to fail.
+    """
     try:
         zarr.consolidate_metadata(root.store)
     except Exception as e:
         logger.warning(
-            f"{zarr_path.name}: consolidate_metadata failed after QC, so the "
-            f"masks may be invisible to readers using consolidated metadata: {e}"
+            f"{zarr_path.name}: consolidate_metadata failed after {what}, so "
+            f"what it wrote may be invisible to readers using consolidated "
+            f"metadata: {e}"
         )
 
-    logger.info(
-        f"{zarr_path.name}: QC kept {n_cells_kept:,}/{cell_mask.size:,} cells and "
-        f"{n_genes_kept:,}/{gene_mask.size:,} genes"
-    )
-    return True
 
+def _read_qc_masks(root, n_cells: int, n_vars: int):
+    """``(cell_mask, gene_mask)`` from the store, or ``(None, None)``.
 
-def _ensure_hvg_rank(zarr_path: Path, logger) -> bool:
-    """Add var/chiron_hvg_rank + var/chiron_hvg_score to an existing zarr if missing.
-
-    Idempotent: if the rank arrays already exist with the same HVG_VERSION,
-    do nothing. Writes directly via the zarr API to avoid rewriting X.
-
-    Returns True if a write occurred, False if skipped.
+    Returns None rather than an all-True mask when a mask is absent, so a
+    caller cannot mistake "quality control did not run" for "quality control
+    kept everything". The planner should have blocked any stage that gets here
+    without them, and a stage that finds them missing anyway has hit a bug
+    rather than a configuration.
     """
-    try:
-        root = zarr.open_group(str(zarr_path), mode="r+")
-    except Exception as e:
-        logger.warning(f"Cannot open {zarr_path.name} for HVG ranking: {e}")
-        return False
+    cell_key = _find_key(root, "obs", QC_CELL_MASK_KEY)
+    gene_key = _find_key(root, "var", QC_GENE_MASK_KEY)
+    if cell_key is None or gene_key is None:
+        return None, None
+    cell_mask = np.asarray(root["obs"][cell_key][:], dtype=bool)
+    gene_mask = np.asarray(root["var"][gene_key][:], dtype=bool)
+    if cell_mask.size != n_cells or gene_mask.size != n_vars:
+        return None, None
+    return cell_mask, gene_mask
 
+
+def _ensure_hvg_rank(
+    zarr_path: Path, params: Mapping[str, Any], logger
+) -> StageResult:
+    """Add var/chiron_hvg_rank + var/chiron_hvg_score to an existing zarr.
+
+    Runs behind quality control, which is where the Methods put it: "we
+    identified 1,200 highly variable genes (HVGs) within each dataset after
+    quality control". Two consequences, and both change which genes end up in
+    the panel.
+
+    Cells that quality control dropped are excluded from the score. A gene that
+    varies wildly across empty droplets is an artefact of the droplets, and
+    scoring against them is how it reaches the panel.
+
+    Genes that quality control dropped cannot be selected at all. Their score
+    is forced to zero so they rank last, rather than being removed from the
+    arrays: ``var/`` columns must stay the length of ``var``, and a reader that
+    looks up gene *i* has to get gene *i*.
+
+    This stage has no parameters of its own. The panel width is the model's
+    input width, and changing it would mean the checkpoint no longer fits its
+    own input. It is still recomputed whenever quality control is, because its
+    inputs moved even though its settings did not, which is the case a presence
+    check cannot see and the recipe planner exists to catch.
+    """
+    root = zarr.open_group(str(zarr_path), mode="r+")
     if "var" not in root:
-        logger.warning(
-            f"{zarr_path.name}: no var/ group; HVG ranking skipped"
-        )
-        return False
+        return StageResult(False, refused="this store has no var/ group")
 
     var_group = root["var"]
 
     # Refuse before measuring anything, not after. A store that arrives already
     # reduced to a model panel is recorded as such and left alone: re-scoring
     # HVGs on an upstream selection would silently replace it with a ranking
-    # computed over a different matrix, and the quality-control step that will
-    # sit in front of this one would discard most of the cells. See
-    # UPSTREAM_REDUCED_KEY for the measured consequence.
-    n_vars = None
-    try:
-        index_key = _find_key(root, "var", "_index") or "_index"
-        n_vars = int(var_group[index_key].shape[0])
-    except Exception:
-        pass
-    reason = _detect_upstream_reduction(root, n_vars) if n_vars is not None else None
+    # computed over a different matrix. See UPSTREAM_REDUCED_KEY for the
+    # measured consequence.
+    index_key = _find_key(root, "var", "_index") or "_index"
+    n_vars = int(var_group[index_key].shape[0])
+    reason = _detect_upstream_reduction(root, n_vars)
     if reason is not None:
         if _read_attr(root, UPSTREAM_REDUCED_KEY) is not True:
             root.attrs[UPSTREAM_REDUCED_KEY] = True
             root.attrs[UPSTREAM_REDUCED_WHY_KEY] = reason
-            logger.info(
-                f"{zarr_path.name}: already reduced upstream ({reason}). "
-                f"Leaving the gene panel as it is."
-            )
-        return False
-
-    existing_version = _read_attr(root, "chiron_hvg_version")
-    has_selected = _find_key(root, "var", HVG_SELECTED_KEY) is not None
-    has_rank = _find_key(root, "var", HVG_RANK_KEY) is not None
-    if has_rank and existing_version == HVG_VERSION and has_selected:
-        return False  # already ranked at the current version
+        logger.info(
+            f"{zarr_path.name}: already reduced upstream ({reason}). "
+            f"Leaving the gene panel as it is."
+        )
+        return StageResult(False, refused=reason)
 
     X = _open_x(root, zarr_path, logger)
     if X is None:
-        return False
+        return StageResult(False, refused="X could not be read from this store")
 
-    n_vars = int(X.shape[1])
+    n_cells, n_vars = int(X.shape[0]), int(X.shape[1])
     if n_vars == 0:
-        return False
+        return StageResult(False, refused="this store has no genes")
 
-    # Per-gene over-dispersion (variance / mean) across the full expression
-    # matrix. Whatever cell- or gene-level filtering the site operator wants
-    # to apply is expected upstream of the data-server.
-    score = _compute_hvg_score(X)
+    cell_mask, gene_mask = _read_qc_masks(root, n_cells, n_vars)
+    if cell_mask is None:
+        return StageResult(
+            False,
+            refused=(
+                "the quality-control masks are absent or the wrong length, so "
+                "there is nothing to select 'after quality control' from"
+            ),
+        )
+    if not cell_mask.any():
+        return StageResult(
+            False,
+            refused=(
+                "quality control kept no cells, so there is nothing to score "
+                "gene variability across"
+            ),
+        )
+
+    # Per-gene over-dispersion (variance / mean), across surviving cells only.
+    score = _compute_hvg_score(X, cell_mask=cell_mask)
+    score = np.where(gene_mask, score, 0.0).astype(np.float32)
 
     # rank 0 = most variable, n_vars-1 = least
     rank = (-score).argsort().argsort().astype(np.int32)
@@ -1008,10 +1199,14 @@ def _ensure_hvg_rank(zarr_path: Path, logger) -> bool:
     score_arr[:] = score
 
     # Selection mask the trainer reads to derive per-column gene IDs against
-    # the pre-cut binned layer. Picks the top-n_selected genes by rank, where
-    # n_selected = min(MODEL_IN_FEATURE, n_vars). All-zero genes have score 0
-    # and the highest rank values, so they are deprioritised naturally.
-    n_selected = int(min(MODEL_IN_FEATURE, n_vars))
+    # the pre-cut binned layer. The top n_selected by rank, where n_selected is
+    # the model's input width capped by how many genes survived quality
+    # control. Capping by the survivors rather than by n_vars is the whole
+    # point: a gene the gene filter removed has score 0 above, so without the
+    # cap the panel would fill its remaining slots with exactly the genes that
+    # were just excluded, ordered by nothing.
+    n_available = int(gene_mask.sum())
+    n_selected = int(min(MODEL_IN_FEATURE, n_available))
     selected_mask = np.zeros(n_vars, dtype=np.bool_)
     if n_selected > 0:
         selected_mask = (rank < n_selected).astype(np.bool_)
@@ -1026,62 +1221,78 @@ def _ensure_hvg_rank(zarr_path: Path, logger) -> bool:
     for key in (HVG_RANK_KEY, HVG_SCORE_KEY, HVG_SELECTED_KEY):
         _drop_legacy_key(root, "var", key)
 
+    counts, edges, _ = _log_histogram(score[selected_mask | gene_mask])
+    stats = {
+        "method": HVG_METHOD,
+        "in_feature": int(MODEL_IN_FEATURE),
+        "n_selected": int(selected_mask.sum()),
+        "n_available": n_available,
+        "n_cells_scored": int(cell_mask.sum()),
+        # True when the gene filter left fewer genes than the model's input
+        # width, so the model will train on a narrower panel than it was
+        # designed for. An operator has to be told this rather than left to
+        # infer it from two numbers being unequal.
+        "panel_short": bool(n_available < MODEL_IN_FEATURE),
+        "score_histogram_counts": counts,
+        "score_histogram_edges": edges,
+    }
     root.attrs["chiron_hvg_version"] = HVG_VERSION
     root.attrs["chiron_hvg_method"] = HVG_METHOD
     root.attrs["chiron_hvg_in_feature"] = int(MODEL_IN_FEATURE)
     root.attrs["chiron_hvg_n_selected"] = int(selected_mask.sum())
+    root.attrs["chiron_hvg_n_available"] = n_available
+    root.attrs["chiron_hvg_n_cells_scored"] = int(cell_mask.sum())
+    root.attrs["chiron_hvg_panel_short"] = stats["panel_short"]
 
     # Rebuild the zarr-v3 consolidated metadata so the newly-written arrays
     # appear in subsequent opens. AnnData's writer leaves a consolidated
     # block listing only its own columns; without this call the trainer
     # would not see chiron_hvg_rank/score in var.keys().
-    try:
-        zarr.consolidate_metadata(root.store)
-    except Exception as e:
+    _consolidate(root, zarr_path, "HVG ranking", logger)
+
+    if stats["panel_short"]:
         logger.warning(
-            f"{zarr_path.name}: consolidate_metadata failed; rank arrays may be "
-            f"invisible to readers that rely on consolidated metadata: {e}"
+            f"{zarr_path.name}: quality control left {n_available:,} genes, "
+            f"fewer than the model's input width {MODEL_IN_FEATURE:,}, so the "
+            f"panel is narrower than the model was designed for"
         )
-
     logger.info(
-        f"{zarr_path.name}: ranked {len(rank)} genes by HVG ({HVG_METHOD})"
+        f"{zarr_path.name}: ranked {len(rank)} genes by HVG ({HVG_METHOD}) "
+        f"across {int(cell_mask.sum()):,} cells that passed quality control, "
+        f"selected {int(selected_mask.sum()):,} of {n_available:,} available"
     )
-    return True
+    return StageResult(True, stats=stats)
 
 
-def _ensure_hvg_histogram(zarr_path: Path, logger) -> bool:
-    """Write a 20-bin log-scaled histogram of HVG scores into var/.
+def _ensure_hvg_histogram(
+    zarr_path: Path, params: Mapping[str, Any], logger
+) -> StageResult:
+    """Write a 20-bin log-scaled histogram of HVG scores into the root attrs.
 
-    Idempotent on HVG_HIST_VERSION. Requires that _ensure_hvg_rank has already
-    run (so var/chiron_hvg_score exists). Stores bin edges as a group attr so
-    the UI can render the histogram without re-deriving them.
-
-    Returns True if a write occurred, False if skipped.
+    Runs behind the ranking, so the scores it summarises are the post-quality
+    -control ones. Stores bin edges alongside the counts so the UI can render
+    the histogram without re-deriving them, and sends 20 integers rather than
+    one float per gene.
     """
-    try:
-        root = zarr.open_group(str(zarr_path), mode="r+")
-    except Exception as e:
-        logger.warning(f"Cannot open {zarr_path.name} for HVG histogram: {e}")
-        return False
+    root = zarr.open_group(str(zarr_path), mode="r+")
 
     score_key = _find_key(root, "var", HVG_SCORE_KEY)
     if score_key is None:
-        # Score wasn't computed yet (data was empty, or rank step failed).
-        return False
-
-    existing = _read_attr(root, "chiron_hvg_histogram_version")
-    # Counts live as a root attr since HVG_HIST_VERSION 2, so the version attr
-    # alone is the source of truth. (Pre-v2 stored counts under var/, but that
-    # path is cleaned up below the first time v2 runs.)
-    if existing == HVG_HIST_VERSION:
-        return False
+        return StageResult(
+            False,
+            refused="var/chiron_hvg_score is absent, so there is nothing to summarise",
+        )
 
     score = root["var"][score_key][:]
     positive = score[score > 0]
     if positive.size == 0:
-        # Pathological: every gene has zero score. Skip silently — there's
-        # nothing meaningful to histogram.
-        return False
+        return StageResult(
+            False,
+            refused=(
+                "every gene scored zero variability, which means the matrix is "
+                "empty or constant and a histogram of it would say nothing"
+            ),
+        )
 
     # log10 of positive scores, then equal-width bins between min and max.
     # This concentrates resolution where the bulk of genes live.
@@ -1112,17 +1323,18 @@ def _ensure_hvg_histogram(zarr_path: Path, logger) -> bool:
             pass
     _drop_legacy_key(root, "var", HVG_HIST_KEY)
 
-    try:
-        zarr.consolidate_metadata(root.store)
-    except Exception as e:
-        logger.warning(
-            f"{zarr_path.name}: consolidate_metadata failed after HVG histogram: {e}"
-        )
+    _consolidate(root, zarr_path, "the HVG histogram", logger)
 
     logger.info(
         f"{zarr_path.name}: wrote {HVG_HIST_BINS}-bin HVG score histogram"
     )
-    return True
+    return StageResult(
+        True,
+        stats={
+            "counts": counts.tolist(),
+            "edges_log10": edges.astype(np.float32).tolist(),
+        },
+    )
 
 
 def _read_binned_node(root):
@@ -1140,13 +1352,22 @@ def _read_binned_node(root):
     return None, 0, 0
 
 
-def _streaming_pca_then_umap(zarr_path: Path, root, logger):
-    """Inner helper for _ensure_umap_embedding: stream X through IncrementalPCA,
-    take a deterministic subsample if n_cells > UMAP_MAX_SAMPLES, run UMAP on
-    that subsample.
+def _streaming_pca_then_umap(zarr_path: Path, root, logger, cell_mask=None):
+    """Inner helper for _ensure_umap_embedding: stream the binned layer through
+    IncrementalPCA, take a deterministic subsample if there are more eligible
+    cells than UMAP_MAX_SAMPLES, run UMAP on that subsample.
 
-    Returns (coords float32[m,2], indices int32[m] or None if all cells used),
-    or raises if the dataset is too small / a dep is missing.
+    ``cell_mask`` restricts every step to the cells that passed quality
+    control, because the embedding is a picture of what the model will actually
+    be trained on. Including dropped cells would show the operator structure
+    that the run never sees, and empty droplets cluster, so they would show up
+    as a confident blob that means nothing.
+
+    Returns ``(coords float32[m,2], indices int32[m] or None)``. The indices are
+    row indices into the binned layer, and are None only when the coordinates
+    cover every row in order. A mask that drops anything therefore always
+    produces indices, because without them a reader cannot tell which cell a
+    point belongs to.
     """
     # Soft dep — keep the image lean for sites that don't need the embedding.
     try:
@@ -1159,43 +1380,74 @@ def _streaming_pca_then_umap(zarr_path: Path, root, logger):
     from sklearn.decomposition import IncrementalPCA
 
     x_node, n_cells, n_vars = _read_binned_node(root)
-    if x_node is None or n_cells < UMAP_N_NEIGHBORS + 1 or n_vars < 2:
+    if x_node is None:
+        raise RuntimeError("the binned layer is absent or unreadable")
+
+    # Eligible rows, in order. Everything below indexes through this rather
+    # than through arange(n_cells), so there is one place where the mask is
+    # applied and no path that forgets it.
+    if cell_mask is not None and cell_mask.size == n_cells and not cell_mask.all():
+        eligible = np.flatnonzero(cell_mask).astype(np.int64)
+    else:
+        eligible = np.arange(n_cells, dtype=np.int64)
+    n_eligible = int(eligible.size)
+
+    if n_eligible < UMAP_N_NEIGHBORS + 1 or n_vars < 2:
         raise RuntimeError(
-            f"Dataset too small for UMAP "
-            f"(binned shape n_cells={n_cells}, n_selected={n_vars})"
+            f"Dataset too small for UMAP (binned shape n_cells={n_cells}, "
+            f"n_selected={n_vars}, cells past quality control={n_eligible})"
         )
 
     # Compute a streaming batch size that respects the byte budget and the
     # IncrementalPCA constraint n_components <= batch_size.
     bytes_per_cell = max(1, n_vars * 4)
     target_batch = max(PCA_N_COMPONENTS + 1, PCA_BATCH_BYTES_BUDGET // bytes_per_cell)
-    batch_size = int(min(n_cells, max(PCA_N_COMPONENTS + 1, target_batch)))
-    n_components = min(PCA_N_COMPONENTS, n_vars, n_cells - 1)
+    batch_size = int(min(n_eligible, max(PCA_N_COMPONENTS + 1, target_batch)))
+    n_components = min(PCA_N_COMPONENTS, n_vars, n_eligible - 1)
 
     logger.info(
         f"{zarr_path.name}: streaming PCA on the binned layer "
-        f"(n_cells={n_cells}, n_selected={n_vars}, batch={batch_size}, components={n_components})"
+        f"(n_cells={n_cells}, past quality control={n_eligible}, "
+        f"n_selected={n_vars}, batch={batch_size}, components={n_components})"
     )
 
+    def _read_rows(rows):
+        """A block of the binned layer, by row index.
+
+        A contiguous slice when the rows happen to be contiguous, which is the
+        common case of an unmasked store, and an orthogonal selection
+        otherwise. zarr reads a slice far faster than a fancy index, so this is
+        worth the branch.
+        """
+        if rows.size and rows[-1] - rows[0] == rows.size - 1:
+            return np.asarray(x_node[int(rows[0]) : int(rows[-1]) + 1, :], dtype=np.float64)
+        return np.asarray(
+            x_node.get_orthogonal_selection((rows, slice(None))), dtype=np.float64
+        )
+
     ipca = IncrementalPCA(n_components=n_components)
-    for start in range(0, n_cells, batch_size):
-        stop = min(start + batch_size, n_cells)
+    for start in range(0, n_eligible, batch_size):
+        stop = min(start + batch_size, n_eligible)
         if stop - start < n_components:
             # Tail batch can be smaller than n_components; IncrementalPCA would
             # raise. Pad by re-using the previous start.
-            start = max(0, n_cells - n_components)
-            stop = n_cells
-        batch = np.asarray(x_node[start:stop, :], dtype=np.float64)
-        ipca.partial_fit(batch)
-        if stop == n_cells:
+            start = max(0, n_eligible - n_components)
+            stop = n_eligible
+        ipca.partial_fit(_read_rows(eligible[start:stop]))
+        if stop == n_eligible:
             break
 
-    # Choose the subsample for UMAP.
+    # Choose the subsample for UMAP, always out of the eligible rows.
     rng = np.random.default_rng(UMAP_RANDOM_STATE)
-    if n_cells > UMAP_MAX_SAMPLES:
-        indices = np.sort(rng.choice(n_cells, size=UMAP_MAX_SAMPLES, replace=False))
+    if n_eligible > UMAP_MAX_SAMPLES:
+        picked = np.sort(rng.choice(n_eligible, size=UMAP_MAX_SAMPLES, replace=False))
+        indices = eligible[picked]
+    elif n_eligible < n_cells:
+        # Every eligible cell, but that is not every cell, so a reader still
+        # needs the index to know which is which.
+        indices = eligible
     else:
-        indices = None  # use all cells
+        indices = None  # coordinates cover every row of the layer, in order
 
     # Transform subsample (or full) through the PCA fit, in the same batches.
     def transform_indices(idx_array):
@@ -1205,16 +1457,11 @@ def _streaming_pca_then_umap(zarr_path: Path, root, logger):
         i = 0
         while i < len(idx_array):
             j = i + batch_size
-            chunk_idx = idx_array[i:j]
-            block = np.asarray(x_node.get_orthogonal_selection((chunk_idx, slice(None))), dtype=np.float64)
-            out[i:j] = ipca.transform(block).astype(np.float32)
+            out[i:j] = ipca.transform(_read_rows(idx_array[i:j])).astype(np.float32)
             i = j
         return out
 
-    if indices is None:
-        idx_for_transform = np.arange(n_cells, dtype=np.int64)
-    else:
-        idx_for_transform = indices
+    idx_for_transform = eligible if indices is None else indices
     pca_matrix = transform_indices(idx_for_transform)
 
     # UMAP. n_neighbors capped at sample_size - 1.
@@ -1230,48 +1477,49 @@ def _streaming_pca_then_umap(zarr_path: Path, root, logger):
     return embedding, (None if indices is None else indices.astype(np.int32))
 
 
-def _ensure_umap_embedding(zarr_path: Path, logger) -> bool:
+def _ensure_umap_embedding(
+    zarr_path: Path, params: Mapping[str, Any], logger
+) -> StageResult:
     """Write a 2-D UMAP embedding into obsm/, computed on layers/chiron_binned.
 
-    Operates on the pre-cut binned layer (all cells x top-MODEL_IN_FEATURE
-    HVGs in 0..50 quantile bins) so the dataset-card UMAP matches what the
-    trainer consumes. Requires _ensure_binning to have run first.
+    Operates on the pre-cut binned layer so the embedding shows exactly the
+    matrix the trainer consumes, and only on the cells that passed quality
+    control, so it shows exactly the cells the run will see.
 
-    Idempotent on UMAP_VERSION. Computes coordinates only on a deterministic
-    subsample if n_cells > UMAP_MAX_SAMPLES so memory stays bounded;
-    otherwise uses every cell. Soft-fails if umap-learn isn't installed.
+    Computes coordinates on a deterministic subsample when there are more
+    eligible cells than UMAP_MAX_SAMPLES, so memory stays bounded.
 
     Stores:
-      obsm/chiron_umap_coords  float32 (m, 2)   m = min(n_cells, UMAP_MAX_SAMPLES)
-      obsm/chiron_umap_indices int32   (m,)     row indices into chiron_binned,
-                                                only present if subsampled
+      obsm/chiron_umap_coords  float32 (m, 2)
+      obsm/chiron_umap_indices int32   (m,)  row indices into chiron_binned,
+                                             absent only when the coordinates
+                                             cover every row in order
       root attrs: chiron_umap_version, chiron_umap_method, chiron_umap_n_sampled
 
-    Returns True if a write occurred, False if skipped, raises only for
-    truly unexpected zarr errors.
+    Refusing here is cheap. The embedding is a picture for the dataset card and
+    nothing trains on it, so a site without umap-learn installed loses the
+    picture and nothing else.
     """
-    try:
-        root = zarr.open_group(str(zarr_path), mode="r+")
-    except Exception as e:
-        logger.warning(f"Cannot open {zarr_path.name} for UMAP: {e}")
-        return False
+    root = zarr.open_group(str(zarr_path), mode="r+")
 
-    existing = _read_attr(root, "chiron_umap_version")
-    has_coords = _find_key(root, "obsm", UMAP_COORDS_KEY) is not None
-    if existing == UMAP_VERSION and has_coords:
-        return False
+    x_node, n_cells, _ = _read_binned_node(root)
+    cell_mask = None
+    if x_node is not None:
+        var_index = _find_key(root, "var", "_index") or "_index"
+        n_vars_total = int(root["var"][var_index].shape[0]) if "var" in root else 0
+        cell_mask, _ = _read_qc_masks(root, n_cells, n_vars_total)
 
     try:
-        coords, indices = _streaming_pca_then_umap(zarr_path, root, logger)
+        coords, indices = _streaming_pca_then_umap(
+            zarr_path, root, logger, cell_mask=cell_mask
+        )
     except RuntimeError as e:
-        # Includes umap-learn-not-installed and "too small" cases — log once
-        # and move on. The HVG rank already covers the trainer's needs; UMAP
-        # is purely cosmetic for the dataset card.
+        # Includes umap-learn-not-installed and "too small" cases.
         logger.warning(f"{zarr_path.name}: UMAP skipped: {e}")
-        return False
+        return StageResult(False, refused=str(e))
     except Exception as e:
         logger.warning(f"{zarr_path.name}: UMAP failed: {type(e).__name__}: {e}")
-        return False
+        return StageResult(False, refused=f"{type(e).__name__}: {e}")
 
     # Make sure obsm exists.
     if "obsm" not in root:
@@ -1301,19 +1549,22 @@ def _ensure_umap_embedding(zarr_path: Path, logger) -> bool:
     root.attrs["chiron_umap_n_neighbors"] = int(UMAP_N_NEIGHBORS)
     root.attrs["chiron_umap_random_state"] = int(UMAP_RANDOM_STATE)
 
-    try:
-        zarr.consolidate_metadata(root.store)
-    except Exception as e:
-        logger.warning(
-            f"{zarr_path.name}: consolidate_metadata failed after UMAP: {e}"
-        )
+    _consolidate(root, zarr_path, "UMAP", logger)
 
     logger.info(
         f"{zarr_path.name}: wrote UMAP embedding "
-        f"({coords.shape[0]} cells {'(subsampled)' if indices is not None else '(all cells)'}, "
+        f"({coords.shape[0]} cells {'(a subset)' if indices is not None else '(all cells)'}, "
         f"{UMAP_METHOD})"
     )
-    return True
+    return StageResult(
+        True,
+        stats={
+            "method": UMAP_METHOD,
+            "n_sampled": int(coords.shape[0]),
+            "n_neighbors": int(UMAP_N_NEIGHBORS),
+            "subset": indices is not None,
+        },
+    )
 
 
 def _geneformer_prep_enabled() -> bool:
@@ -1513,7 +1764,9 @@ def _detect_geneformer_unsuitable(root, n_vars: int, X):
     return _sample_nonintegral(X)
 
 
-def _compute_geneformer_ranks(X, col_to_slot, medians_by_slot, max_ranks, row_block=4096):
+def _compute_geneformer_ranks(
+    X, col_to_slot, medians_by_slot, max_ranks, cell_mask=None, row_block=4096
+):
     """Each cell's expressed genes as column indices in Geneformer rank order.
 
     One cell at a time, in row blocks so the per-block temporaries stay small:
@@ -1574,7 +1827,15 @@ def _compute_geneformer_ranks(X, col_to_slot, medians_by_slot, max_ranks, row_bl
                 cols = np.flatnonzero(row > 0)
                 block_rows.append((cols.astype(np.int64), row[cols].astype(np.float64)))
 
-        for cols, counts in block_rows:
+        for offset, (cols, counts) in enumerate(block_rows):
+            # A cell below the optional detected-genes floor is ranked as
+            # empty rather than removed, so row i of the ordering is still
+            # cell i of obs. A reader that joined by position would otherwise
+            # silently shift by however many cells were dropped above it.
+            if cell_mask is not None and not cell_mask[start + offset]:
+                per_cell.append(np.empty(0, dtype=index_dtype))
+                n_empty += 1
+                continue
             if cols.size == 0:
                 per_cell.append(np.empty(0, dtype=index_dtype))
                 n_empty += 1
@@ -1603,60 +1864,42 @@ def _compute_geneformer_ranks(X, col_to_slot, medians_by_slot, max_ranks, row_bl
     return indptr, indices, {"n_truncated": n_truncated, "n_empty": n_empty}
 
 
-def _ensure_geneformer_ranks(zarr_path: Path, logger) -> bool:
-    """Write uns/chiron_geneformer_gc104M/{rank_indptr,rank_indices} if missing.
+def _ensure_geneformer_ranks(
+    zarr_path: Path, params: Mapping[str, Any], logger
+) -> StageResult:
+    """Write uns/chiron_geneformer_gc104M/{rank_indptr,rank_indices}.
 
-    Idempotent on the recipe id, which is the guard the request asks for: a
-    store already prepared under this protocol is left alone rather than
-    recomputed. It is the recipe and not the version that is compared, so
-    repinning the dictionaries or changing the rank cap is recomputed too,
-    while an unchanged protocol is a no-op forever.
+    Whether this needs to run is the recipe planner's decision, which is how
+    the request's "a dataset preprocessed with this protocol before should not
+    be processed again" is honoured: the planner compares the recorded stage
+    fingerprint, and the fingerprint covers the pinned dictionary revision, the
+    rank cap and the cell filter.
 
-    Touches nothing outside its own group. X, var, obs, layers and obsm are
-    read and never written, so running this after Tabula's quality control,
-    HVG ranking, binning and UMAP leaves all four byte-identical, and running
-    it before them changes nothing they go on to compute.
-
-    Returns True if a write occurred.
+    Touches nothing outside its own group under ``uns/``. X, var, obs, layers
+    and obsm are read and never written, so running this after Tabula's quality
+    control, HVG ranking, binning and UMAP leaves all four byte-identical, and
+    running it first changes nothing they go on to compute.
     """
-    try:
-        root = zarr.open_group(str(zarr_path), mode="r+")
-    except Exception as e:
-        logger.warning(f"Cannot open {zarr_path.name} for Geneformer ranking: {e}")
-        return False
+    min_genes_per_cell = int(params.get("geneformer_min_genes_per_cell", 0))
 
+    root = zarr.open_group(str(zarr_path), mode="r+")
     if "var" not in root:
-        logger.warning(f"{zarr_path.name}: no var/ group; Geneformer ranking skipped")
-        return False
-
-    # Already prepared under this exact protocol. Checked before anything is
-    # read off disk, so a second pass over a prepared store costs one attribute
-    # lookup.
-    uns = root["uns"] if "uns" in root else None
-    if (
-        uns is not None
-        and GENEFORMER_GROUP in uns
-        and _read_attr(root, GENEFORMER_RECIPE_ATTR) == GENEFORMER_RECIPE
-    ):
-        return False
+        return StageResult(False, refused="this store has no var/ group")
 
     var_group = root["var"]
-    try:
-        var_index = _find_key(root, "var", "_index") or "_index"
-        n_vars = int(var_group[var_index].shape[0])
-    except Exception as e:
-        logger.warning(f"{zarr_path.name}: cannot size var/ for Geneformer: {e}")
-        return False
+    var_index = _find_key(root, "var", "_index") or "_index"
+    n_vars = int(var_group[var_index].shape[0])
 
     X = _open_x(root, zarr_path, logger)
     if X is None:
-        return False
+        return StageResult(False, refused="X could not be read from this store")
     if getattr(X, "format", "csr") == "csc":
-        logger.info(
-            f"{zarr_path.name}: Geneformer ranking skipped, X is stored CSC and "
-            "ranking reads cells as rows"
+        reason = (
+            "X is stored column-major (CSC) and ranking reads a cell as a row, "
+            "so this store would have to be transposed first"
         )
-        return False
+        logger.info(f"{zarr_path.name}: Geneformer ranking skipped ({reason})")
+        return StageResult(False, refused=reason)
 
     reason = _detect_geneformer_unsuitable(root, n_vars, X)
     if reason is not None:
@@ -1664,7 +1907,7 @@ def _ensure_geneformer_ranks(zarr_path: Path, logger) -> bool:
             root.attrs[GENEFORMER_UNSUITABLE_KEY] = True
             root.attrs[GENEFORMER_UNSUITABLE_WHY_KEY] = reason
         logger.info(f"{zarr_path.name}: Geneformer ranking skipped ({reason})")
-        return False
+        return StageResult(False, refused=reason)
 
     n_cols = int(X.shape[1])
     ensembl, feature_key = _read_ensembl_ids(root, var_group, var_index, logger)
@@ -1677,19 +1920,20 @@ def _ensure_geneformer_ranks(zarr_path: Path, logger) -> bool:
         root.attrs[GENEFORMER_UNSUITABLE_KEY] = True
         root.attrs[GENEFORMER_UNSUITABLE_WHY_KEY] = reason
         logger.info(f"{zarr_path.name}: Geneformer ranking skipped ({reason})")
-        return False
+        return StageResult(False, refused=reason)
     if len(ensembl) != n_cols:
-        logger.warning(
-            f"{zarr_path.name}: var/{feature_key} has {len(ensembl):,} entries but "
-            f"X has {n_cols:,} columns; Geneformer ranking skipped"
+        reason = (
+            f"var/{feature_key} has {len(ensembl):,} entries but X has "
+            f"{n_cols:,} columns, so the gene ids do not line up with the matrix"
         )
-        return False
+        logger.warning(f"{zarr_path.name}: Geneformer ranking skipped, {reason}")
+        return StageResult(False, refused=reason)
 
     try:
         tokens, medians = _load_geneformer_vocabulary(logger)
     except Exception as e:
         logger.warning(f"{zarr_path.name}: Geneformer ranking skipped, {e}")
-        return False
+        return StageResult(False, refused=str(e))
 
     token_ids = np.array([tokens.get(g, -1) for g in ensembl], dtype=np.int64)
     gene_medians = np.array(
@@ -1705,13 +1949,26 @@ def _ensure_geneformer_ranks(zarr_path: Path, logger) -> bool:
         root.attrs[GENEFORMER_UNSUITABLE_KEY] = True
         root.attrs[GENEFORMER_UNSUITABLE_WHY_KEY] = reason
         logger.info(f"{zarr_path.name}: Geneformer ranking skipped ({reason})")
-        return False
+        return StageResult(False, refused=reason)
 
     col_to_slot = np.full(n_cols, -1, dtype=np.int64)
     col_to_slot[keep] = np.arange(keep.size, dtype=np.int64)
 
+    # Geneformer's own tokenizer applies no cell filter, so the default is off.
+    # A site that wants one gets it here: a cell below the threshold is ranked
+    # as empty, which the trainer then has nothing to feed the model and skips,
+    # rather than being deleted from a store other models still read.
+    cell_floor = None
+    if min_genes_per_cell > 0:
+        detected = np.diff(np.asarray(X.indptr, dtype=np.intp))
+        cell_floor = detected >= min_genes_per_cell
+
     indptr, indices, stats = _compute_geneformer_ranks(
-        X, col_to_slot, gene_medians[keep], GENEFORMER_MAX_RANKS
+        X,
+        col_to_slot,
+        gene_medians[keep],
+        GENEFORMER_MAX_RANKS,
+        cell_mask=cell_floor,
     )
 
     uns_group = root["uns"] if "uns" in root else root.create_group("uns")
@@ -1731,17 +1988,33 @@ def _ensure_geneformer_ranks(zarr_path: Path, logger) -> bool:
         written.attrs["encoding-type"] = "array"
         written.attrs["encoding-version"] = "0.2.0"
 
+    # How many genes each cell contributes, as a distribution. This is the
+    # Geneformer equivalent of the HVG histogram: it is what the model's input
+    # length will be, and it is the one number an operator can act on when a
+    # dataset trains badly. Aggregate bins only, never a per-cell length.
+    lengths = np.diff(indptr)
+    length_counts, length_edges, length_zero = _log_histogram(lengths)
+
+    full_stats = {
+        "revision": GENEFORMER_REVISION,
+        "dictionary_set": GENEFORMER_DICTIONARY_SET,
+        "max_ranks": GENEFORMER_MAX_RANKS,
+        "min_genes_per_cell": min_genes_per_cell,
+        "n_cells": int(X.shape[0]),
+        "n_genes_usable": int(keep.size),
+        "n_genes_total": n_cols,
+        "n_ranked": int(indices.size),
+        "n_cells_truncated": stats["n_truncated"],
+        "n_cells_empty": stats["n_empty"],
+        "ranked_per_cell_counts": length_counts,
+        "ranked_per_cell_edges": length_edges,
+        "ranked_per_cell_zero": length_zero,
+    }
+
     root.attrs[GENEFORMER_VERSION_ATTR] = GENEFORMER_VERSION
     root.attrs[GENEFORMER_RECIPE_ATTR] = GENEFORMER_RECIPE
-    root.attrs["chiron_geneformer_revision"] = GENEFORMER_REVISION
-    root.attrs["chiron_geneformer_dictionary_set"] = GENEFORMER_DICTIONARY_SET
-    root.attrs["chiron_geneformer_max_ranks"] = GENEFORMER_MAX_RANKS
-    root.attrs["chiron_geneformer_n_cells"] = int(X.shape[0])
-    root.attrs["chiron_geneformer_n_genes_usable"] = int(keep.size)
-    root.attrs["chiron_geneformer_n_genes_total"] = n_cols
-    root.attrs["chiron_geneformer_n_ranked"] = int(indices.size)
-    root.attrs["chiron_geneformer_n_cells_truncated"] = stats["n_truncated"]
-    root.attrs["chiron_geneformer_n_cells_empty"] = stats["n_empty"]
+    for key, value in full_stats.items():
+        root.attrs[f"chiron_geneformer_{key}"] = value
     # A store refused by an earlier, stricter pin that now passes should not
     # keep advertising a refusal that no longer holds.
     if _read_attr(root, GENEFORMER_UNSUITABLE_KEY) is not None:
@@ -1751,14 +2024,7 @@ def _ensure_geneformer_ranks(zarr_path: Path, logger) -> bool:
     # These stores carry consolidated metadata, so a group written after the
     # fact is invisible to any reader that goes through the consolidated index.
     # Without this the ordering is on disk and unreadable.
-    try:
-        zarr.consolidate_metadata(root.store)
-    except Exception as e:
-        logger.warning(
-            f"{zarr_path.name}: consolidate_metadata failed after Geneformer "
-            f"ranking, so the ordering may be invisible to readers using "
-            f"consolidated metadata: {e}"
-        )
+    _consolidate(root, zarr_path, "Geneformer ranking", logger)
 
     logger.info(
         f"{zarr_path.name}: Geneformer ranked {X.shape[0]:,} cells over "
@@ -1767,74 +2033,651 @@ def _ensure_geneformer_ranks(zarr_path: Path, logger) -> bool:
         f"({stats['n_truncated']:,} cells truncated at {GENEFORMER_MAX_RANKS}, "
         f"{stats['n_empty']:,} with nothing usable)"
     )
-    return True
+    return StageResult(True, stats=full_stats)
+
+
+# ---------------------------------------------------------------------------
+# The recipes
+# ---------------------------------------------------------------------------
+#
+# What each model needs done to a store, declared rather than hardcoded into a
+# loop. The machinery is in chiron.datasets.recipes; this is the part that says
+# what the stages are, what depends on what, and which numbers a site is
+# allowed to change.
+#
+# Which numbers are adjustable is a judgement, not a convenience. Tabula's
+# 1,200 genes and its 50 value bins are properties of a pretrained checkpoint:
+# change them and the weights no longer fit their own input, so they are
+# declared fixed and an attempt to set them is an error rather than a silently
+# ignored field. The two quality-control thresholds are genuinely the site's
+# call, because the manuscript's 250 was chosen against datasets far larger
+# than many sites hold, and on a small store "detected in at least 250 cells"
+# removes most of the gene panel.
+
+PREP_ATTR_PREFIX = "chiron_prep_"
+
+TABULA_RECIPE = Recipe(
+    model_family="tabula",
+    version=1,
+    label="Tabula",
+    description=(
+        "Quality control, then 1,200 highly variable genes selected from what "
+        "survives it, then a 50-bin per-cell discretisation of those genes. "
+        "This is the preprocessing the Tabula manuscript's Methods describe, "
+        "in the order they describe it."
+    ),
+    stages=(
+        Stage(
+            name="quality_control",
+            version=QC_VERSION,
+            label="Quality control",
+            description=(
+                "Mark the cells and genes that pass the two filters. Nothing is "
+                "deleted: the masks are stored beside the data so another model "
+                "can still read the full panel."
+            ),
+            run=_ensure_qc,
+            params=(
+                Param(
+                    name="min_genes_per_cell",
+                    default=QC_MIN_GENES_PER_CELL,
+                    label="Minimum detected genes per cell",
+                    unit="genes",
+                    minimum=0,
+                    maximum=100_000,
+                    description=(
+                        "A cell with fewer detected genes than this is excluded. "
+                        "It removes empty droplets, non-viable cells and severely "
+                        "degraded cells. The published value is 250."
+                    ),
+                ),
+                Param(
+                    name="min_cells_per_gene",
+                    default=QC_MIN_CELLS_PER_GENE,
+                    label="Minimum cells per gene",
+                    unit="cells",
+                    minimum=0,
+                    maximum=10_000_000,
+                    description=(
+                        "A gene detected in fewer cells than this is excluded. It "
+                        "counts CELLS, not total counts, so a gene expressed "
+                        "enormously in a handful of cells is still removed. The "
+                        "published value is 250. On a small dataset this is a "
+                        "large fraction of the cells present, so lower it rather "
+                        "than lose most of the panel."
+                    ),
+                ),
+            ),
+            outputs=("obs/" + QC_CELL_MASK_KEY, "var/" + QC_GENE_MASK_KEY),
+        ),
+        Stage(
+            name="hvg_ranking",
+            version=HVG_VERSION,
+            label="Highly variable gene selection",
+            description=(
+                "Rank genes by over-dispersion across the cells that passed "
+                "quality control, and select the model's input width from the "
+                "genes that passed it."
+            ),
+            run=_ensure_hvg_rank,
+            requires=("quality_control",),
+            params=(
+                Param(
+                    name="n_hvg",
+                    default=MODEL_IN_FEATURE,
+                    label="Genes the model reads",
+                    unit="genes",
+                    adjustable=False,
+                    description=(
+                        "This is the model's input width, fixed by the checkpoint "
+                        "being trained. A different number would not fit the "
+                        "pretrained weights."
+                    ),
+                ),
+            ),
+            outputs=(
+                "var/" + HVG_RANK_KEY,
+                "var/" + HVG_SCORE_KEY,
+                "var/" + HVG_SELECTED_KEY,
+            ),
+        ),
+        Stage(
+            name="var_columns",
+            version=1,
+            label="Column registration",
+            description=(
+                "Register the masks as dataframe columns, so a reader going "
+                "through anndata sees them. Metadata only."
+            ),
+            run=_ensure_var_columns_visible,
+            requires=("hvg_ranking",),
+        ),
+        Stage(
+            name="hvg_histogram",
+            version=HVG_HIST_VERSION,
+            label="Variability distribution",
+            description=(
+                "A 20-bin summary of the variability scores, so the dataset card "
+                "can show the distribution without sending one number per gene."
+            ),
+            run=_ensure_hvg_histogram,
+            requires=("hvg_ranking",),
+        ),
+        Stage(
+            name="binning",
+            version=BINNING_VERSION,
+            label="Value discretisation",
+            description=(
+                "Each cell's expression over the selected genes, discretised into "
+                "equal-frequency bins. This is the matrix the trainer reads."
+            ),
+            run=_ensure_binning,
+            requires=("hvg_ranking",),
+            params=(
+                Param(
+                    name="n_bins",
+                    default=BINNING_N_BINS,
+                    label="Value bins",
+                    unit="bins",
+                    adjustable=False,
+                    description=(
+                        "Fixed by the checkpoint: the model was pretrained against "
+                        "this many bins and reads a bin index, not a value."
+                    ),
+                ),
+            ),
+            outputs=("layers/" + BINNING_LAYER_KEY,),
+        ),
+        Stage(
+            name="umap",
+            version=UMAP_VERSION,
+            label="Embedding",
+            description=(
+                "A 2-D map of the cells the run will train on, computed from the "
+                "discretised matrix through 50 principal components. For the "
+                "dataset card only, nothing trains on it."
+            ),
+            run=_ensure_umap_embedding,
+            # quality_control as well as binning, because the embedding reads
+            # the cell mask directly to leave out what the run will not see.
+            requires=("quality_control", "binning"),
+            outputs=("obsm/" + UMAP_COORDS_KEY,),
+        ),
+    ),
+)
+
+GENEFORMER_RECIPE_DEF = Recipe(
+    model_family="geneformer",
+    version=1,
+    label="Geneformer",
+    description=(
+        "Normalise each cell's counts by each gene's median across Geneformer's "
+        "reference corpus and store the resulting order of genes. Geneformer "
+        "reads an order, not values, and its gene set is its own vocabulary, so "
+        "there is no gene filter to adjust."
+    ),
+    stages=(
+        Stage(
+            name="rank_ordering",
+            version=GENEFORMER_VERSION,
+            label="Rank ordering",
+            description=(
+                "Per cell, the genes it expresses sorted by count divided by that "
+                "gene's corpus median. Stored as column indices, so the trainer "
+                "still maps through its own token dictionary."
+            ),
+            run=_ensure_geneformer_ranks,
+            params=(
+                Param(
+                    name="geneformer_min_genes_per_cell",
+                    default=0,
+                    label="Minimum detected genes per cell",
+                    unit="genes",
+                    minimum=0,
+                    maximum=100_000,
+                    description=(
+                        "A cell with fewer detected genes than this contributes "
+                        "nothing. Geneformer's own tokenizer applies no cell "
+                        "filter, so the default is off, and this exists for a "
+                        "site that wants one."
+                    ),
+                ),
+                Param(
+                    name="geneformer_max_ranks",
+                    default=GENEFORMER_MAX_RANKS,
+                    label="Ranks stored per cell",
+                    unit="genes",
+                    adjustable=False,
+                    description=(
+                        "Fixed at the widest input any Geneformer checkpoint "
+                        "accepts, so the stored order serves both generations and "
+                        "the trainer's own truncation stays the only one that "
+                        "decides a sequence's length."
+                    ),
+                ),
+            ),
+            outputs=(
+                f"uns/{GENEFORMER_GROUP}/{GENEFORMER_INDPTR_KEY}",
+                f"uns/{GENEFORMER_GROUP}/{GENEFORMER_INDICES_KEY}",
+            ),
+        ),
+    ),
+)
+
+RECIPES: Dict[str, Recipe] = {
+    TABULA_RECIPE.model_family: TABULA_RECIPE,
+    GENEFORMER_RECIPE_DEF.model_family: GENEFORMER_RECIPE_DEF,
+}
+
+# At import, not at first use. A malformed recipe stops the data server at
+# startup with a message naming the problem, rather than on whichever store
+# happens to be scanned first, two minutes later, in a log nobody is reading.
+for _recipe in RECIPES.values():
+    check_recipe(_recipe)
+
+
+def _read_prep_state(root, model_family: str) -> Dict[str, Any]:
+    """This store's recorded state for one model's recipe, or an empty dict."""
+    value = _read_attr(root, f"{PREP_ATTR_PREFIX}{model_family}")
+    return value if isinstance(value, dict) else {}
+
+
+def apply_recipe(
+    zarr_path: Path,
+    recipe: Recipe,
+    requested: Optional[Mapping[str, Any]] = None,
+    logger=None,
+) -> Dict[str, Any]:
+    """Bring one store up to date for one model, and record what happened.
+
+    The executor half of the chain rule. :func:`recipes.plan` decides what
+    *should* run from what the store records; this runs it and re-decides as it
+    goes, because a stage can refuse at run time and a refusal has to block
+    everything downstream exactly as a missing prerequisite does.
+
+    Every outcome is written back under one root attribute per model family, so
+    two models' states sit side by side and neither can overwrite the other.
+
+    Args:
+        zarr_path: the store.
+        recipe: which model's preparation to apply.
+        requested: parameter overrides. Validated against the recipe, and a
+            bad one raises rather than falling back to a default.
+        logger: the caller's logger.
+
+    Returns:
+        The state block as recorded, with a ``changed`` flag saying whether
+        anything was written.
+
+    Raises:
+        ValueError: the requested parameters are not valid for this recipe.
+    """
+    resolved = resolve_params(recipe, requested)
+    previous = _read_prep_state(
+        zarr.open_group(str(zarr_path), mode="r"), recipe.model_family
+    )
+    recorded = previous.get("stages") or {}
+
+    actions = plan(recipe, resolved, recorded)
+    satisfied = {a.stage.name for a in actions if a.action == "skip"}
+    stages: Dict[str, Any] = {}
+    changed = False
+
+    for action in actions:
+        stage = action.stage
+        stage_params = {p.name: resolved[p.name] for p in stage.params}
+
+        if action.action == "skip":
+            stages[stage.name] = dict(recorded.get(stage.name) or {})
+            stages[stage.name]["fingerprint"] = action.fingerprint
+            stages[stage.name]["satisfied"] = True
+            continue
+
+        # Re-check here rather than trusting the plan. A stage the plan meant
+        # to run may have had a prerequisite refuse in this very pass, which
+        # the plan could not have known.
+        missing = [r for r in stage.requires if r not in satisfied]
+        if missing or action.action == "blocked":
+            reason = action.reason if action.action == "blocked" else (
+                f"{', '.join(missing)} did not complete, and {stage.name} is "
+                f"computed from it"
+            )
+            stages[stage.name] = {
+                "satisfied": False,
+                "fingerprint": action.fingerprint,
+                "params": stage_params,
+                "blocked": True,
+                "reason": reason,
+            }
+            if logger:
+                logger.info(f"{zarr_path.name}: {stage.name} blocked, {reason}")
+            continue
+
+        try:
+            result = stage.run(zarr_path, stage_params, logger)
+        except Exception as e:
+            if logger:
+                logger.warning(
+                    f"{zarr_path.name}: {stage.name} failed: "
+                    f"{type(e).__name__}: {e}"
+                )
+            stages[stage.name] = {
+                "satisfied": False,
+                "fingerprint": action.fingerprint,
+                "params": stage_params,
+                "failed": True,
+                "reason": f"{type(e).__name__}: {e}",
+            }
+            continue
+
+        entry: Dict[str, Any] = {
+            "satisfied": bool(result.satisfied),
+            "fingerprint": action.fingerprint,
+            "params": stage_params,
+            "stats": result.stats,
+        }
+        if result.refused:
+            entry["refused"] = True
+            entry["reason"] = result.refused
+        stages[stage.name] = entry
+        if result.wrote:
+            changed = True
+        if result.satisfied:
+            satisfied.add(stage.name)
+
+    state = {
+        "recipe_version": recipe.version,
+        "fingerprint": recipe.fingerprint(resolved),
+        "params": dict(resolved),
+        "stages": stages,
+        "complete": all(s.get("satisfied") for s in stages.values()),
+    }
+    # Only stamp a time when something actually happened. A pass that wrote
+    # nothing must leave the store byte-identical, or "did this change" can
+    # never be answered by comparing two snapshots.
+    if changed or state != {k: previous.get(k) for k in state}:
+        state["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # Re-opened here, deliberately, and not reused from above. A zarr group
+        # caches the attributes it was opened with, and every stage has just
+        # written its own through a group of its own. Writing this block
+        # through a handle opened before they ran, and then rebuilding the
+        # consolidated index from it, publishes a snapshot that predates all of
+        # them: the stage attributes are on disk and the index says they do not
+        # exist, so every reader sees a store that was never preprocessed.
+        root = zarr.open_group(str(zarr_path), mode="r+")
+        root.attrs[f"{PREP_ATTR_PREFIX}{recipe.model_family}"] = state
+        _consolidate(root, zarr_path, f"{recipe.model_family} preprocessing", logger)
+    else:
+        state["updated"] = previous.get("updated")
+
+    state["changed"] = changed
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Requests from the manager
+# ---------------------------------------------------------------------------
+#
+# An organiser sets the preprocessing parameters once in the Chiron UI and
+# applies them to every site in the federation. Each site's manager turns that
+# into a file here.
+#
+# The route is deliberately indirect. The HTTP layer in front of this data
+# directory is bioengine's, and bioengine is read only from this repository, so
+# there is no endpoint to add. What bioengine already offers is an
+# authenticated write: `bioengine.datasets.save_file` POSTs to /save and the
+# bytes land in `<data_dir>/saved/<user>/`. The manager writes a request there
+# and this loop picks it up, which needs no change on either side of a
+# boundary we do not own.
+#
+# Requests are not deleted after handling. The manager owns those files, the
+# status it reads back has to stay readable, and a handled request is
+# recognised by id, so re-reading one costs a comparison. Deleting would also
+# make "did my request arrive" unanswerable the moment it succeeded.
+PREP_REQUEST_PREFIX = "chiron-prep-request-"
+PREP_STATUS_PREFIX = "chiron-prep-status-"
+
+
+def _dataset_dirs(data_dir: Path) -> Dict[str, Path]:
+    """Dataset id to directory, matching how bioengine's catalogue keys them.
+
+    The id comes from the manifest and falls back to the directory name, which
+    is what `load_datasets` in bioengine's proxy server does. Resolving it the
+    same way here is what makes a request addressed to a dataset id land on the
+    right directory, rather than on one whose folder happens to share the name.
+    """
+    out: Dict[str, Path] = {}
+    for subdir in sorted(data_dir.iterdir()):
+        manifest = subdir / "manifest.yaml"
+        if not subdir.is_dir() or not manifest.exists():
+            continue
+        dataset_id = subdir.name
+        try:
+            import yaml
+
+            loaded = yaml.safe_load(manifest.read_text()) or {}
+            dataset_id = loaded.get("id") or subdir.name
+        except Exception:
+            pass
+        out[str(dataset_id)] = subdir
+    return out
+
+
+def _prepare_store(
+    zarr_path: Path,
+    model_family: str,
+    params: Optional[Mapping[str, Any]],
+    logger,
+) -> Dict[str, Any]:
+    """Apply one model's recipe to one store, never raising.
+
+    A store that cannot be prepared must not stop the ones after it. A site
+    with twenty zarrs and one corrupt file should end up with nineteen prepared
+    datasets and one recorded error, not an empty directory.
+    """
+    recipe = RECIPES.get(model_family)
+    if recipe is None:
+        return {"error": f"no preprocessing recipe for model family {model_family!r}"}
+    try:
+        return apply_recipe(zarr_path, recipe, params, logger)
+    except ValueError as e:
+        # Bad parameters. The operator's problem, and the message names which.
+        logger.warning(f"{zarr_path.name}: {model_family} preprocessing refused: {e}")
+        return {"error": str(e)}
+    except Exception as e:
+        logger.warning(
+            f"{zarr_path.name}: {model_family} preprocessing failed: "
+            f"{type(e).__name__}: {e}"
+        )
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+def _recipes_to_refresh(zarr_path: Path, logger) -> List[tuple]:
+    """``(model_family, params)`` pairs this store should be kept current for.
+
+    Three sources, and the order is the point.
+
+    Anything the store already records state for, **with the parameters it
+    records**, because a prepared store that silently stops being updated after
+    a version bump is worse than one that was never prepared: it looks ready
+    and is not. Carrying the recorded parameters forward is not a detail. The
+    scan runs every thirty seconds, so re-applying defaults here would quietly
+    undo an organiser's threshold within half a minute of them setting it, and
+    the store would look correct the whole time.
+
+    Tabula with defaults on a store that records nothing, which is what this
+    server did before recipes existed and what every site's prepared data
+    already expects.
+
+    Geneformer as well when the operator has switched it on, for a site that
+    wants it without going through the UI.
+    """
+    found: List[tuple] = []
+    try:
+        root = zarr.open_group(str(zarr_path), mode="r")
+        for family in RECIPES:
+            state = _read_prep_state(root, family)
+            if state:
+                found.append((family, state.get("params") or None))
+    except Exception as e:
+        logger.warning(f"{zarr_path.name}: cannot read recorded preprocessing: {e}")
+
+    if not found:
+        found.append((TABULA_RECIPE.model_family, None))
+    if _geneformer_prep_enabled() and not any(f == "geneformer" for f, _ in found):
+        found.append(("geneformer", None))
+    return found
+
+
+def _handle_prep_requests(data_dir: Path, logger) -> None:
+    """Apply any pending preprocessing requests and write their status back.
+
+    Scans `<data_dir>/saved/*/` rather than the dataset directories, because
+    that is where bioengine's /save endpoint puts what the manager writes, and
+    the main scan skips it: `saved/` carries no manifest.yaml at its own level,
+    so it is not a dataset.
+    """
+    saved = data_dir / "saved"
+    if not saved.is_dir():
+        return
+
+    datasets = _dataset_dirs(data_dir)
+
+    for user_dir in sorted(p for p in saved.iterdir() if p.is_dir()):
+        for request_file in sorted(user_dir.glob(f"{PREP_REQUEST_PREFIX}*.json")):
+            try:
+                request = json.loads(request_file.read_text())
+            except Exception as e:
+                logger.warning(f"Cannot read {request_file.name}: {e}")
+                continue
+
+            request_id = str(request.get("request_id") or "")
+            dataset_id = str(request.get("dataset_id") or "")
+            family = str(request.get("model_family") or "")
+            params = request.get("params") or {}
+
+            status_file = user_dir / (
+                PREP_STATUS_PREFIX + request_file.name[len(PREP_REQUEST_PREFIX):]
+            )
+            if status_file.exists():
+                try:
+                    previous = json.loads(status_file.read_text())
+                except Exception:
+                    previous = {}
+                if previous.get("request_id") == request_id and request_id:
+                    continue  # already handled, and handled under this id
+
+            started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            status: Dict[str, Any] = {
+                "request_id": request_id,
+                "dataset_id": dataset_id,
+                "model_family": family,
+                "params": params,
+                "started_at": started,
+            }
+
+            dataset_dir = datasets.get(dataset_id)
+            if dataset_dir is None:
+                status["state"] = "error"
+                status["error"] = (
+                    f"no dataset {dataset_id!r} on this site. It holds: "
+                    + (", ".join(sorted(datasets)) or "nothing")
+                )
+            elif family not in RECIPES:
+                status["state"] = "error"
+                status["error"] = (
+                    f"no preprocessing recipe for {family!r}. This server has: "
+                    + ", ".join(sorted(RECIPES))
+                )
+            else:
+                logger.info(
+                    f"Preprocessing request {request_id or '(no id)'}: "
+                    f"{family} on dataset {dataset_id} with {params or 'defaults'}"
+                )
+                stores: Dict[str, Any] = {}
+                for zarr_path in sorted(dataset_dir.glob("*.zarr")):
+                    stores[zarr_path.name] = _prepare_store(
+                        zarr_path, family, params, logger
+                    )
+                status["stores"] = stores
+                errors = [s["error"] for s in stores.values() if s.get("error")]
+                if not stores:
+                    status["state"] = "error"
+                    status["error"] = (
+                        f"dataset {dataset_id!r} holds no zarr store to prepare"
+                    )
+                elif len(errors) == len(stores):
+                    status["state"] = "error"
+                    status["error"] = errors[0]
+                else:
+                    status["state"] = "done"
+                    # One fingerprint per dataset, taken from the stores that
+                    # succeeded. Two sites comparing preprocessing compare this.
+                    prints = {
+                        s.get("fingerprint") for s in stores.values()
+                        if s.get("fingerprint")
+                    }
+                    status["fingerprint"] = prints.pop() if len(prints) == 1 else None
+                    if errors:
+                        status["partial_errors"] = errors
+
+            status["finished_at"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
+            try:
+                status_file.write_text(json.dumps(status, indent=2))
+            except Exception as e:
+                logger.warning(f"Cannot write {status_file.name}: {e}")
 
 
 def convert_anndata_to_zarr(data_dir: str, log_file: str = None):
-    """
-    Scan the data directory for AnnData files and convert them to Zarr format,
-    then ensure every zarr has an HVG ranking written to its var/ group.
+    """Convert new AnnData files to zarr, then keep every store's preprocessing
+    current and apply anything the manager has asked for.
 
-    For each .h5ad file found inside a dataset folder (identified by the presence
-    of a manifest.yaml), a .zarr file with the same stem is written alongside it.
-    For every zarr (newly-converted or already-existing), an HVG ranking is added
-    if missing so the trainer can pick the top-K most variable genes when the
-    model's input width is smaller than the dataset's n_vars. The original manifest
-    and X matrix are not modified.
+    For each .h5ad inside a dataset folder (identified by a manifest.yaml), a
+    .zarr with the same stem is written alongside it. The original manifest and
+    X matrix are never modified.
+
+    Preprocessing then runs per model family, through the declared recipes. A
+    store is kept current for whatever it already records, so a version bump
+    reaches prepared data without an operator having to ask, and nothing starts
+    work on a model nobody at this site is training.
 
     Args:
-        data_dir (str): Path to the root data directory to scan for AnnData files.
+        data_dir (str): Path to the root data directory to scan.
         log_file (str): Optional path to a log file.
     """
     logger = create_logger("AnnDataToZarrConverter", log_file=log_file)
     _data_dir = Path(data_dir)
-    for dataset_dir in _data_dir.iterdir():
+
+    for dataset_dir in sorted(_data_dir.iterdir()):
         if not (dataset_dir / "manifest.yaml").exists():
             continue
 
-        # 1) Convert any new .h5ad files
-        for anndata_file in dataset_dir.glob("*.h5ad"):
+        # 1) Convert any new .h5ad files.
+        for anndata_file in sorted(dataset_dir.glob("*.h5ad")):
             zarr_file = dataset_dir / (anndata_file.stem + ".zarr")
             if not zarr_file.exists():
                 logger.info(
-                    f"Dataset {dataset_dir.name} - Converting {anndata_file.name} to {zarr_file.name}..."
+                    f"Dataset {dataset_dir.name} - Converting "
+                    f"{anndata_file.name} to {zarr_file.name}..."
                 )
                 adata = ad.read_h5ad(anndata_file)
                 adata.write_zarr(zarr_file)
 
-        # 2) Apply Chiron's preprocessing to every zarr in this dataset folder.
-        #    Each step is independently idempotent on its own version attr, so
-        #    re-running this loop only does the missing work, and each refuses
-        #    a store that does not suit it rather than producing a confident
-        #    wrong answer.
-        #
-        #    Tabula's chain runs in dependency order: quality control first
-        #    because the Methods select HVGs from what survives it, then HVG
-        #    ranking, because value binning and UMAP both consume the selection
-        #    mask. Geneformer's step is appended rather than interleaved: it
-        #    shares no input and no output with any of them, so its position
-        #    here cannot change what they produce, and putting it last keeps
-        #    the cheap steps ahead of the expensive one.
-        steps = [
-            (_ensure_qc,            "quality control"),
-            (_ensure_hvg_rank,      "HVG ranking"),
-            (_ensure_var_columns_visible, "var column registration"),
-            (_ensure_hvg_histogram, "HVG histogram"),
-            (_ensure_binning,       "value binning"),
-            (_ensure_umap_embedding, "UMAP embedding"),
-        ]
-        if _geneformer_prep_enabled():
-            steps.append((_ensure_geneformer_ranks, "Geneformer rank ordering"))
-
+        # 2) Keep each store current for whichever models it is prepared for,
+        #    at the parameters it was prepared with.
         for zarr_path in sorted(dataset_dir.glob("*.zarr")):
-            for fn, label in steps:
-                try:
-                    fn(zarr_path, logger)
-                except Exception as e:
-                    logger.warning(
-                        f"{label} failed for {zarr_path.name}: "
-                        f"{type(e).__name__}: {e}"
-                    )
+            for family, params in _recipes_to_refresh(zarr_path, logger):
+                _prepare_store(zarr_path, family, params, logger)
+
+    # 3) Anything the manager has asked for since the last pass.
+    try:
+        _handle_prep_requests(_data_dir, logger)
+    except Exception as e:
+        logger.warning(
+            f"Preprocessing requests could not be read: {type(e).__name__}: {e}"
+        )
 
 
 def _zarr_conversion_loop(data_dir: str, log_file: str = None, stop_event: threading.Event = None):
