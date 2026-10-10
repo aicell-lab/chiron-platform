@@ -67,6 +67,32 @@ describe('datasetIncompatibleReason', () => {
       .toContain('HGNC gene symbol');
   });
 
+  // Raw CELLxGENE data is the shape a site's own data usually arrives in: the
+  // Ensembl accessions sit in the var index and there is no feature_id column
+  // at all. The data server picks the column by measuring vocabulary overlap
+  // and records what it picked, and the page has to believe that measurement
+  // rather than re-deciding from the column name. Found by the end-to-end
+  // suite, which could not tick such a dataset for Geneformer even though the
+  // server had prepared it and the trainer read it.
+  const RAW_CELLXGENE = [
+    {
+      name: 'part_a.zarr',
+      var_columns: ['_index', 'feature_name', 'feature_biotype'],
+      geneformer_gene_id_column: '_index',
+    },
+  ];
+
+  test('a store the server resolved Ensembl ids for is readable without feature_id', () => {
+    expect(datasetIncompatibleReason('geneformer', RAW_CELLXGENE)).toBeUndefined();
+  });
+
+  test('still refuses a store the server never resolved ids for', () => {
+    // The same columns, without the server's measurement. Absent means not
+    // measured, so the column-name test is all there is and it fails.
+    const unmeasured = [{ name: 'part_a.zarr', var_columns: ['_index', 'feature_name'] }];
+    expect(datasetIncompatibleReason('geneformer', unmeasured)).toBeDefined();
+  });
+
   test('a dataset carrying both columns is readable by every model', () => {
     for (const family of ['tabula', 'scgpt', 'geneformer', 'scfoundation']) {
       expect(datasetIncompatibleReason(family, THYMUS)).toBeUndefined();

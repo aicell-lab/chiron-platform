@@ -308,6 +308,24 @@ def prepare(session, params=None, apply_timeout=600):
     apply_button.first.click(timeout=30_000)
     print("  [prepare] applied to every selected site", flush=True)
 
+    # Wait for the step to ACKNOWLEDGE the click before waiting for it to
+    # finish. Going straight to "no site says Preparing" passed instantly,
+    # because at the moment of the click every card still showed the previous
+    # run's Prepared badge. The suite then read the store back and saw the old
+    # thresholds, which looks exactly like the request never arrived.
+    if not appeared(page, lambda: page.locator("text=Preparing").count(), 60,
+                    "a site to start preparing"):
+        # Report the observation, not a cause. Never seeing Preparing has two
+        # very different explanations and this cannot tell them apart: the
+        # stores already carried the recipe so nothing ran, or a small store
+        # finished between two eight-second polls. Only the data server knows
+        # which, so the caller has to check the store rather than trust this.
+        print("  [prepare] no site was seen in Preparing: either nothing "
+              "needed recomputing or it finished between polls. Check the "
+              "store to tell which", flush=True)
+        session.shot("prepared")
+        return
+
     # Preparing a real store takes minutes, and the step polls every 8 s.
     wait_for(
         page,
