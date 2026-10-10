@@ -795,3 +795,31 @@ def test_a_failed_request_can_be_retried_unchanged(tmp_path):
     status = json.loads(status_file.read_text())
     assert status["state"] == "done", status
     assert attrs(dataset_dir / "demo.zarr")["chiron_qc_min_cells_per_gene"] == 40
+
+
+def test_the_scan_loop_does_not_accumulate_log_handlers():
+    """One handler, however many times the scan runs.
+
+    ``bioengine.utils.create_logger`` calls ``addHandler`` unconditionally on
+    ``logging.getLogger(name)``, so calling it again for the same name attaches
+    another console handler rather than replacing the first. The scan loop used
+    to call it once per poll, which meant every line was emitted once per
+    elapsed poll. On a bench server two hours in, a request that was handled
+    exactly once appeared 259 times. That is worse than noisy: a line repeated
+    259 times reads as work repeated 259 times, so the logs stop being usable
+    as evidence of what the server did.
+    """
+    import logging
+
+    from chiron.datasets.__main__ import _converter_logger
+
+    name = "AnnDataToZarrConverter"
+    logging.getLogger(name).handlers.clear()
+    import chiron.datasets.__main__ as module
+
+    module._LOGGER_CACHE.clear()
+
+    for _ in range(25):
+        _converter_logger(None)
+
+    assert len(logging.getLogger(name).handlers) == 1

@@ -43,6 +43,28 @@ ad.settings.zarr_write_format = 3
 
 ZARR_POLL_INTERVAL = 30  # seconds
 
+#: Built once and reused. ``bioengine.utils.create_logger`` calls
+#: ``addHandler`` unconditionally on ``logging.getLogger(name)``, so calling it
+#: again for the same name attaches a second console handler to the same
+#: logger rather than replacing the first. The scan loop below calls it once
+#: per poll, so handlers accumulated at one per 30 seconds and every line was
+#: emitted once per handler. Measured on a bench server: a request handled
+#: exactly once, two hours in, appeared 259 times. The logs become unreadable
+#: and, worse, unusable as evidence, because a line repeated 259 times looks
+#: like work repeated 259 times. Fixed upstream too, but this keeps the server
+#: correct on any bioengine that still has it.
+_LOGGER_CACHE: Dict[str, Any] = {}
+
+
+def _converter_logger(log_file: Optional[str] = None):
+    """The scan loop's logger, created on first use and reused after that."""
+    key = str(log_file or "")
+    if key not in _LOGGER_CACHE:
+        _LOGGER_CACHE[key] = create_logger(
+            "AnnDataToZarrConverter", log_file=log_file
+        )
+    return _LOGGER_CACHE[key]
+
 # The model's input sequence length, read once at process startup. The binned
 # layer and the HVG selection mask are both cut to this width, so it is the one
 # number this server has to share with whatever model is going to train on the
@@ -2862,7 +2884,7 @@ def convert_anndata_to_zarr(data_dir: str, log_file: str = None):
         data_dir (str): Path to the root data directory to scan.
         log_file (str): Optional path to a log file.
     """
-    logger = create_logger("AnnDataToZarrConverter", log_file=log_file)
+    logger = _converter_logger(log_file)
     _data_dir = Path(data_dir)
 
     # First, so that a UI opened against a freshly started server has a form to
@@ -2906,8 +2928,7 @@ def _zarr_conversion_loop(data_dir: str, log_file: str = None, stop_event: threa
         try:
             convert_anndata_to_zarr(data_dir, log_file=log_file)
         except Exception as e:
-            logger = create_logger("AnnDataToZarrConverter", log_file=log_file)
-            logger.warning(f"Zarr conversion poll failed: {e}")
+            _converter_logger(log_file).warning(f"Zarr conversion poll failed: {e}")
 
 
 def _check_environment() -> None:
