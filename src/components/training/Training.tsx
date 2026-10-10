@@ -26,6 +26,8 @@ import { appTooOld, imageTooOld, imageUpgradeInstruction, VersionFloor } from '.
 import { DEFAULT_WEIGHT_TRANSPORT, WEIGHT_TRANSPORT_LABELS, WeightTransport, readWeightTransport } from '../../config/federation';
 import { RunConfig, useTrainingConfigStore } from '../../store/trainingConfigStore';
 import { promptReportIssue } from '../../utils/reportIssuePrompt';
+import PreprocessingStep from './PreprocessingStep';
+import { preprocessingTargets, summariseDataset } from '../../config/preprocessing';
 
 const CountryFlag: React.FC<{ countryName?: string; countryCode?: string; className?: string }> = ({ countryName, countryCode, className }) => {
   const flagUrl = countryCode
@@ -932,6 +934,8 @@ const Training: React.FC = () => {
     umap_indices: number[] | null;
   };
   const [variabilityDialog, setVariabilityDialog] = useState<CardTarget | null>(null);
+  // Which dataset's per-file breakdown is open in the worker dialog, if any.
+  const [expandedDatasetFiles, setExpandedDatasetFiles] = useState<string | null>(null);
   const [umapDialog, setUmapDialog] = useState<CardTarget | null>(null);
   const [cardDetailsCache, setCardDetailsCache] = useState<Record<string, CardDetails | 'loading' | 'error'>>({});
   const cardKey = (t: CardTarget) => `${t.serviceId}::${t.datasetId}::${t.zarrName}`;
@@ -1177,7 +1181,7 @@ const Training: React.FC = () => {
   const [isInfoModalLoading, setIsInfoModalLoading] = useState(false);
 
   // Step navigation
-  const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
+  const [currentStep, setCurrentStep] = useState<1 | 2 | 3 | 4>(1);
   // Keep the URL's `?step=` param in sync with `currentStep` so each tab has
   // its own shareable URL. Uses replace (not push) so tab-switching does not
   // pollute the browser history — Back should return to the previous page.
@@ -1205,13 +1209,13 @@ const Training: React.FC = () => {
   //     Training Running / Start Training header land right under the
   //     navbar. Covers both wizard navigation (Select Apps → Train) and
   //     Runs-page deep-links (`?step=train` from a View button).
-  //   Setup Workers (1) / Select Apps (2) → keep the historical "scroll
+  //   Set up sites (1) / Select sites (2) → keep the historical "scroll
   //     to the very top" so the "Federated Training" headline stays
   //     visible as a landing cue.
   // Deferred with requestAnimationFrame so the ref's rect reflects the
-  // freshly-mounted step-3 content before we compute the scroll offset.
+  // freshly-mounted Train content before we compute the scroll offset.
   useEffect(() => {
-    if (currentStep === 3) {
+    if (currentStep === 4) {
       requestAnimationFrame(() => scrollMainContentToTop());
     } else {
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1237,13 +1241,18 @@ const Training: React.FC = () => {
   // Apps so the user can adjust trainers before starting more rounds). A
   // future "View" button on a completed run would land at ?step=train to
   // show the run's loss curves and Save Weights panel directly.
-  const STEP_NAMES: Record<1 | 2 | 3, 'workers' | 'apps' | 'train'> = {
-    1: 'workers', 2: 'apps', 3: 'train',
+  //
+  // The old names are kept as aliases. Links to ?step=apps and ?step=train
+  // exist in the Runs page, in saved bookmarks and in the E2E suite, and
+  // renaming a step must not break a link somebody already has.
+  const STEP_NAMES: Record<1 | 2 | 3 | 4, 'workers' | 'apps' | 'prepare' | 'train'> = {
+    1: 'workers', 2: 'apps', 3: 'prepare', 4: 'train',
   };
-  const STEP_ALIASES: Record<string, 1 | 2 | 3> = {
-    workers: 1, setup: 1,
+  const STEP_ALIASES: Record<string, 1 | 2 | 3 | 4> = {
+    workers: 1, setup: 1, sites: 1,
     apps: 2, select: 2,
-    train: 3,
+    prepare: 3, preprocess: 3, data: 3,
+    train: 4,
   };
   const urlStep = useMemo(() => {
     const q = location.search.startsWith('?') ? location.search.slice(1) : location.search;
@@ -1251,7 +1260,7 @@ const Training: React.FC = () => {
     if (!raw) return null;
     if (raw in STEP_ALIASES) return STEP_ALIASES[raw];
     const n = parseInt(raw, 10);
-    if (n === 1 || n === 2 || n === 3) return n as 1 | 2 | 3;
+    if (n >= 1 && n <= 4) return n as 1 | 2 | 3 | 4;
     return null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search]);
@@ -1460,6 +1469,102 @@ const Training: React.FC = () => {
       preprocessingWarning: datasetPreprocessingWarning(family, manifest?.zarr_files),
     }));
   }, [managers, launchDialogManagerId, workerImageFor]);
+
+  /**
+   * The store a dataset's variability and embedding dialogs open against.
+   *
+   * A dataset is a directory of zarr files and the dialogs render one store's
+   * arrays, so one has to be chosen. The largest is chosen, because a
+   * distribution drawn from the biggest file is the most representative one
+   * available without the manager merging per-gene arrays it would have to
+   * fetch in full. Which file it was is shown in the dialog, so the picture is
+   * never presented as the whole dataset when it is one file of several.
+   */
+  const representativeStore = useCallback(
+    (managerId: string, datasetId: string) => {
+      const manager = managers.find(m => m.serviceId === managerId);
+      const files = (manager?.datasetsInfo?.[datasetId]?.zarr_files || []) as any[];
+      return summariseDataset(files).representative;
+    },
+    [managers]
+  );
+
+  /**
+   * A site's name as a person would say it, for the Prepare step.
+   *
+   * The map already answers this question and answers it the same way, so the
+   * two read consistently: where the worker is when it says, and the workspace
+   * it belongs to when it does not.
+   */
+  const siteLabelFor = useCallback((managerId: string): string => {
+    const manager = managers.find(m => m.serviceId === managerId);
+    const geo = manager?.workerInfo?.worker_info?.geo_location;
+    if (geo?.region && geo?.country_name) return `${geo.region}, ${geo.country_name}`;
+    return manager?.workspace || managerId;
+  }, [managers]);
+
+  /**
+   * Every site and dataset joining this run, which is what the Prepare step
+   * applies the organiser's settings to.
+   *
+   * Taken from the trainers REGISTERED with the selected orchestrator rather
+   * than from every trainer on every connected worker. A worker can be running
+   * a trainer that is not part of this federation, and preparing its data
+   * would be work nobody asked for on a dataset nobody is training.
+   */
+  /**
+   * A stable reference for the Prepare step's RPCs.
+   *
+   * Not an inline arrow. The Prepare step depends on this to decide when to
+   * refetch, and this page re-renders on a ten-second trainer poll and a
+   * fifteen-second discovery poll. An inline arrow is a new function every
+   * time, so the schema fetch and every per-site status fetch re-fired on
+   * every poll, forever, against every site in the federation.
+   */
+  const callManagerForPreprocessing = useCallback(
+    (
+      managerId: string,
+      method: string,
+      args: Record<string, any>,
+      options?: { timeoutMs?: number }
+    ): Promise<any> => callHyphaService<any>(managerId, method, args, options),
+    []
+  );
+
+  const preprocessingTargetList = useMemo(() => {
+    const registered = new Set(registeredTrainers);
+    const participants = trainers
+      .filter(t =>
+        (t.serviceIds || []).some((s: any) => registered.has(s?.websocket_service_id))
+      )
+      .map(t => ({
+        managerId: t.managerId,
+        datasets: t.datasets,
+        siteLabel: siteLabelFor(t.managerId),
+      }));
+    // The same fallback the launch dialog uses, for the same reason: an image
+    // that predates per-model support reports no family, and dropping such a
+    // site from the preparation would leave it training on differently
+    // prepared data while this page showed the rest as agreed. That is the
+    // failure the whole step exists to prevent, so it must not be how the step
+    // handles an old worker.
+    return preprocessingTargets(
+      participants,
+      id => workerImageFor(id)?.model_family || DEFAULT_MODEL_FAMILY
+    );
+  }, [trainers, registeredTrainers, siteLabelFor, workerImageFor]);
+
+  /**
+   * The model the Prepare step is preparing for, when every site agrees on one.
+   *
+   * A federation whose workers run different model images cannot be prepared
+   * from one form, because the recipes differ. That is already blocked
+   * elsewhere, and this reports undefined rather than picking one of them.
+   */
+  const preprocessingFamily = useMemo(() => {
+    const families = new Set(preprocessingTargetList.map(t => t.modelFamily));
+    return families.size === 1 ? Array.from(families)[0] : undefined;
+  }, [preprocessingTargetList]);
 
   /**
    * Selected datasets the worker's model cannot read. A dataset can be ticked
@@ -3706,8 +3811,11 @@ const Training: React.FC = () => {
       return hasOrch && hasTrainer ? 'both' : hasOrch ? 'orchestrator' : hasTrainer ? 'trainer' : 'connected';
     };
 
-    if (currentStep === 3) {
-      // Train stage: only workers with selected orchestrator or registered trainers,
+    if (currentStep === 3 || currentStep === 4) {
+      // Prepare and Train both show the federation itself: only the workers
+      // with the selected orchestrator or a registered trainer, roled by the
+      // apps actually taking part rather than by everything on the worker.
+      // Preparing acts on exactly that set, so it should look like it.
       // and their role reflects only the selected/registered apps (not all apps on the worker).
       const selectedOrchObj = selectedOrchestrator
         ? orchestrators.find(o => `${o.managerId}::${o.appId}` === selectedOrchestrator)
@@ -4071,7 +4179,11 @@ const Training: React.FC = () => {
   const stepEnabled = (step: number) => {
     if (step === 1) return true;
     if (step === 2) return managers.length > 0;
-    if (step === 3) return !!selectedOrchestrator;
+    // Preparing and training both need a federation to act on. Preparing is
+    // not made a precondition of training: a site may have been prepared on a
+    // previous visit, or out of band, and blocking the Train step on this
+    // page having been opened would strand a run that is ready.
+    if (step === 3 || step === 4) return !!selectedOrchestrator;
     return false;
   };
 
@@ -4089,9 +4201,10 @@ const Training: React.FC = () => {
       {/* Step Navigator */}
       <div className="flex items-center mb-8">
         {[
-          { num: 1, label: 'Setup Workers', desc: 'Connect workers & launch apps' },
-          { num: 2, label: 'Select Apps', desc: 'Choose orchestrator & trainers' },
-          { num: 3, label: 'Train', desc: 'Configure & run training' },
+          { num: 1, label: 'Set up sites', desc: 'Connect a worker and launch its apps' },
+          { num: 2, label: 'Select sites', desc: 'Choose which sites and datasets join' },
+          { num: 3, label: 'Prepare data', desc: 'Set the preprocessing and review it' },
+          { num: 4, label: 'Train', desc: 'Configure and run the training' },
         ].map((step, idx) => {
           const enabled = stepEnabled(step.num);
           const active = currentStep === step.num;
@@ -4099,7 +4212,7 @@ const Training: React.FC = () => {
           return (
             <React.Fragment key={step.num}>
               <button
-                onClick={() => enabled && setCurrentStep(step.num as 1 | 2 | 3)}
+                onClick={() => enabled && setCurrentStep(step.num as 1 | 2 | 3 | 4)}
                 disabled={!enabled}
                 className={`flex items-center gap-3 group transition-all duration-200 ${!enabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
               >
@@ -4684,11 +4797,11 @@ const Training: React.FC = () => {
                   <div className="flex items-center gap-3">
                     <FaCheckCircle className="text-blue-500" size={16} />
                     <span className="text-sm text-blue-800 font-medium">
-                      {registeredTrainers.length} trainer{registeredTrainers.length !== 1 ? 's' : ''} registered to orchestrator
+                      {registeredTrainers.length} site{registeredTrainers.length !== 1 ? 's' : ''} joining this training
                     </span>
                   </div>
                   <button onClick={() => setCurrentStep(3)} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 transition-all">
-                    Next: Train
+                    Next: Prepare data
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
                   </button>
                 </div>
@@ -4697,14 +4810,51 @@ const Training: React.FC = () => {
               <div className="flex justify-between">
                 <button onClick={() => setCurrentStep(1)} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
-                  Back to Setup
+                  Back to site setup
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ====== STEP 3: PREPARE THE DATA ======
+              Between picking the sites and training them, because every site
+              has to filter its data the same way and because the result is
+              worth looking at before a run rather than after one. It used to
+              be neither: the thresholds were compiled into the data server,
+              and seeing what they did meant leaving this page for the worker
+              dialog and coming back. */}
+          {currentStep === 3 && (
+            <div className="space-y-4">
+              <PreprocessingStep
+                targets={preprocessingTargetList}
+                modelFamily={preprocessingFamily}
+                modelLabel={modelDisplayName(workerImageFor(preprocessingTargetList[0]?.managerId))}
+                callManager={callManagerForPreprocessing}
+                onOpenVariability={(managerId, datasetId) => {
+                  const store = representativeStore(managerId, datasetId);
+                  if (store) setVariabilityDialog({ serviceId: managerId, datasetId, zarrName: store.name, nVars: store.n_vars, nSamples: store.n_samples });
+                }}
+                onOpenUmap={(managerId, datasetId) => {
+                  const store = representativeStore(managerId, datasetId);
+                  if (store) setUmapDialog({ serviceId: managerId, datasetId, zarrName: store.name, nVars: store.n_vars, nSamples: store.n_samples });
+                }}
+              />
+
+              <div className="flex justify-between">
+                <button onClick={() => setCurrentStep(2)} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+                  Back to site selection
+                </button>
+                <button onClick={() => setCurrentStep(4)} disabled={!stepEnabled(4)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-[transform,background-color] duration-150 ease-out active:scale-[0.98]">
+                  Continue to training
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
                 </button>
               </div>
             </div>
           )}
 
           {/* ====== STEP 3: TRAIN ====== */}
-          {currentStep === 3 && (
+          {currentStep === 4 && (
             <div className="space-y-4">
               {/* Config + Controls */}
               <div className={`rounded-2xl border shadow-sm transition-colors ${isActivelyTraining ? 'bg-blue-50 border-blue-200' : 'bg-white border-emerald-200'}`}>
@@ -5343,9 +5493,9 @@ const Training: React.FC = () => {
               })()}
 
               <div className="flex justify-start">
-                <button onClick={() => setCurrentStep(2)} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors">
+                <button onClick={() => setCurrentStep(3)} className="flex items-center gap-2 px-4 py-2 text-gray-600 text-sm font-medium hover:text-gray-900 transition-colors">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
-                  Back to Selection
+                  Back to data preparation
                 </button>
               </div>
             </div>
@@ -5861,96 +6011,161 @@ const Training: React.FC = () => {
                                   {!hasAccess && <span className="text-xs text-red-600 font-medium">No Access</span>}
                                 </div>
                                 {manifest.description && <p className="text-xs text-gray-500 mb-1.5">{manifest.description}</p>}
-                                {manifest.zarr_files && manifest.zarr_files.length > 0 && (
-                                  <table className="w-full text-xs mt-1.5 table-fixed">
-                                    {/* Distribute width so the file path doesn't crowd the buttons.
-                                        File 40% | Cells 13% | Genes 13% | Variability 17% | UMAP 17%. */}
-                                    <colgroup>
-                                      <col style={{ width: '40%' }} />
-                                      <col style={{ width: '13%' }} />
-                                      <col style={{ width: '13%' }} />
-                                      <col style={{ width: '17%' }} />
-                                      <col style={{ width: '17%' }} />
-                                    </colgroup>
-                                    <thead>
-                                      <tr className="text-gray-400">
-                                        <th className="text-left font-medium pb-0.5">File</th>
-                                        <th className="text-right font-medium pb-0.5">Cells</th>
-                                        <th className="text-right font-medium pb-0.5">Genes</th>
-                                        <th className="text-center font-medium pb-0.5">Variability</th>
-                                        <th className="text-center font-medium pb-0.5">UMAP</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {manifest.zarr_files.map((f: any) => {
-                                        const hist: number[] | undefined = f.hvg_histogram_counts;
-                                        const hasUmap = !!f.umap_version;
-                                        // 1200 in the current framework.yaml; the data-server stamps
-                                        // each zarr with the actual value it used so the UI doesn't
-                                        // have to assume.
-                                        const inFeature: number | null = typeof f.hvg_in_feature === 'number' ? f.hvg_in_feature : null;
-                                        const nSelected: number | null = typeof f.hvg_n_selected === 'number' ? f.hvg_n_selected : null;
-                                        return (
-                                          <React.Fragment key={f.name}>
-                                            <tr className="border-t border-gray-200">
-                                              <td className="py-0.5 font-mono text-gray-600 text-xs truncate" title={f.name}>{f.name}</td>
-                                              <td className="py-0.5 text-right text-gray-600">{f.n_samples?.toLocaleString() ?? '-'}</td>
-                                              <td className="py-0.5 text-right text-gray-600">
-                                                {f.n_vars?.toLocaleString() ?? '-'}
-                                              </td>
-                                              <td className="py-0.5 text-center">
-                                                {hist && hist.length > 0 ? (
+                                {/* One row per DATASET, not per file.
+                                    A dataset is a directory of zarr files that
+                                    the trainer reads as one thing, so a row
+                                    per file made the operator add up numbers
+                                    the platform already knows how to add, and
+                                    repeated the two View buttons once per file
+                                    for a picture of one dataset. The per-file
+                                    counts are still here, one click away,
+                                    because a dataset being five files of very
+                                    different sizes is the kind of thing that
+                                    explains a result later. */}
+                                {(() => {
+                                  const summary = summariseDataset(manifest.zarr_files);
+                                  if (summary.nFiles === 0) return null;
+                                  const store = summary.representative;
+                                  const first = (manifest.zarr_files || [])[0] || {};
+                                  const inFeature: number | null = typeof first.hvg_in_feature === 'number' ? first.hvg_in_feature : null;
+                                  const nSelected: number | null = typeof first.hvg_n_selected === 'number' ? first.hvg_n_selected : null;
+                                  const qcCells: number | null = typeof first.qc_n_cells_kept === 'number' ? first.qc_n_cells_kept : null;
+                                  const qcGenes: number | null = typeof first.qc_n_genes_kept === 'number' ? first.qc_n_genes_kept : null;
+                                  const expandKey = `${infoModalServiceId || ''}::${datasetId}`;
+                                  const expanded = expandedDatasetFiles === expandKey;
+                                  return (
+                                    <div className="mt-1.5">
+                                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-600">
+                                        <span>
+                                          <strong className="text-gray-800">{summary.nSamples.toLocaleString()}</strong> cells
+                                        </span>
+                                        <span>
+                                          <strong className="text-gray-800">{summary.nVars.toLocaleString()}</strong> genes
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() => setExpandedDatasetFiles(expanded ? null : expandKey)}
+                                          className="text-blue-600 hover:text-blue-800 underline decoration-dotted underline-offset-2"
+                                        >
+                                          {summary.nFiles} file{summary.nFiles === 1 ? '' : 's'}
+                                        </button>
+                                      </div>
+
+                                      {expanded && (
+                                        <table className="w-full text-[11px] mt-1.5 table-fixed">
+                                          <colgroup>
+                                            <col style={{ width: '34%' }} />
+                                            <col style={{ width: '13%' }} />
+                                            <col style={{ width: '13%' }} />
+                                            <col style={{ width: '20%' }} />
+                                            <col style={{ width: '20%' }} />
+                                          </colgroup>
+                                          <thead>
+                                            <tr className="text-gray-400">
+                                              <th className="text-left font-medium pb-0.5">File</th>
+                                              <th className="text-right font-medium pb-0.5">Cells</th>
+                                              <th className="text-right font-medium pb-0.5">Genes</th>
+                                              <th className="text-center font-medium pb-0.5">Variability</th>
+                                              <th className="text-center font-medium pb-0.5">UMAP</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {(manifest.zarr_files || []).map((f: any) => (
+                                              <tr key={f.name} className="border-t border-gray-200">
+                                                <td className="py-0.5 font-mono text-gray-600 truncate" title={f.name}>{f.name}</td>
+                                                <td className="py-0.5 text-right text-gray-600">{f.n_samples?.toLocaleString() ?? '-'}</td>
+                                                <td className="py-0.5 text-right text-gray-600">{f.n_vars?.toLocaleString() ?? '-'}</td>
+                                                {/* Per file, because the two
+                                                    dataset-level buttons open
+                                                    the largest store and that
+                                                    is not always the one a
+                                                    reader wants. Without this
+                                                    there was no way to see
+                                                    file 3's embedding at all. */}
+                                                <td className="py-0.5 text-center">
                                                   <button
                                                     type="button"
                                                     onClick={() => infoModalServiceId && setVariabilityDialog({ serviceId: infoModalServiceId, datasetId, zarrName: f.name, nVars: f.n_vars, nSamples: f.n_samples })}
-                                                    disabled={!infoModalServiceId}
-                                                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded transition-[transform,background-color] duration-150 ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50"
+                                                    disabled={!infoModalServiceId || !(f.hvg_histogram_counts?.length)}
+                                                    className="px-1.5 py-0.5 text-[10px] font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded disabled:opacity-40 disabled:cursor-default"
                                                   >
-                                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 17V5m0 12l4-4 4 4 6-8 4 4" />
-                                                    </svg>
-                                                    View
+                                                    {f.hvg_histogram_counts?.length ? 'Variability' : 'computing…'}
                                                   </button>
-                                                ) : (
-                                                  <span className="text-[10px] text-gray-400 italic">computing…</span>
-                                                )}
-                                              </td>
-                                              <td className="py-0.5 text-center">
-                                                {hasUmap ? (
+                                                </td>
+                                                <td className="py-0.5 text-center">
                                                   <button
                                                     type="button"
                                                     onClick={() => infoModalServiceId && setUmapDialog({ serviceId: infoModalServiceId, datasetId, zarrName: f.name, nVars: f.n_vars, nSamples: f.n_samples })}
-                                                    disabled={!infoModalServiceId}
-                                                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded transition-[transform,background-color] duration-150 ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50"
+                                                    disabled={!infoModalServiceId || !f.umap_version}
+                                                    className="px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded disabled:opacity-40 disabled:cursor-default"
                                                   >
-                                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                      <circle cx="6" cy="9" r="1.5" /><circle cx="11" cy="6" r="1.5" /><circle cx="15" cy="11" r="1.5" /><circle cx="9" cy="14" r="1.5" /><circle cx="17" cy="17" r="1.5" /><circle cx="7" cy="18" r="1.5" />
-                                                    </svg>
-                                                    View
+                                                    {f.umap_version ? 'Embedding' : 'computing…'}
                                                   </button>
-                                                ) : (
-                                                  <span className="text-[10px] text-gray-400 italic">computing…</span>
-                                                )}
-                                              </td>
-                                            </tr>
-                                            {nSelected !== null && inFeature !== null && (
-                                              <tr>
-                                                <td colSpan={5} className="pb-0.5 pl-2 pt-0">
-                                                  <p className="text-[10px] text-gray-500 leading-tight">
-                                                    Training on the top{' '}
-                                                    <strong className="text-gray-700">{nSelected.toLocaleString()}</strong>{' '}
-                                                    most variable genes
-                                                    {nSelected < inFeature ? ` (model input length ${inFeature.toLocaleString()}, padded)` : ''}.
-                                                  </p>
                                                 </td>
                                               </tr>
-                                            )}
-                                          </React.Fragment>
-                                        );
-                                      })}
-                                    </tbody>
-                                  </table>
-                                )}
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      )}
+
+                                      {qcCells !== null && qcGenes !== null && (
+                                        <p className="text-[10px] text-gray-500 leading-tight mt-1.5">
+                                          Quality control kept{' '}
+                                          <strong className="text-gray-700">{qcCells.toLocaleString()}</strong> cells and{' '}
+                                          <strong className="text-gray-700">{qcGenes.toLocaleString()}</strong> genes
+                                          {typeof first.qc_min_genes_per_cell === 'number' && typeof first.qc_min_cells_per_gene === 'number'
+                                            ? ` (at least ${first.qc_min_genes_per_cell.toLocaleString()} detected genes per cell, and detected in at least ${first.qc_min_cells_per_gene.toLocaleString()} cells)`
+                                            : ''}
+                                          {summary.nFiles > 1 ? ', in the first file of this dataset' : ''}.
+                                        </p>
+                                      )}
+
+                                      {nSelected !== null && inFeature !== null && (
+                                        <p className="text-[10px] text-gray-500 leading-tight mt-1">
+                                          Training on the top{' '}
+                                          <strong className="text-gray-700">{nSelected.toLocaleString()}</strong>{' '}
+                                          most variable genes
+                                          {nSelected < inFeature ? ` (model input length ${inFeature.toLocaleString()}, padded)` : ''}
+                                          {summary.nFiles > 1 ? ', in the first file of this dataset' : ''}.
+                                        </p>
+                                      )}
+
+                                      {first.upstream_reduced_reason ? (
+                                        <p className="text-[10px] text-amber-700 leading-tight mt-1">
+                                          Left as it arrived{summary.nFiles > 1 ? ' (first file)' : ''}: {first.upstream_reduced_reason}
+                                        </p>
+                                      ) : null}
+
+                                      {/* Once per dataset, not once per file. Both dialogs
+                                          render one store's arrays, so they open against the
+                                          largest, and the dialog names which file that was. */}
+                                      <div className="flex gap-2 mt-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => infoModalServiceId && store && setVariabilityDialog({ serviceId: infoModalServiceId, datasetId, zarrName: store.name, nVars: store.n_vars, nSamples: store.n_samples })}
+                                          disabled={!infoModalServiceId || !summary.hasVariability || !store}
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded transition-[transform,background-color] duration-150 ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50"
+                                        >
+                                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 17V5m0 12l4-4 4 4 6-8 4 4" />
+                                          </svg>
+                                          {summary.hasVariability ? 'Gene variability' : 'Variability computing…'}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => infoModalServiceId && store && setUmapDialog({ serviceId: infoModalServiceId, datasetId, zarrName: store.name, nVars: store.n_vars, nSamples: store.n_samples })}
+                                          disabled={!infoModalServiceId || !summary.hasUmap || !store}
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded transition-[transform,background-color] duration-150 ease-out active:scale-[0.97] disabled:cursor-default disabled:opacity-50"
+                                        >
+                                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <circle cx="6" cy="9" r="1.5" /><circle cx="11" cy="6" r="1.5" /><circle cx="15" cy="11" r="1.5" /><circle cx="9" cy="14" r="1.5" /><circle cx="17" cy="17" r="1.5" /><circle cx="7" cy="18" r="1.5" />
+                                          </svg>
+                                          {summary.hasUmap ? 'Embedding' : 'Embedding computing…'}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })()}
                               </div>
                             );
                           })}

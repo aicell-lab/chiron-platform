@@ -28,20 +28,31 @@ from playwright.sync_api import TimeoutError as PWTimeout
 
 from session import appeared, dismiss_error, wait_for
 
+# The wizard's steps, by their visible label, each with a string that only
+# appears once that step has rendered. The labels changed when the Prepare
+# step landed: they now name what the user is doing (choosing sites) rather
+# than what the system is doing (selecting app service ids).
+STEP_SETUP = "Set up sites"
+STEP_SELECT = "Select sites"
+STEP_PREPARE = "Prepare data"
+STEP_TRAIN = "Train"
+
 STEP_MARKERS = {
-    "Setup Workers": "BioEngine Workers",
-    "Select Apps": "Select one orchestrator to coordinate training",
-    "Train": "Per Round Timeout",
+    STEP_SETUP: "BioEngine Workers",
+    STEP_SELECT: "Select one orchestrator to coordinate training",
+    STEP_PREPARE: "Prepare the data",
+    STEP_TRAIN: "Per Round Timeout",
 }
 
 # add_trainer can 404 on a transient pinned service lookup (bioengine #164).
 REGISTER_ATTEMPTS = 4
-# Checks of 5s each that "Next: Train" must survive before it is believed.
+# Checks of 5s each that the step-2 continue button must survive before it is
+# believed.
 REGISTER_STABLE_CHECKS = 3
 
 
 def goto_step(page, label):
-    """Click one of the three wizard steps in the header stepper.
+    """Click one of the four wizard steps in the header stepper.
 
     The stepper disables a step until its prerequisites are met, and a click on
     a disabled step is a silent no-op, so confirm the target step actually
@@ -87,8 +98,14 @@ def trainer_checkboxes(page):
     return page.locator("label[data-managerid] input[type=checkbox]")
 
 
+#: The button that leaves step 2. It appears only once an orchestrator is
+#: selected and at least one trainer is registered, which is why the
+#: registration helpers watch for it rather than for a checkbox state.
+NEXT_FROM_SELECT = "Next: Prepare data"
+
+
 def next_train_visible(page):
-    return page.get_by_role("button", name="Next: Train").count() > 0
+    return page.get_by_role("button", name=NEXT_FROM_SELECT).count() > 0
 
 
 def workers_loaded(page):
@@ -124,7 +141,7 @@ def ensure_registered(page):
     """Tick the trainer row and confirm the orchestrator really took it.
 
     add_trainer intermittently 404s on the pinned service lookup. The row stays
-    checked when it does, so `is_checked()` proves nothing, and "Next: Train"
+    checked when it does, so `is_checked()` proves nothing, and the continue
     is rendered from that same local state, so the button merely appearing
     proves nothing either: the next `list_trainers` poll drops it again. Only a
     button that survives a full poll cycle means the orchestrator holds it.
@@ -162,7 +179,7 @@ def open_wizard(session):
     page = session.page
     session.goto("/training", wait_text="Federated Training", timeout=120_000)
     page.wait_for_timeout(5000)
-    goto_step(page, "Setup Workers")
+    goto_step(page, STEP_SETUP)
     session.shot("training-workers")
     assert page.get_by_text("BioEngine Workers").count() > 0, \
         "step 1 did not render the worker list"
@@ -171,9 +188,9 @@ def open_wizard(session):
 def ensure_orchestrator(session):
     """Select a running orchestrator, deploying one if the worker has none."""
     page = session.page
-    goto_step(page, "Select Apps")
+    goto_step(page, STEP_SELECT)
     if not appeared(page, lambda: orchestrator_radios(page).count(), 45, "orchestrator"):
-        goto_step(page, "Setup Workers")
+        goto_step(page, STEP_SETUP)
         open_launch_dialog(page, "orchestrator")
         session.shot("launch-orchestrator")
         page.get_by_role("button", name="Start Orchestrator").click()
@@ -183,10 +200,10 @@ def ensure_orchestrator(session):
         # decide whether an orchestrator actually came up.
         dismiss_error(page, session.shot, "orchestrator-error")
         close_launch_dialog(page)
-        wait_for(page, lambda: (goto_step(page, "Select Apps"),
+        wait_for(page, lambda: (goto_step(page, STEP_SELECT),
                                 orchestrator_radios(page).count() > 0)[1],
                  240, "a RUNNING orchestrator")
-    goto_step(page, "Select Apps")
+    goto_step(page, STEP_SELECT)
     session.shot("orchestrator-running")
 
 
@@ -198,13 +215,13 @@ def ensure_trainer(session, model):
     orchestrator_radios(page).first.check()
     page.wait_for_timeout(3000)
     if appeared(page, lambda: trainer_checkboxes(page).count(), 45, "trainer"):
-        goto_step(page, "Select Apps")
+        goto_step(page, STEP_SELECT)
         orchestrator_radios(page).first.check()
         page.wait_for_timeout(2000)
         session.shot("trainer-running")
         return
 
-    goto_step(page, "Setup Workers")
+    goto_step(page, STEP_SETUP)
     open_launch_dialog(page, "trainer")
 
     # The gene-panel models need a full-panel dataset, so the row is chosen by
@@ -242,11 +259,11 @@ def ensure_trainer(session, model):
     dismiss_error(page, session.shot, "trainer-error")
     close_launch_dialog(page)
     session.shot("trainer-deploying")
-    wait_for(page, lambda: (goto_step(page, "Select Apps"),
+    wait_for(page, lambda: (goto_step(page, STEP_SELECT),
                             orchestrator_radios(page).first.check(),
                             trainer_checkboxes(page).count() > 0)[2],
              600, "a RUNNING trainer")
-    goto_step(page, "Select Apps")
+    goto_step(page, STEP_SELECT)
     orchestrator_radios(page).first.check()
     page.wait_for_timeout(2000)
     session.shot("trainer-running")
@@ -260,16 +277,67 @@ def register_trainer(session):
     session.shot("registered")
 
 
+def prepare(session, params=None, apply_timeout=600):
+    """Drive the Prepare-data step: optionally set thresholds, then apply.
+
+    Called from `configure`, so every model journey passes through it. The
+    preparation is what the trainers then read, so a run that skipped this step
+    would be testing the old path while the UI advertised the new one.
+
+    Args:
+        session: the open UI session.
+        params: {visible label: value} to type before applying. None uses the
+            published defaults, which is what most journeys want.
+        apply_timeout: seconds to wait for every site to report Prepared.
+    """
+    page = session.page
+    page.wait_for_selector("text=Prepare the data", timeout=60_000)
+
+    if params:
+        for label, value in params.items():
+            set_number(page, label, value)
+        page.wait_for_timeout(500)
+
+    apply_button = page.get_by_role("button", name=re.compile(r"^Apply to all"))
+    if apply_button.count() == 0:
+        # No recipe for this model on this site. The step says so and the run
+        # continues on whatever preparation the data already carries.
+        print("  [prepare] this site offers no recipe; continuing", flush=True)
+        session.shot("prepare-no-recipe")
+        return
+    apply_button.first.click(timeout=30_000)
+    print("  [prepare] applied to every selected site", flush=True)
+
+    # Preparing a real store takes minutes, and the step polls every 8 s.
+    wait_for(
+        page,
+        lambda: page.locator("text=Preparing").count() == 0,
+        apply_timeout,
+        "every site to finish preparing",
+    )
+    session.shot("prepared")
+
+
 def configure(session, model, rounds, transport=None):
     """Open the config panel and press through it before starting."""
     page = session.page
     try:
-        page.get_by_role("button", name="Next: Train").click(timeout=20_000)
+        page.get_by_role("button", name=NEXT_FROM_SELECT).click(timeout=20_000)
     except PWTimeout:
-        print("  [retry] Next: Train went away before the click", flush=True)
+        print(f"  [retry] {NEXT_FROM_SELECT} went away before the click", flush=True)
         ensure_registered(page)
-        page.get_by_role("button", name="Next: Train").click(timeout=20_000)
+        page.get_by_role("button", name=NEXT_FROM_SELECT).click(timeout=20_000)
     page.wait_for_timeout(2000)
+
+    # Step 2's button now lands on Prepare data, not on Train. Without this the
+    # wait below sat on the wrong step for its full 180 s and then failed, on
+    # every model, because "Number of Rounds" is only rendered by the Train
+    # step. Going through rather than around it is also the point: the run the
+    # suite drives should take the path a person takes.
+    prepare(session)
+    page.get_by_role("button", name="Continue to training").click(timeout=30_000)
+    page.wait_for_timeout(2000)
+
     # The parameter list is read from the trainer's live bioengine schema, so
     # it only renders once the orchestrator has answered get_trainer_params.
     page.wait_for_selector("text=Number of Rounds", timeout=180_000)
