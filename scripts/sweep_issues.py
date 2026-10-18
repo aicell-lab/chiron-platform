@@ -48,14 +48,78 @@ def write_watermark(value: float) -> None:
     WATERMARK.write_text(json.dumps({"last_created_at": value}, indent=2))
 
 
-async def list_reports() -> list:
+#: How many children to ask for in one go. The collection held 10 when this
+#: was written, so the number is a ceiling rather than a page size.
+LIST_LIMIT = 1000
+
+
+def _require_token() -> str:
     token = os.environ.get("WORKSPACE_TOKEN") or os.environ.get("HYPHA_TOKEN")
     if not token:
         raise SystemExit(
             "Set WORKSPACE_TOKEN (or HYPHA_TOKEN) to an admin token for the "
             f"'{WORKSPACE}' workspace."
         )
+    return token
 
+
+def list_reports_over_http(token: str) -> list:
+    """List the collection through the REST artifact API.
+
+    WORKAROUND, added 2026-10-18, and separable from the rest of this script so
+    it can be removed in one piece.
+
+    The RPC route below is the proper one and stays primary. It resolves
+    ``public/artifact-manager``, and on hypha.aicell.io that service is
+    currently not registered in any workspace: the lookup raises
+    ``KeyError: Service not found: public/*:artifact-manager@*``, and the same
+    failure reproduces through the plain ``hypha art ls`` CLI, so it is
+    server-side and nothing to do with this script. The server itself is up
+    (``/health/liveness`` answers 200) and the REST artifact endpoints serve
+    the very same collection, so the daily sweep does not have to stop running
+    while the service registration is missing. Reported as svamp #0027.
+
+    Remove this, and the fallback in ``list_reports``, once
+    ``public/artifact-manager`` resolves again.
+
+    One difference from the RPC route, and it is the reason for the warning
+    below: this endpoint accepts ``order_by`` and then ignores it. Measured on
+    2026-10-18, it returned children oldest-first whatever was asked for.
+    ``main`` re-sorts what it gets, so the order does not affect which reports
+    are filed. It only decides WHICH children come back when the collection is
+    larger than the limit, and oldest-first is then exactly the wrong half. So
+    rather than quietly sweeping the wrong end, this says so.
+    """
+    import urllib.parse
+    import urllib.request
+
+    url = (
+        f"{SERVER_URL}/{WORKSPACE}/artifacts/"
+        f"{urllib.parse.quote(COLLECTION_ID.split('/', 1)[1])}/children"
+        f"?limit={LIST_LIMIT}"
+    )
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(request, timeout=120) as response:
+        children = json.loads(response.read().decode("utf-8"))
+
+    if not isinstance(children, list):
+        raise RuntimeError(f"{url} did not return a list: {str(children)[:200]}")
+
+    if len(children) >= LIST_LIMIT:
+        print(
+            f"WARNING: the REST fallback returned {len(children)} children, which "
+            f"is the limit it asked for, so the collection may be larger and this "
+            f"endpoint does not honour order_by. Newer reports may be missing from "
+            f"this sweep. Fix public/artifact-manager rather than trusting this run.",
+            file=sys.stderr,
+        )
+
+    # Sorted here rather than trusting the server, for the reason above.
+    children.sort(key=lambda c: float(c.get("created_at") or 0), reverse=True)
+    return [dict(child) for child in children]
+
+
+async def list_reports_over_rpc(token: str) -> list:
     server = await connect_to_server(
         {"server_url": SERVER_URL, "workspace": WORKSPACE, "token": token}
     )
@@ -64,7 +128,7 @@ async def list_reports() -> list:
         # Newest first, so a collection that has outgrown the page size still
         # yields the reports the sweep has not seen yet.
         children = await artifact_manager.list(
-            parent_id=COLLECTION_ID, limit=1000, order_by="-created_at"
+            parent_id=COLLECTION_ID, limit=LIST_LIMIT, order_by="-created_at"
         )
         return [dict(child) for child in children]
     finally:
@@ -72,6 +136,29 @@ async def list_reports() -> list:
             await server.disconnect()
         except Exception:
             pass
+
+
+def list_reports() -> list:
+    """The collection's children, newest first, by whichever route answers.
+
+    RPC first because it is the supported interface. The fallback is reached
+    only when the artifact manager cannot be resolved at all, which is a
+    distinct and recognisable failure: anything else, including an auth
+    rejection or a genuine network outage, is re-raised so a real problem is
+    not hidden behind a second attempt.
+    """
+    token = _require_token()
+    try:
+        return asyncio.run(list_reports_over_rpc(token))
+    except Exception as error:  # noqa: BLE001
+        if "artifact-manager" not in str(error) or "not found" not in str(error).lower():
+            raise
+        print(
+            "public/artifact-manager could not be resolved, falling back to the "
+            "REST artifact API (see list_reports_over_http, svamp #0027)",
+            file=sys.stderr,
+        )
+        return list_reports_over_http(token)
 
 
 def file_svamp_issue(artifact_id: str) -> bool:
@@ -114,7 +201,7 @@ def main() -> None:
 
     since = args.since if args.since is not None else read_watermark()
     try:
-        reports = asyncio.run(list_reports())
+        reports = list_reports()
     except Exception as error:  # noqa: BLE001
         print(f"Could not list {COLLECTION_ID}: {error}", file=sys.stderr)
         raise SystemExit(1)
