@@ -68,7 +68,7 @@ def assert_no_modal(page, during):
 
 @pytest.fixture(scope="module")
 def wizard(token, base_url, tmp_path_factory):
-    """A logged-in page sitting on the wizard's Select Apps step."""
+    """A logged-in page sitting on the wizard's Select sites step."""
     with sync_playwright() as playwright:
         session = open_session(playwright, "dropped-calls", token, fresh=True)
         # The shared config helper takes screenshots along the way. They are a
@@ -76,9 +76,9 @@ def wizard(token, base_url, tmp_path_factory):
         # model journeys' committed screenshots live in.
         session.outdir = tmp_path_factory.mktemp("dropped-calls-shots")
         page = session.page
-        session.goto("/training", wait_text="Setup Workers")
+        session.goto("/training", wait_text="Set up sites")
         page.wait_for_timeout(4000)
-        training_mod.goto_step(page, "Select Apps")
+        training_mod.goto_step(page, training_mod.STEP_SELECT)
         # The app lists are filled by a get_worker_info poll, so an empty list
         # right after the step change means "not loaded yet" at least as often
         # as it means "nothing there". Reading it once would skip the whole

@@ -426,6 +426,13 @@ export interface ZarrStoreInfo {
   n_samples?: number;
   /** Genes in this store, from X's shape. */
   n_vars?: number;
+  /** The var column the data server resolved Ensembl ids from, chosen by
+   *  measuring vocabulary overlap rather than by name. `_index` for raw
+   *  CELLxGENE data, `feature_id` for a store staged with that column.
+   *  Absent until the server has run a recipe that needs gene identity, and
+   *  on a manager below 0.2.17, both of which mean "not measured" rather
+   *  than "no such column". */
+  geneformer_gene_id_column?: string;
 }
 
 /** Cells a gene must appear in to survive the data server's quality control,
@@ -526,7 +533,16 @@ export const datasetIncompatibleReason = (
   const known = zarrFiles.filter(f => Array.isArray(f?.var_columns));
   if (known.length === 0) return undefined;
 
-  const missing = known.filter(f => !f.var_columns!.includes(column));
+  // A store the data server already resolved gene ids for is readable, whatever
+  // it happens to call the column. Raw CELLxGENE data carries the Ensembl
+  // accessions in the var index and has no `feature_id` column at all, and the
+  // server picks the column by measuring which one matches more of the model's
+  // vocabulary, which is a stronger answer than the name test below. Without
+  // this, the page refuses a dataset the server prepared and the trainer reads,
+  // which is the most common shape a site's own data arrives in.
+  const missing = known.filter(
+    f => !f.var_columns!.includes(column) && !f.geneformer_gene_id_column
+  );
   if (missing.length === 0) return undefined;
 
   // "This dataset" only when every store in it was reported and every one is
