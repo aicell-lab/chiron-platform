@@ -113,6 +113,18 @@ class Stage:
     #: nothing else: validity is decided by the fingerprint, never by whether a
     #: key happens to be present.
     outputs: Tuple[str, ...] = ()
+    #: Code-side constants that change what this stage computes and that nobody
+    #: may set. A pinned external asset is the case this exists for: scGPT's
+    #: gene vocabulary decides which genes the panel may contain, so repinning
+    #: it has to recompute every store, exactly as bumping ``version`` would.
+    #: Declaring it here rather than as a fixed :class:`Param` keeps it out of
+    #: the organiser's form, where a 64-character digest is noise, while still
+    #: putting it where the chain rule can see it.
+    #:
+    #: Only non-empty tuples enter the fingerprint, so adding this field left
+    #: every existing stage's fingerprint where it was and restamped no
+    #: prepared store.
+    identity: Tuple[str, ...] = ()
 
     def param(self, name: str) -> Optional[Param]:
         for p in self.params:
@@ -136,6 +148,11 @@ class Stage:
                 self.params, key=lambda q: q.name
             )},
         }
+        # Omitted when empty, so this field's introduction moved no existing
+        # fingerprint. A stage that declares no pinned asset digests exactly as
+        # it did before the field existed.
+        if self.identity:
+            payload["identity"] = list(self.identity)
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
@@ -273,6 +290,38 @@ def check_recipe(recipe: Recipe) -> None:
             param.validate(param.default)
             seen_params[param.name] = stage.name
         seen_stages.add(stage.name)
+
+
+def check_recipes_coexist(recipes: Sequence[Recipe]) -> None:
+    """Raise ValueError if two recipes write the same place on a store.
+
+    One data server prepares one site's data for every model family that site
+    might train, and on a host where several per-model workers share a datasets
+    directory the same store genuinely carries several families' preparations
+    at once. Those preparations are kept apart structurally rather than by
+    convention, and this is what holds the convention to it.
+
+    Sharing a key would not fail loudly. The periodic rescan re-applies every
+    family a store records, each with the parameters that family recorded, so
+    two families writing one mask at two different thresholds would flip it on
+    every poll, and each flip would invalidate the other family's downstream
+    stages. Nothing would error. The store would look prepared the whole time
+    and would be recomputing forever.
+    """
+    owner: Dict[str, str] = {}
+    for recipe in recipes:
+        for stage in recipe.stages:
+            for key in stage.outputs:
+                previous = owner.get(key)
+                if previous is not None and previous != recipe.model_family:
+                    raise ValueError(
+                        f"{recipe.model_family} and {previous} both write "
+                        f"{key!r}. Two model families' preparations must share "
+                        f"no key: the rescan would re-apply each with its own "
+                        f"parameters and they would overwrite each other on "
+                        f"every poll."
+                    )
+                owner[key] = recipe.model_family
 
 
 def resolve_params(

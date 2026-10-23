@@ -9,6 +9,7 @@ Run as `python -m chiron.datasets --data-dir /data`.
 """
 
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -18,9 +19,10 @@ import tempfile
 import threading
 import time
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 import anndata as ad
 import numpy as np
@@ -34,6 +36,7 @@ from chiron.datasets.recipes import (
     Stage,
     StageResult,
     check_recipe,
+    check_recipes_coexist,
     plan,
     resolve_params,
 )
@@ -218,7 +221,7 @@ def _register_var_columns(root, names, logger) -> bool:
 
 
 def _ensure_var_columns_visible(
-    zarr_path: Path, params: Mapping[str, Any], logger
+    zarr_path: Path, params: Mapping[str, Any], logger, *, keys: "PrepKeys" = None
 ) -> StageResult:
     """Pipeline step: register the HVG and quality-control arrays as var columns.
 
@@ -227,10 +230,11 @@ def _ensure_var_columns_visible(
     registered without paying for a recompute. Keeping it separate is also what
     lets a reader going through anndata see the masks at all.
     """
+    keys = keys or TABULA_KEYS
     root = zarr.open_group(str(zarr_path), mode="a")
     registered = _register_var_columns(
         root,
-        (HVG_RANK_KEY, HVG_SCORE_KEY, HVG_SELECTED_KEY, QC_GENE_MASK_KEY),
+        (keys.hvg_rank, keys.hvg_score, keys.hvg_selected, keys.qc_gene_mask),
         logger,
     )
     if registered:
@@ -267,6 +271,20 @@ HVG_METHOD = "dispersion_var_over_mean"
 HVG_RANK_KEY = "chiron_hvg_rank"
 HVG_SCORE_KEY = "chiron_hvg_score"
 HVG_SELECTED_KEY = "chiron_hvg_selected"  # bool, length n_vars, under var/
+
+# Tabula's artifacts are the family-neutral ones, under the names above and
+# with no family in them. Two reasons, and neither is history.
+#
+# Every trainer in the platform reads them. Tabula's loader, scGPT's, the
+# Geneformer trainer's gene cut and scFoundation's all look for
+# chiron_hvg_selected and chiron_binned, so these names are the shared
+# preparation a model gets when nothing more specific was asked for, and
+# renaming them would strand every prepared store on every site.
+#
+# A model whose preparation genuinely differs gets its OWN names. See
+# SCGPT_KEYS below and the uns/ group Geneformer writes: coexistence is
+# structural, so neither family can overwrite the other and the periodic rescan
+# can re-apply both without either undoing the other's thresholds.
 
 # Compressed histogram of HVG scores so the dataset card can render a sparkline
 # without sending one float per gene. 20 log-spaced bins is enough to see the
@@ -384,6 +402,145 @@ PCA_BATCH_BYTES_BUDGET = 256 * 1024 * 1024   # 256 MB / batch is generous
 BINNING_VERSION = 4  # bumped 3 -> 4: cut to a panel selected behind the QC masks
 BINNING_N_BINS = 50
 BINNING_LAYER_KEY = "chiron_binned"  # under layers/
+
+
+# ---------------------------------------------------------------------------
+# Where one family's artifacts live
+# ---------------------------------------------------------------------------
+#
+# The quality-control, HVG, binning and embedding stages all compute the same
+# KIND of thing for every model that reads a value matrix, and two models that
+# want it computed differently must not land on one set of keys. So the names
+# are a parameter of the stage rather than a module constant it reads: a stage
+# is bound to one of these bundles when a recipe declares it, and a family's
+# artifacts cannot reach another family's.
+#
+# The thresholds are the reason this is not over-engineering. They are the
+# site's call, so two families on one store can genuinely want different ones,
+# and _recipes_to_refresh re-applies every recorded family with its own
+# recorded parameters every thirty seconds. On shared keys that is an infinite
+# recompute with no error anywhere.
+
+
+@dataclass(frozen=True)
+class PrepKeys:
+    """Where one model family's value-matrix artifacts are written.
+
+    ``attr_prefix`` namespaces the root attributes the same stages record, so
+    "how many genes did the panel end up with" is answerable per family rather
+    than being whichever family ran last.
+    """
+
+    family: str
+    attr_prefix: str
+    qc_cell_mask: str
+    qc_gene_mask: str
+    hvg_rank: str
+    hvg_score: str
+    hvg_selected: str
+    binned_layer: str
+    umap_coords: str
+    umap_indices: str
+
+    def attr(self, name: str) -> str:
+        return f"{self.attr_prefix}{name}"
+
+
+#: The family-neutral names, which every trainer in the platform reads and
+#: which a store gets when no more specific preparation was asked for.
+TABULA_KEYS = PrepKeys(
+    family="tabula",
+    attr_prefix="chiron_",
+    qc_cell_mask=QC_CELL_MASK_KEY,
+    qc_gene_mask=QC_GENE_MASK_KEY,
+    hvg_rank=HVG_RANK_KEY,
+    hvg_score=HVG_SCORE_KEY,
+    hvg_selected=HVG_SELECTED_KEY,
+    binned_layer=BINNING_LAYER_KEY,
+    umap_coords=UMAP_COORDS_KEY,
+    umap_indices=UMAP_INDICES_KEY,
+)
+
+# ---------------------------------------------------------------------------
+# scGPT
+# ---------------------------------------------------------------------------
+#
+# scGPT reads a value matrix, so its preparation is quality control, a gene
+# panel, and a per-cell quantile binning: the same shape as Tabula's. It
+# differs in exactly one place, and the difference is not cosmetic.
+#
+# scGPT's gene embedding is indexed by a FIXED vocabulary, the CELLxGENE census
+# symbol list the whole-human checkpoint was pretrained on. Row *i* of that
+# embedding has to mean the same gene at every site or FedAvg averages
+# unrelated genes together, so the vocabulary cannot be derived from local
+# data. A selected gene the vocabulary does not know is therefore not a gene
+# scGPT trains on slightly worse, it is a position the trainer drops outright.
+#
+# Measured on a raw CELLxGENE store (8,168 entorhinal cortex cells, 31,997
+# genes): the vocabulary covers 73.6% of the store's genes and 96.0% of the
+# 1,200 Tabula selects, so 48 of 1,200 positions are dropped at load time.
+# Restricting the candidate pool to genes the vocabulary knows fills all 1,200,
+# with 4,837 candidates still available to choose from. The 48 are systematic
+# rather than incidental: unnamed Ensembl accessions, antisense and lncRNA
+# transcripts, and genes HGNC renamed after the vocabulary was built. Two sites
+# on different CELLxGENE annotation vintages lose different numbers of them.
+#
+# So scGPT's panel is selected from what scGPT can read, and because that panel
+# differs from Tabula's, everything cut to it differs too: its own masks, its
+# own ranking, its own binned layer.
+SCGPT_KEYS = PrepKeys(
+    family="scgpt",
+    attr_prefix="chiron_scgpt_",
+    qc_cell_mask="chiron_scgpt_qc_cell_mask",
+    qc_gene_mask="chiron_scgpt_qc_gene_mask",
+    hvg_rank="chiron_scgpt_hvg_rank",
+    hvg_score="chiron_scgpt_hvg_score",
+    hvg_selected="chiron_scgpt_hvg_selected",
+    binned_layer="chiron_scgpt_binned",
+    umap_coords="chiron_scgpt_umap_coords",
+    umap_indices="chiron_scgpt_umap_indices",
+)
+
+SCGPT_VERSION = 1
+
+# The vocabulary pin, and it is pinned the same way and for the same reason the
+# Geneformer dictionaries are: the panel this server selects has to be the
+# panel the trainer would have kept, and a different vocabulary produces a
+# different panel with no error anywhere.
+#
+# SCGPT_VOCAB_REVISION is the SCGPT_REF in worker/docker/versions.env, which is
+# the commit the chiron-scgpt image installs scGPT from, so the file fetched
+# here is the file that image's build_gene_vocab reads. Bump them together.
+#
+# JSON rather than a pickle, so nothing is executed and the digest is not
+# load-bearing for safety. It is still load-bearing for correctness: without it
+# a silently different vocabulary would restrict the panel differently at
+# different sites. The digest goes into the HVG stage's `identity`, so
+# repinning recomputes every store rather than leaving a panel that was
+# selected against something else.
+SCGPT_VOCAB_REVISION = "cebd6fae655b9c585a4807daa3ac31bb764f06b4"
+SCGPT_VOCAB_NAME = "default_census_vocab.json"
+SCGPT_VOCAB_SHA256 = (
+    "9fe73cf29929b5c66a5fffcfb2bcbdd3e38a3a086848cd12f8f918bcf458d75f"
+)
+SCGPT_VOCAB_SYMBOLS = 60_694  # asserted after parsing, so a swap cannot be quiet
+SCGPT_VOCAB_URL = (
+    "https://raw.githubusercontent.com/bowang-lab/scGPT/{revision}/scgpt/tokenizer/{name}"
+)
+
+# Recorded on a store the vocabulary cannot be joined against, so an operator
+# is told why rather than discovering it when a run fails in the dataloader.
+SCGPT_UNSUITABLE_KEY = "chiron_scgpt_unsuitable"
+SCGPT_UNSUITABLE_WHY_KEY = "chiron_scgpt_unsuitable_reason"
+
+# How much of the panel has to be joinable before the restriction is worth
+# applying. Below this the store's symbols are not HGNC symbols at all (an
+# Ensembl-only var, a mouse annotation, a store whose symbol column is really
+# an accession list), and selecting 1,200 genes from the handful that happened
+# to match would be a confident, wrong panel. Refusing leaves the store to
+# Tabula's family-neutral panel, which the scGPT trainer still reads, so a
+# refusal costs the 4% and not the run.
+SCGPT_MIN_VOCAB_FRACTION = 0.25
 
 # ---------------------------------------------------------------------------
 # Geneformer rank-value preprocessing
@@ -683,9 +840,9 @@ def _compute_per_cell_binning(X, n_bins: int = BINNING_N_BINS) -> np.ndarray:
 
 
 def _ensure_binning(
-    zarr_path: Path, params: Mapping[str, Any], logger
+    zarr_path: Path, params: Mapping[str, Any], logger, *, keys: "PrepKeys" = None
 ) -> StageResult:
-    """Write layers/chiron_binned into the zarr.
+    """Write the binned, panel-cut value matrix into the zarr.
 
     Shape is (n_cells, n_selected_genes), the trainer-ready view: the trainer
     streams a row at a time and feeds it straight into the model with no column
@@ -700,10 +857,11 @@ def _ensure_binning(
     The gene panel it is cut to was selected behind the masks, so the binning
     depends on quality control even though it reads no mask itself.
     """
+    keys = keys or TABULA_KEYS
     root = zarr.open_group(str(zarr_path), mode="r+")
 
     # Need the HVG selection upstream of binning.
-    selected_key = _find_key(root, "var", HVG_SELECTED_KEY)
+    selected_key = _find_key(root, "var", keys.hvg_selected)
     if selected_key is None:
         return StageResult(
             False,
@@ -734,30 +892,31 @@ def _ensure_binning(
 
     layers_group = root["layers"] if "layers" in root else root.create_group("layers")
     arr = layers_group.create_array(
-        BINNING_LAYER_KEY,
+        keys.binned_layer,
         shape=binned.shape,
         dtype=binned.dtype,
         overwrite=True,
     )
     arr[:] = binned
-    _drop_legacy_key(root, "layers", BINNING_LAYER_KEY)
-    root.attrs["chiron_binning_version"] = BINNING_VERSION
-    root.attrs["chiron_binning_n_bins"] = BINNING_N_BINS
-    root.attrs["chiron_binning_n_cells"] = int(binned.shape[0])
-    root.attrs["chiron_binning_n_genes"] = int(binned.shape[1])
+    _drop_legacy_key(root, "layers", keys.binned_layer)
+    root.attrs[keys.attr("binning_version")] = BINNING_VERSION
+    root.attrs[keys.attr("binning_n_bins")] = n_bins
+    root.attrs[keys.attr("binning_n_cells")] = int(binned.shape[0])
+    root.attrs[keys.attr("binning_n_genes")] = int(binned.shape[1])
 
     unreadable = _consolidate(root, zarr_path, "binning", logger)
     if unreadable:
         return StageResult(False, refused=unreadable)
 
     logger.info(
-        f"{zarr_path.name}: wrote per-cell {BINNING_N_BINS}-bin discretisation "
+        f"{zarr_path.name}: wrote per-cell {n_bins}-bin discretisation into "
+        f"layers/{keys.binned_layer} "
         f"({binned.shape[0]} cells x {binned.shape[1]} selected HVGs)"
     )
     return StageResult(
         True,
         stats={
-            "n_bins": BINNING_N_BINS,
+            "n_bins": n_bins,
             "n_cells": int(binned.shape[0]),
             "n_genes": int(binned.shape[1]),
         },
@@ -1012,8 +1171,10 @@ def _compute_hvg_score(X, cell_mask: Optional[np.ndarray] = None) -> np.ndarray:
     return score.astype(np.float32)
 
 
-def _ensure_qc(zarr_path: Path, params: Mapping[str, Any], logger) -> StageResult:
-    """Write obs/chiron_qc_cell_mask and var/chiron_qc_gene_mask.
+def _ensure_qc(
+    zarr_path: Path, params: Mapping[str, Any], logger, *, keys: "PrepKeys" = None
+) -> StageResult:
+    """Write this family's cell and gene quality-control masks.
 
     Stage 2 of the manuscript's pipeline, and the step HVG selection has to run
     behind. Both thresholds come from ``params`` rather than from a constant,
@@ -1031,6 +1192,7 @@ def _ensure_qc(zarr_path: Path, params: Mapping[str, Any], logger) -> StageResul
     cut to 1,200 highly variable genes it removes most real cells rather than
     empty droplets: on the blood shard of the 1M corpus, 178,970 of 250,000.
     """
+    keys = keys or TABULA_KEYS
     min_genes_per_cell = int(params["min_genes_per_cell"])
     min_cells_per_gene = int(params["min_cells_per_gene"])
 
@@ -1059,10 +1221,10 @@ def _ensure_qc(zarr_path: Path, params: Mapping[str, Any], logger) -> StageResul
     )
 
     obs_group.create_array(
-        QC_CELL_MASK_KEY, shape=cell_mask.shape, dtype=cell_mask.dtype, overwrite=True
+        keys.qc_cell_mask, shape=cell_mask.shape, dtype=cell_mask.dtype, overwrite=True
     )[:] = cell_mask
     var_group.create_array(
-        QC_GENE_MASK_KEY, shape=gene_mask.shape, dtype=gene_mask.dtype, overwrite=True
+        keys.qc_gene_mask, shape=gene_mask.shape, dtype=gene_mask.dtype, overwrite=True
     )[:] = gene_mask
 
     n_cells_kept, n_genes_kept = int(cell_mask.sum()), int(gene_mask.sum())
@@ -1087,9 +1249,9 @@ def _ensure_qc(zarr_path: Path, params: Mapping[str, Any], logger) -> StageResul
         "cells_per_gene_zero": gene_zero,
     }
 
-    root.attrs["chiron_qc_version"] = QC_VERSION
+    root.attrs[keys.attr("qc_version")] = QC_VERSION
     for key, value in stats.items():
-        root.attrs[f"chiron_qc_{key}"] = value
+        root.attrs[keys.attr(f"qc_{key}")] = value
 
     # These stores carry consolidated metadata, so an array written after the
     # fact is invisible to any reader that goes through the consolidated index,
@@ -1140,7 +1302,7 @@ def _consolidate(root, zarr_path: Path, what: str, logger) -> Optional[str]:
         return reason
 
 
-def _read_qc_masks(root, n_cells: int, n_vars: int):
+def _read_qc_masks(root, n_cells: int, n_vars: int, keys: "PrepKeys" = None):
     """``(cell_mask, gene_mask)`` from the store, or ``(None, None)``.
 
     Returns None rather than an all-True mask when a mask is absent, so a
@@ -1149,8 +1311,9 @@ def _read_qc_masks(root, n_cells: int, n_vars: int):
     without them, and a stage that finds them missing anyway has hit a bug
     rather than a configuration.
     """
-    cell_key = _find_key(root, "obs", QC_CELL_MASK_KEY)
-    gene_key = _find_key(root, "var", QC_GENE_MASK_KEY)
+    keys = keys or TABULA_KEYS
+    cell_key = _find_key(root, "obs", keys.qc_cell_mask)
+    gene_key = _find_key(root, "var", keys.qc_gene_mask)
     if cell_key is None or gene_key is None:
         return None, None
     cell_mask = np.asarray(root["obs"][cell_key][:], dtype=bool)
@@ -1161,9 +1324,14 @@ def _read_qc_masks(root, n_cells: int, n_vars: int):
 
 
 def _ensure_hvg_rank(
-    zarr_path: Path, params: Mapping[str, Any], logger
+    zarr_path: Path,
+    params: Mapping[str, Any],
+    logger,
+    *,
+    keys: "PrepKeys" = None,
+    restrict=None,
 ) -> StageResult:
-    """Add var/chiron_hvg_rank + var/chiron_hvg_score to an existing zarr.
+    """Rank genes by variability and select this family's panel.
 
     Runs behind quality control, which is where the Methods put it: "we
     identified 1,200 highly variable genes (HVGs) within each dataset after
@@ -1184,7 +1352,20 @@ def _ensure_hvg_rank(
     own input. It is still recomputed whenever quality control is, because its
     inputs moved even though its settings did not, which is the case a presence
     check cannot see and the recipe planner exists to catch.
+
+    Args:
+        keys: which family's arrays to read and write. Defaults to the
+            family-neutral names every trainer reads.
+        restrict: optional ``(root, n_vars, logger) -> (mask, stats, refused)``
+            narrowing which genes may be selected at all, for a model whose
+            embedding only covers a fixed gene list. It composes with the
+            quality-control gene mask rather than replacing it, so a restricted
+            panel is still a post-quality-control panel. A gene it excludes is
+            handled exactly like one the gene filter dropped: score forced to
+            zero so it ranks last, and excluded from the count the panel width
+            is capped by, never removed from ``var``.
     """
+    keys = keys or TABULA_KEYS
     root = zarr.open_group(str(zarr_path), mode="r+")
     if "var" not in root:
         return StageResult(False, refused="this store has no var/ group")
@@ -1217,7 +1398,7 @@ def _ensure_hvg_rank(
     if n_vars == 0:
         return StageResult(False, refused="this store has no genes")
 
-    cell_mask, gene_mask = _read_qc_masks(root, n_cells, n_vars)
+    cell_mask, gene_mask = _read_qc_masks(root, n_cells, n_vars, keys)
     if cell_mask is None:
         return StageResult(
             False,
@@ -1235,6 +1416,24 @@ def _ensure_hvg_rank(
             ),
         )
 
+    restrict_stats: Dict[str, Any] = {}
+    if restrict is not None:
+        allowed, restrict_stats, refused = restrict(root, n_vars, logger)
+        if refused is not None:
+            return StageResult(False, refused=refused)
+        # Intersected, not substituted. The restriction says which genes the
+        # model can read; quality control says which ones this store measured
+        # well enough to be worth reading. A panel needs both.
+        gene_mask = gene_mask & allowed
+        if not gene_mask.any():
+            return StageResult(
+                False,
+                refused=(
+                    "no gene both passed quality control and is one this model "
+                    "can read, so there is no panel to select"
+                ),
+            )
+
     # Per-gene over-dispersion (variance / mean), across surviving cells only.
     score = _compute_hvg_score(X, cell_mask=cell_mask)
     score = np.where(gene_mask, score, 0.0).astype(np.float32)
@@ -1247,14 +1446,14 @@ def _ensure_hvg_rank(
     # dataframe column index, in a step of its own so that datasets already
     # ranked at the current HVG_VERSION get registered without a recompute.
     rank_arr = var_group.create_array(
-        HVG_RANK_KEY,
+        keys.hvg_rank,
         shape=rank.shape,
         dtype=rank.dtype,
         overwrite=True,
     )
     rank_arr[:] = rank
     score_arr = var_group.create_array(
-        HVG_SCORE_KEY,
+        keys.hvg_score,
         shape=score.shape,
         dtype=score.dtype,
         overwrite=True,
@@ -1282,22 +1481,23 @@ def _ensure_hvg_rank(
         # filter reaches this point with a real gene_mask and a zero score.
         selected_mask = ((rank < n_selected) & gene_mask).astype(np.bool_)
     sel_arr = var_group.create_array(
-        HVG_SELECTED_KEY,
+        keys.hvg_selected,
         shape=selected_mask.shape,
         dtype=selected_mask.dtype,
         overwrite=True,
     )
     sel_arr[:] = selected_mask
 
-    for key in (HVG_RANK_KEY, HVG_SCORE_KEY, HVG_SELECTED_KEY):
+    for key in (keys.hvg_rank, keys.hvg_score, keys.hvg_selected):
         _drop_legacy_key(root, "var", key)
 
     counts, edges, _ = _log_histogram(
         score[selected_mask | gene_mask], edges=HVG_SCORE_HIST_EDGES
     )
+    n_hvg = int(params.get("n_hvg", MODEL_IN_FEATURE))
     stats = {
         "method": HVG_METHOD,
-        "in_feature": int(MODEL_IN_FEATURE),
+        "in_feature": n_hvg,
         "n_selected": int(selected_mask.sum()),
         "n_available": n_available,
         "n_cells_scored": int(cell_mask.sum()),
@@ -1305,17 +1505,20 @@ def _ensure_hvg_rank(
         # width, so the model will train on a narrower panel than it was
         # designed for. An operator has to be told this rather than left to
         # infer it from two numbers being unequal.
-        "panel_short": bool(n_available < MODEL_IN_FEATURE),
+        "panel_short": bool(n_available < n_hvg),
         "score_histogram_counts": counts,
         "score_histogram_edges": edges,
     }
-    root.attrs["chiron_hvg_version"] = HVG_VERSION
-    root.attrs["chiron_hvg_method"] = HVG_METHOD
-    root.attrs["chiron_hvg_in_feature"] = int(MODEL_IN_FEATURE)
-    root.attrs["chiron_hvg_n_selected"] = int(selected_mask.sum())
-    root.attrs["chiron_hvg_n_available"] = n_available
-    root.attrs["chiron_hvg_n_cells_scored"] = int(cell_mask.sum())
-    root.attrs["chiron_hvg_panel_short"] = stats["panel_short"]
+    # What the restriction cost, recorded next to the panel it produced rather
+    # than only logged. "1,200 of 1,200 selected" is the same sentence whether
+    # 4,837 genes were in the running or 31,997 were, and those are different
+    # datasets.
+    stats.update(restrict_stats)
+    root.attrs[keys.attr("hvg_version")] = HVG_VERSION
+    for key, value in stats.items():
+        if key.startswith("score_histogram"):
+            continue
+        root.attrs[keys.attr(f"hvg_{key}")] = value
 
     # Rebuild the zarr-v3 consolidated metadata so the newly-written arrays
     # appear in subsequent opens. AnnData's writer leaves a consolidated
@@ -1327,8 +1530,8 @@ def _ensure_hvg_rank(
 
     if stats["panel_short"]:
         logger.warning(
-            f"{zarr_path.name}: quality control left {n_available:,} genes, "
-            f"fewer than the model's input width {MODEL_IN_FEATURE:,}, so the "
+            f"{zarr_path.name}: {n_available:,} genes were available to "
+            f"{keys.family}, fewer than its input width {n_hvg:,}, so the "
             f"panel is narrower than the model was designed for"
         )
     logger.info(
@@ -1340,7 +1543,7 @@ def _ensure_hvg_rank(
 
 
 def _ensure_hvg_histogram(
-    zarr_path: Path, params: Mapping[str, Any], logger
+    zarr_path: Path, params: Mapping[str, Any], logger, *, keys: "PrepKeys" = None
 ) -> StageResult:
     """Write a 20-bin log-scaled histogram of HVG scores into the root attrs.
 
@@ -1349,13 +1552,16 @@ def _ensure_hvg_histogram(
     the histogram without re-deriving them, and sends 20 integers rather than
     one float per gene.
     """
+    keys = keys or TABULA_KEYS
     root = zarr.open_group(str(zarr_path), mode="r+")
 
-    score_key = _find_key(root, "var", HVG_SCORE_KEY)
+    score_key = _find_key(root, "var", keys.hvg_score)
     if score_key is None:
         return StageResult(
             False,
-            refused="var/chiron_hvg_score is absent, so there is nothing to summarise",
+            refused=(
+                f"var/{keys.hvg_score} is absent, so there is nothing to summarise"
+            ),
         )
 
     score = root["var"][score_key][:]
@@ -1392,9 +1598,11 @@ def _ensure_hvg_histogram(
     # rather than a chunked zarr array. Attributes ride along in the zarr.json
     # the chiron-manager fetches anyway, so no extra HTTP round-trip and no
     # zstd-chunk-decompression dance on the reader side.
-    root.attrs["chiron_hvg_histogram_counts"] = counts.tolist()
-    root.attrs["chiron_hvg_histogram_version"] = HVG_HIST_VERSION
-    root.attrs["chiron_hvg_histogram_edges_log10"] = edges.astype(np.float32).tolist()
+    root.attrs[keys.attr("hvg_histogram_counts")] = counts.tolist()
+    root.attrs[keys.attr("hvg_histogram_version")] = HVG_HIST_VERSION
+    root.attrs[keys.attr("hvg_histogram_edges_log10")] = (
+        edges.astype(np.float32).tolist()
+    )
 
     # Clean up any legacy compressed array from HVG_HIST_VERSION 1, under
     # either the current name or the pre-rename one.
@@ -1422,14 +1630,15 @@ def _ensure_hvg_histogram(
     )
 
 
-def _read_binned_node(root):
-    """Return (zarr_array, n_cells, n_selected) for layers/chiron_binned.
+def _read_binned_node(root, keys: "PrepKeys" = None):
+    """Return (zarr_array, n_cells, n_selected) for this family's binned layer.
 
     The UMAP step runs on the pre-cut binned layer so the embedding reflects
     exactly what the trainer consumes (all cells x top-MODEL_IN_FEATURE HVGs
     in 0..50 quantile bins). Returns (None, 0, 0) when the layer is missing.
     """
-    key = _find_key(root, "layers", BINNING_LAYER_KEY)
+    keys = keys or TABULA_KEYS
+    key = _find_key(root, "layers", keys.binned_layer)
     if key is not None:
         candidate = root["layers"][key]
         if isinstance(candidate, zarr.Array):
@@ -1437,7 +1646,9 @@ def _read_binned_node(root):
     return None, 0, 0
 
 
-def _streaming_pca_then_umap(zarr_path: Path, root, logger, cell_mask=None):
+def _streaming_pca_then_umap(
+    zarr_path: Path, root, logger, cell_mask=None, keys: "PrepKeys" = None
+):
     """Inner helper for _ensure_umap_embedding: stream the binned layer through
     IncrementalPCA, take a deterministic subsample if there are more eligible
     cells than UMAP_MAX_SAMPLES, run UMAP on that subsample.
@@ -1464,7 +1675,7 @@ def _streaming_pca_then_umap(zarr_path: Path, root, logger, cell_mask=None):
         ) from e
     from sklearn.decomposition import IncrementalPCA
 
-    x_node, n_cells, n_vars = _read_binned_node(root)
+    x_node, n_cells, n_vars = _read_binned_node(root, keys)
     if x_node is None:
         raise RuntimeError("the binned layer is absent or unreadable")
 
@@ -1563,9 +1774,9 @@ def _streaming_pca_then_umap(zarr_path: Path, root, logger, cell_mask=None):
 
 
 def _ensure_umap_embedding(
-    zarr_path: Path, params: Mapping[str, Any], logger
+    zarr_path: Path, params: Mapping[str, Any], logger, *, keys: "PrepKeys" = None
 ) -> StageResult:
-    """Write a 2-D UMAP embedding into obsm/, computed on layers/chiron_binned.
+    """Write a 2-D UMAP embedding into obsm/, computed on the binned layer.
 
     Operates on the pre-cut binned layer so the embedding shows exactly the
     matrix the trainer consumes, and only on the cells that passed quality
@@ -1585,14 +1796,15 @@ def _ensure_umap_embedding(
     nothing trains on it, so a site without umap-learn installed loses the
     picture and nothing else.
     """
+    keys = keys or TABULA_KEYS
     root = zarr.open_group(str(zarr_path), mode="r+")
 
-    x_node, n_cells, _ = _read_binned_node(root)
+    x_node, n_cells, _ = _read_binned_node(root, keys)
     if x_node is None:
         return StageResult(False, refused="the binned layer is absent or unreadable")
     var_index = _find_key(root, "var", "_index") or "_index"
     n_vars_total = int(root["var"][var_index].shape[0]) if "var" in root else 0
-    cell_mask, _ = _read_qc_masks(root, n_cells, n_vars_total)
+    cell_mask, _ = _read_qc_masks(root, n_cells, n_vars_total, keys)
     if cell_mask is None:
         # Refused, not treated as "keep everything". _read_qc_masks returns
         # None rather than an all-True mask precisely so that "quality control
@@ -1611,7 +1823,7 @@ def _ensure_umap_embedding(
 
     try:
         coords, indices = _streaming_pca_then_umap(
-            zarr_path, root, logger, cell_mask=cell_mask
+            zarr_path, root, logger, cell_mask=cell_mask, keys=keys
         )
     except RuntimeError as e:
         # Includes umap-learn-not-installed and "too small" cases.
@@ -1627,28 +1839,28 @@ def _ensure_umap_embedding(
     # KeyError on the group that was just created.
     obsm_group = root["obsm"] if "obsm" in root else root.create_group("obsm")
     coords_arr = obsm_group.create_array(
-        UMAP_COORDS_KEY, shape=coords.shape, dtype=coords.dtype, overwrite=True,
+        keys.umap_coords, shape=coords.shape, dtype=coords.dtype, overwrite=True,
     )
     coords_arr[:] = coords
     if indices is not None:
         idx_arr = obsm_group.create_array(
-            UMAP_INDICES_KEY, shape=indices.shape, dtype=indices.dtype, overwrite=True,
+            keys.umap_indices, shape=indices.shape, dtype=indices.dtype, overwrite=True,
         )
         idx_arr[:] = indices
-        _drop_legacy_key(root, "obsm", UMAP_INDICES_KEY)
+        _drop_legacy_key(root, "obsm", keys.umap_indices)
     else:
         # Coords now cover all cells, so any previous indices array is stale,
         # under either the current name or the pre-rename one.
-        if UMAP_INDICES_KEY in obsm_group:
-            del obsm_group[UMAP_INDICES_KEY]
-        _drop_legacy_key(root, "obsm", UMAP_INDICES_KEY)
-    _drop_legacy_key(root, "obsm", UMAP_COORDS_KEY)
+        if keys.umap_indices in obsm_group:
+            del obsm_group[keys.umap_indices]
+        _drop_legacy_key(root, "obsm", keys.umap_indices)
+    _drop_legacy_key(root, "obsm", keys.umap_coords)
 
-    root.attrs["chiron_umap_version"] = UMAP_VERSION
-    root.attrs["chiron_umap_method"] = UMAP_METHOD
-    root.attrs["chiron_umap_n_sampled"] = int(coords.shape[0])
-    root.attrs["chiron_umap_n_neighbors"] = int(UMAP_N_NEIGHBORS)
-    root.attrs["chiron_umap_random_state"] = int(UMAP_RANDOM_STATE)
+    root.attrs[keys.attr("umap_version")] = UMAP_VERSION
+    root.attrs[keys.attr("umap_method")] = UMAP_METHOD
+    root.attrs[keys.attr("umap_n_sampled")] = int(coords.shape[0])
+    root.attrs[keys.attr("umap_n_neighbors")] = int(UMAP_N_NEIGHBORS)
+    root.attrs[keys.attr("umap_random_state")] = int(UMAP_RANDOM_STATE)
 
     unreadable = _consolidate(root, zarr_path, "UMAP", logger)
     if unreadable:
@@ -2199,6 +2411,189 @@ def _ensure_geneformer_ranks(
 
 
 # ---------------------------------------------------------------------------
+# scGPT gene vocabulary
+# ---------------------------------------------------------------------------
+
+
+def _scgpt_cache_dir() -> Path:
+    """Where the verified vocabulary is kept between restarts."""
+    root = os.environ.get("CHIRON_CACHE_DIR") or tempfile.gettempdir()
+    path = Path(root) / "scgpt" / SCGPT_VOCAB_REVISION[:12]
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _load_scgpt_vocabulary(logger) -> Set[str]:
+    """The HGNC symbols scGPT's gene embedding covers, fetched once.
+
+    Fetched at runtime rather than baked into the image, so this package stays
+    free of any model's code, and pinned by revision *and* digest so every site
+    restricts its panel to the same gene list. That identity is the whole
+    point: scGPT's gene embedding is federated, so row *i* of it has to mean
+    the same gene at every site, and two sites selecting panels against
+    different vocabularies would average unrelated genes together with no error
+    anywhere.
+
+    JSON, so nothing is executed and the digest is not carrying any safety
+    weight here. It is carrying correctness weight, which is why it is checked
+    anyway and why a mismatch is fatal rather than a warning.
+
+    Returns:
+        The set of symbols. Special tokens are not included: the trainer
+        appends its own and they are not genes.
+
+    Raises:
+        RuntimeError: if the download fails, its digest does not match, or the
+            parsed vocabulary is not the size the pin says it is.
+    """
+    path = _scgpt_cache_dir() / SCGPT_VOCAB_NAME
+    payload = None
+
+    if path.exists():
+        cached = path.read_bytes()
+        if hashlib.sha256(cached).hexdigest() == SCGPT_VOCAB_SHA256:
+            payload = cached
+        else:
+            logger.warning(
+                "Cached scGPT gene vocabulary failed its checksum, re-fetching"
+            )
+
+    if payload is None:
+        url = SCGPT_VOCAB_URL.format(
+            revision=SCGPT_VOCAB_REVISION, name=SCGPT_VOCAB_NAME
+        )
+        logger.info("Fetching scGPT gene vocabulary")
+        try:
+            with urllib.request.urlopen(url, timeout=180) as response:
+                payload = response.read()
+        except Exception as e:
+            raise RuntimeError(
+                f"could not fetch scGPT's gene vocabulary from {url}, so the "
+                "gene panel cannot be restricted to the genes the model reads"
+            ) from e
+
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest != SCGPT_VOCAB_SHA256:
+            raise RuntimeError(
+                f"the scGPT gene vocabulary downloaded from {url} has sha256 "
+                f"{digest}, expected {SCGPT_VOCAB_SHA256}. Refusing to select a "
+                "gene panel against a vocabulary this server did not pin."
+            )
+
+        # Written under a temporary name and renamed, so two processes starting
+        # at once cannot leave a half-written file for the other to read.
+        fd, staged = tempfile.mkstemp(dir=str(_scgpt_cache_dir()))
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+        os.replace(staged, path)
+
+    try:
+        parsed = json.loads(payload.decode("utf-8"))
+    except Exception as e:
+        raise RuntimeError(
+            f"scGPT's gene vocabulary is not readable JSON ({e})"
+        ) from e
+    if not isinstance(parsed, dict):
+        raise RuntimeError(
+            "scGPT's gene vocabulary is not a symbol-to-index mapping, so this "
+            f"server cannot tell which genes it covers (got {type(parsed).__name__})"
+        )
+
+    symbols = {str(symbol) for symbol in parsed}
+    # Asserted, not assumed. The digest already fixes the bytes, so this can
+    # only fail if the pin itself was written against a different file, and
+    # that is exactly the mistake worth catching at the pin rather than three
+    # stages later in a panel that is quietly 4% short.
+    if len(symbols) != SCGPT_VOCAB_SYMBOLS:
+        raise RuntimeError(
+            f"scGPT's gene vocabulary holds {len(symbols):,} symbols, but this "
+            f"server is pinned to {SCGPT_VOCAB_SYMBOLS:,}. The pin and the file "
+            "disagree, so the panel would not be the one the trainer reads."
+        )
+    return symbols
+
+
+def _scgpt_candidate_genes(root, n_vars: int, logger):
+    """Which genes scGPT can read, as a mask over ``var``.
+
+    The ``restrict`` hook of :func:`_ensure_hvg_rank`. Joined on
+    ``var/feature_name``, which is the column the scGPT trainer itself reads,
+    and only that column. Measuring several columns and picking whichever
+    matched best would be worse than useless here: the trainer does not
+    measure, so a panel selected against a column it will not look at is a
+    panel it cannot use.
+
+    Returns:
+        ``(mask, stats, refused)``. ``refused`` is a reason string when the
+        store cannot be joined to the vocabulary at all, in which case the
+        scGPT stages are left undone and the trainer falls back to the
+        family-neutral panel, which costs the restriction and not the run.
+    """
+    try:
+        vocabulary = _load_scgpt_vocabulary(logger)
+    except RuntimeError as e:
+        return None, {}, str(e)
+
+    symbols = _read_var_strings(root["var"], "feature_name") if "var" in root else None
+    if symbols is None:
+        reason = (
+            "var/feature_name is absent or unreadable, so this store's genes "
+            "cannot be matched against scGPT's gene vocabulary. scGPT looks a "
+            "gene up by HGNC symbol, and that is the column it reads"
+        )
+        root.attrs[SCGPT_UNSUITABLE_KEY] = True
+        root.attrs[SCGPT_UNSUITABLE_WHY_KEY] = reason
+        return None, {}, reason
+    if len(symbols) != n_vars:
+        reason = (
+            f"var/feature_name has {len(symbols):,} entries but var has "
+            f"{n_vars:,}, so the gene symbols do not line up with the matrix"
+        )
+        return None, {}, reason
+
+    mask = np.array([symbol in vocabulary for symbol in symbols], dtype=np.bool_)
+    n_in_vocab = int(mask.sum())
+    fraction = n_in_vocab / float(n_vars) if n_vars else 0.0
+
+    # A floor, not a non-empty check. A store keyed by Ensembl accession, or by
+    # a mouse annotation, still joins on a handful of symbols by coincidence,
+    # and selecting 1,200 genes out of that handful is a confident wrong panel
+    # rather than a visible failure.
+    if fraction < SCGPT_MIN_VOCAB_FRACTION:
+        reason = (
+            f"only {n_in_vocab:,} of {n_vars:,} genes ({fraction:.1%}) are in "
+            f"scGPT's gene vocabulary, below the {SCGPT_MIN_VOCAB_FRACTION:.0%} "
+            "this server requires. var/feature_name is probably not HGNC "
+            "symbols, so a panel selected from what did match would not be the "
+            "panel the model reads"
+        )
+        root.attrs[SCGPT_UNSUITABLE_KEY] = True
+        root.attrs[SCGPT_UNSUITABLE_WHY_KEY] = reason
+        logger.info(f"scGPT gene panel skipped ({reason})")
+        return None, {}, reason
+
+    if _read_attr(root, SCGPT_UNSUITABLE_KEY) is True:
+        # The store was unsuitable and now is not, which happens when the
+        # symbol column was fixed upstream. Left in place it would keep telling
+        # an operator the panel was skipped while the panel sits beside it.
+        root.attrs[SCGPT_UNSUITABLE_KEY] = False
+        root.attrs[SCGPT_UNSUITABLE_WHY_KEY] = ""
+
+    logger.info(
+        f"scGPT gene vocabulary covers {n_in_vocab:,}/{n_vars:,} genes "
+        f"({fraction:.1%}) of this store"
+    )
+    return (
+        mask,
+        {
+            "vocabulary": f"scgpt_census_{SCGPT_VOCAB_REVISION[:12]}",
+            "n_in_vocabulary": n_in_vocab,
+        },
+        None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The recipes
 # ---------------------------------------------------------------------------
 #
@@ -2218,17 +2613,39 @@ def _ensure_geneformer_ranks(
 
 PREP_ATTR_PREFIX = "chiron_prep_"
 
-TABULA_RECIPE = Recipe(
-    model_family="tabula",
-    version=1,
-    label="Tabula",
-    description=(
-        "Quality control, then 1,200 highly variable genes selected from what "
-        "survives it, then a 50-bin per-cell discretisation of those genes. "
-        "This is the preprocessing the Tabula manuscript's Methods describe, "
-        "in the order they describe it."
-    ),
-    stages=(
+def _value_matrix_stages(
+    keys: PrepKeys,
+    *,
+    hvg_description: str,
+    hvg_restrict=None,
+    hvg_identity: Tuple[str, ...] = (),
+) -> Tuple[Stage, ...]:
+    """The six stages every model that reads a value matrix needs.
+
+    Factored out because Tabula and scGPT want the SAME six steps computed over
+    different gene panels, and a copy of the tuple per family is a copy of the
+    quality-control thresholds, the parameter descriptions an organiser reads,
+    and the stage versions. Those would then drift: a QC_VERSION bump that
+    reached one copy and not the other would leave two families disagreeing
+    about what quality control is while both claim to be at the same version,
+    and nothing would report it.
+
+    What a family may vary is exactly the arguments here. The stage names and
+    versions are not among them, because they are what the fingerprint is
+    computed over: two families at the same version have to mean the same
+    computation, and the only legitimate way to differ is a declared
+    ``identity`` or a different parameter value.
+
+    Args:
+        keys: where this family's arrays go. Two families must never share.
+        hvg_description: what the organiser is told the panel is selected from.
+        hvg_restrict: optional candidate-gene restriction, see
+            :func:`_ensure_hvg_rank`.
+        hvg_identity: code-side constants the restriction depends on, so
+            repinning one recomputes the panel rather than leaving a panel
+            selected against something else.
+    """
+    return (
         Stage(
             name="quality_control",
             version=QC_VERSION,
@@ -2238,7 +2655,7 @@ TABULA_RECIPE = Recipe(
                 "deleted: the masks are stored beside the data so another model "
                 "can still read the full panel."
             ),
-            run=_ensure_qc,
+            run=functools.partial(_ensure_qc, keys=keys),
             params=(
                 Param(
                     name="min_genes_per_cell",
@@ -2270,18 +2687,16 @@ TABULA_RECIPE = Recipe(
                     ),
                 ),
             ),
-            outputs=("obs/" + QC_CELL_MASK_KEY, "var/" + QC_GENE_MASK_KEY),
+            outputs=("obs/" + keys.qc_cell_mask, "var/" + keys.qc_gene_mask),
         ),
         Stage(
             name="hvg_ranking",
             version=HVG_VERSION,
             label="Highly variable gene selection",
-            description=(
-                "Rank genes by over-dispersion across the cells that passed "
-                "quality control, and select the model's input width from the "
-                "genes that passed it."
+            description=hvg_description,
+            run=functools.partial(
+                _ensure_hvg_rank, keys=keys, restrict=hvg_restrict
             ),
-            run=_ensure_hvg_rank,
             requires=("quality_control",),
             params=(
                 Param(
@@ -2297,10 +2712,11 @@ TABULA_RECIPE = Recipe(
                     ),
                 ),
             ),
+            identity=hvg_identity,
             outputs=(
-                "var/" + HVG_RANK_KEY,
-                "var/" + HVG_SCORE_KEY,
-                "var/" + HVG_SELECTED_KEY,
+                "var/" + keys.hvg_rank,
+                "var/" + keys.hvg_score,
+                "var/" + keys.hvg_selected,
             ),
         ),
         Stage(
@@ -2311,7 +2727,7 @@ TABULA_RECIPE = Recipe(
                 "Register the masks as dataframe columns, so a reader going "
                 "through anndata sees them. Metadata only."
             ),
-            run=_ensure_var_columns_visible,
+            run=functools.partial(_ensure_var_columns_visible, keys=keys),
             requires=("hvg_ranking",),
         ),
         Stage(
@@ -2322,7 +2738,7 @@ TABULA_RECIPE = Recipe(
                 "A 20-bin summary of the variability scores, so the dataset card "
                 "can show the distribution without sending one number per gene."
             ),
-            run=_ensure_hvg_histogram,
+            run=functools.partial(_ensure_hvg_histogram, keys=keys),
             requires=("hvg_ranking",),
         ),
         Stage(
@@ -2333,7 +2749,7 @@ TABULA_RECIPE = Recipe(
                 "Each cell's expression over the selected genes, discretised into "
                 "equal-frequency bins. This is the matrix the trainer reads."
             ),
-            run=_ensure_binning,
+            run=functools.partial(_ensure_binning, keys=keys),
             requires=("hvg_ranking",),
             params=(
                 Param(
@@ -2348,7 +2764,7 @@ TABULA_RECIPE = Recipe(
                     ),
                 ),
             ),
-            outputs=("layers/" + BINNING_LAYER_KEY,),
+            outputs=("layers/" + keys.binned_layer,),
         ),
         Stage(
             name="umap",
@@ -2359,12 +2775,62 @@ TABULA_RECIPE = Recipe(
                 "discretised matrix through 50 principal components. For the "
                 "dataset card only, nothing trains on it."
             ),
-            run=_ensure_umap_embedding,
+            run=functools.partial(_ensure_umap_embedding, keys=keys),
             # quality_control as well as binning, because the embedding reads
             # the cell mask directly to leave out what the run will not see.
             requires=("quality_control", "binning"),
-            outputs=("obsm/" + UMAP_COORDS_KEY,),
+            outputs=("obsm/" + keys.umap_coords,),
         ),
+    )
+
+
+TABULA_RECIPE = Recipe(
+    model_family="tabula",
+    version=1,
+    label="Tabula",
+    description=(
+        "Quality control, then 1,200 highly variable genes selected from what "
+        "survives it, then a 50-bin per-cell discretisation of those genes. "
+        "This is the preprocessing the Tabula manuscript's Methods describe, "
+        "in the order they describe it."
+    ),
+    stages=_value_matrix_stages(
+        TABULA_KEYS,
+        hvg_description=(
+            "Rank genes by over-dispersion across the cells that passed "
+            "quality control, and select the model's input width from the "
+            "genes that passed it."
+        ),
+    ),
+)
+
+SCGPT_RECIPE = Recipe(
+    model_family="scgpt",
+    version=SCGPT_VERSION,
+    label="scGPT",
+    description=(
+        "The same quality control and 50-bin discretisation as Tabula, over a "
+        "gene panel restricted to the genes scGPT's pretrained gene embedding "
+        "covers. scGPT looks a gene up by name in a fixed vocabulary, so a "
+        "selected gene outside it is a panel slot the model cannot use."
+    ),
+    stages=_value_matrix_stages(
+        SCGPT_KEYS,
+        hvg_description=(
+            "Rank genes by over-dispersion across the cells that passed quality "
+            "control, then select the model's input width from those of them "
+            "scGPT's gene vocabulary covers. Restricting the candidates rather "
+            "than selecting first and dropping afterwards is what fills the "
+            "panel: on a typical CELLxGENE store around 4% of an unrestricted "
+            "panel is outside the vocabulary and would be discarded at load "
+            "time, leaving the model fewer genes than it reads."
+        ),
+        hvg_restrict=_scgpt_candidate_genes,
+        # The vocabulary decides which genes the panel may contain, so
+        # repinning it has to recompute every panel. Declared rather than
+        # folded into the version, so the pin and the thing that depends on it
+        # cannot drift apart.
+        hvg_identity=(f"scgpt_vocab:{SCGPT_VOCAB_SHA256}",),
     ),
 )
 
@@ -2428,6 +2894,7 @@ GENEFORMER_RECIPE_DEF = Recipe(
 
 RECIPES: Dict[str, Recipe] = {
     TABULA_RECIPE.model_family: TABULA_RECIPE,
+    SCGPT_RECIPE.model_family: SCGPT_RECIPE,
     GENEFORMER_RECIPE_DEF.model_family: GENEFORMER_RECIPE_DEF,
 }
 
@@ -2436,6 +2903,14 @@ RECIPES: Dict[str, Recipe] = {
 # happens to be scanned first, two minutes later, in a log nobody is reading.
 for _recipe in RECIPES.values():
     check_recipe(_recipe)
+
+# And that no two of them write the same place. This is the one error a single
+# recipe cannot contain, because it is a property of the set: the rescan
+# re-applies every family a store records, each with its own recorded
+# parameters, so two families sharing an output would overwrite each other on
+# every poll, invalidate each other's downstream fingerprints, and recompute
+# forever with nothing reporting a fault.
+check_recipes_coexist(list(RECIPES.values()))
 
 
 def _read_prep_state(root, model_family: str) -> Dict[str, Any]:
