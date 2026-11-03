@@ -41,18 +41,29 @@ FROM ${CHIRON_BASE_IMAGE}
 # worker/docker/scgpt/Dockerfile: hf-hub 1.x requires click>=8.4.2 while flwr 1.22.0
 # requires click<8.2.0, and flwr is what the federated client runs on. datasets
 # is pinned alongside it to the 2.x line that works against hf-hub 0.x.
+#
+# pyarrow is capped below 26 because datasets imports it and pyarrow 26 raises
+# "pyarrow requires NumPy 2.0 or newer" on import. The base image is held at
+# numpy 1.26 for scanpy and the Tabula stack, so pyarrow 26 cannot be imported
+# here at all. The cap is not a preference: 25.0.0 imports on numpy 1.26.4 and
+# 26.0.1 does not, measured one clean container per version. pyarrow declares no
+# numpy floor in its own metadata from 18.x onward, so an unpinned resolution
+# floats straight to the newest release and the build fails at the datasets
+# import rather than at resolution.
 RUN pip install \
     transformers==4.46 \
     "datasets>=2.20,<3" \
     "huggingface-hub<1.0" \
-    && python -c "import transformers, datasets, importlib.util as u, importlib.metadata as m; \
+    "pyarrow<26" \
+    && python -c "import transformers, datasets, pyarrow, importlib.util as u, importlib.metadata as m; \
 assert transformers.__version__.startswith('4.46'), f'transformers moved off the pin: {transformers.__version__}'; \
+assert int(pyarrow.__version__.split('.')[0]) < 26, f'pyarrow passed the numpy 1.26 cap: {pyarrow.__version__}'; \
 assert u.find_spec('geneformer') is None, 'the geneformer package leaked in, see the comment above'; \
 import numpy; assert numpy.__version__.startswith('1.26.'), f'numpy moved off the base pin: {numpy.__version__}'; \
 click_v = m.version('click'); \
 assert tuple(int(p) for p in click_v.split('.')[:2]) < (8, 2), f'click passed the flwr cap: {click_v}, check the huggingface-hub pin'; \
 from transformers import BertForMaskedLM; \
-print('transformers', transformers.__version__, 'datasets', datasets.__version__, 'click', click_v, 'OK')"
+print('transformers', transformers.__version__, 'datasets', datasets.__version__, 'pyarrow', pyarrow.__version__, 'click', click_v, 'OK')"
 
 # ── bioengine, LAST ───────────────────────────────────────────────────────
 # Pins live in worker/docker/versions.env, passed in as build args. Nothing
