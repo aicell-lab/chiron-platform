@@ -54,6 +54,15 @@ print('flash-attn', flash_attn.__version__, 'OK on torch', torch.__version__)"
 #     client runs on, so hf-hub stays on the 0.x line. datasets 2.21 is happy
 #     there (it needs >=0.21.2) and click stays at the 8.1.8 the base ships.
 # Dropping either pin puts click at 8.4.2 and breaks flwr's declared contract.
+#
+# pyarrow is capped below 26 for a separate reason: datasets imports it, and
+# scgpt/scbank/databank.py imports datasets, so `import scgpt` pulls pyarrow in
+# on every path. pyarrow 26 raises "pyarrow requires NumPy 2.0 or newer" on
+# import and the base image is held at numpy 1.26 for scanpy and the Tabula
+# stack. Measured one clean container per version: 25.0.0 imports on numpy
+# 1.26.4, 26.0.1 does not. pyarrow stopped declaring a numpy floor in its own
+# metadata at 18.x, so an unpinned resolution floats to the newest release and
+# the build fails at the import rather than at resolution.
 RUN pip install \
     scanpy \
     pandas \
@@ -62,7 +71,8 @@ RUN pip install \
     leidenalg \
     ipython \
     "datasets>=2.20,<3" \
-    "huggingface-hub<1.0"
+    "huggingface-hub<1.0" \
+    "pyarrow<26"
 
 # scGPT itself, from git at the pin in worker/docker/versions.env, with --no-deps.
 #

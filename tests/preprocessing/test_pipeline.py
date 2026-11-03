@@ -13,6 +13,7 @@ because its gene set is its own vocabulary and synthetic gene ids match
 nothing; those tests skip when the download is absent.
 """
 
+import dataclasses
 import hashlib
 import json
 import shutil
@@ -32,10 +33,14 @@ ad.settings.zarr_write_format = 3
 
 from chiron.datasets.__main__ import (  # noqa: E402
     GENEFORMER_GROUP,
+    MODEL_IN_FEATURE,
     PREP_ATTR_PREFIX,
     PREP_REQUEST_PREFIX,
     PREP_STATUS_PREFIX,
     RECIPES,
+    SCGPT_KEYS,
+    SCGPT_UNSUITABLE_KEY,
+    TABULA_KEYS,
     apply_recipe,
     convert_anndata_to_zarr,
 )
@@ -149,24 +154,62 @@ def state(path, family):
     return attrs(path).get(f"{PREP_ATTR_PREFIX}{family}") or {}
 
 
+#: Written identically by every family, because they describe the STORE and
+#: not a model's preparation of it. Excluded from the attribution below so the
+#: isolation tests do not read a deliberate sharing as a collision.
+_STORE_LEVEL_ATTRS = frozenset({
+    "chiron_upstream_reduced",
+    "chiron_upstream_reduced_reason",
+})
+
+#: How a snapshot key is attributed to a family. Ordered, and MOST SPECIFIC
+#: FIRST, because "chiron_scgpt_hvg_selected" contains "chiron_" too: a
+#: first-match-wins test written the other way round would file every scGPT key
+#: under Tabula, and the isolation tests would then be comparing a set with
+#: itself and passing on anything.
+_FAMILY_MARKERS = (
+    # "chiron_geneformer" rather than GENEFORMER_GROUP, so this classifies
+    # root attributes as well as array paths: the arrays live under
+    # uns/chiron_geneformer_gc104M/ but the attributes beside them are
+    # chiron_geneformer_version and friends, with no dictionary-set suffix.
+    ("geneformer", lambda k: "chiron_geneformer" in k),
+    ("scgpt", lambda k: "chiron_scgpt_" in k),
+    ("tabula", lambda k: "chiron_" in k and k not in _STORE_LEVEL_ATTRS),
+)
+
+
+def family_of(key):
+    """Which family wrote this array path or root attribute, or None.
+
+    None is the source data and the handful of store-level attributes that are
+    deliberately family-independent, such as whether the store arrived already
+    reduced to somebody else's panel. That is a fact about the store, not about
+    a model, and every family records it in the same place on purpose.
+    """
+    for family, matches in _FAMILY_MARKERS:
+        if matches(key):
+            return family
+    return None
+
+
+def keys_of(snap, family):
+    return {k: v for k, v in snap.items() if family_of(k) == family}
+
+
 def tabula_keys(snap):
-    return {
-        k: v
-        for k, v in snap.items()
-        if GENEFORMER_GROUP not in k and "chiron_" in k
-    }
+    return keys_of(snap, "tabula")
+
+
+def scgpt_keys(snap):
+    return keys_of(snap, "scgpt")
 
 
 def geneformer_keys(snap):
-    return {k: v for k, v in snap.items() if GENEFORMER_GROUP in k}
+    return keys_of(snap, "geneformer")
 
 
 def source_keys(snap):
-    return {
-        k: v
-        for k, v in snap.items()
-        if GENEFORMER_GROUP not in k and "chiron_" not in k
-    }
+    return keys_of(snap, None)
 
 
 # --------------------------------------------------------------------------
@@ -346,19 +389,41 @@ def test_tabula_leaves_the_geneformer_ordering_alone(cellxgene_store):
     assert state(cellxgene_store, "geneformer") == before_state
 
 
-def test_the_two_recipes_share_no_key(cellxgene_store):
-    """Structural, not conventional. If this holds, no ordering of the two can
-    make one overwrite the other, whatever either does later."""
-    apply_recipe(cellxgene_store, RECIPES["tabula"], None, LOG)
-    apply_recipe(cellxgene_store, RECIPES["geneformer"], None, LOG)
+def test_the_recipes_share_no_key(cellxgene_store):
+    """Structural, not conventional. If this holds, no ordering of the three
+    can make one overwrite another, whatever any of them does later.
+
+    Declared from RECIPES rather than from a list of the families this test
+    knows about, so a fourth recipe is covered the day it is registered rather
+    than the day somebody remembers to add it here.
+    """
+    for recipe in RECIPES.values():
+        apply_recipe(cellxgene_store, recipe, None, LOG)
 
     snap = snapshot(cellxgene_store)
-    assert not (set(tabula_keys(snap)) & set(geneformer_keys(snap)))
+    written = {family: set(keys_of(snap, family)) for family in RECIPES}
+    # Every family wrote something, so an empty set cannot be what makes the
+    # disjointness below hold.
+    for family, keys in written.items():
+        assert keys, f"{family} wrote no array, so this proves nothing"
+    for a in RECIPES:
+        for b in RECIPES:
+            if a < b:
+                assert not (written[a] & written[b]), f"{a} and {b} share a key"
 
-    tabula_attrs = {k for k in attrs(cellxgene_store) if k.startswith("chiron_")
-                    and "geneformer" not in k}
-    gene_attrs = {k for k in attrs(cellxgene_store) if "geneformer" in k}
-    assert not (tabula_attrs & gene_attrs)
+    by_family = {}
+    for key in attrs(cellxgene_store):
+        if key.startswith(PREP_ATTR_PREFIX):
+            continue  # the per-family state record, one key per family already
+        family = family_of(key)
+        if family is not None:
+            by_family.setdefault(family, set()).add(key)
+    for a in by_family:
+        for b in by_family:
+            if a < b:
+                assert not (by_family[a] & by_family[b]), (
+                    f"{a} and {b} share a root attribute"
+                )
 
 
 def test_changing_tabula_s_filter_does_not_touch_geneformer(cellxgene_store):
@@ -505,14 +570,21 @@ def test_a_request_with_a_bad_parameter_reports_why(tmp_path):
 
 
 def test_a_request_for_an_unknown_model_reports_why(tmp_path):
+    """scfoundation is a model the platform is bringing online and has no
+    recipe yet, so this is the real shape of the error an organiser hits: not
+    a typo, a model this site cannot prepare for. The message has to name what
+    it CAN do, because "no recipe for scfoundation" leaves the organiser with
+    no next step."""
     data_dir, _ = _data_dir_with(tmp_path, _write_synthetic)
-    status_file = _write_request(data_dir, "demo", "scgpt", {})
+    status_file = _write_request(data_dir, "demo", "scfoundation", {})
 
     convert_anndata_to_zarr(str(data_dir))
 
     status = json.loads(status_file.read_text())
     assert status["state"] == "error"
-    assert "scgpt" in status["error"]
+    assert "scfoundation" in status["error"]
+    for family in RECIPES:
+        assert family in status["error"]
 
 
 def test_a_fresh_scan_prepares_tabula_by_default(tmp_path):
@@ -823,3 +895,228 @@ def test_the_scan_loop_does_not_accumulate_log_handlers():
         _converter_logger(None)
 
     assert len(logging.getLogger(name).handlers) == 1
+
+
+# --------------------------------------------------------------------------
+# scGPT
+# --------------------------------------------------------------------------
+#
+# The scGPT recipe is the Tabula one over a different candidate pool: only
+# genes its pretrained gene embedding has a token for may be selected. What
+# these tests protect is that the restriction actually bit, that it bit on the
+# column the trainer reads, and that a store it cannot be applied to is told so
+# rather than given a panel selected from whatever happened to match.
+
+
+def test_scgpt_selects_a_panel_its_vocabulary_covers(cellxgene_store):
+    """The point of the whole recipe, stated as a measurement.
+
+    Without the restriction, a few percent of the panel is selected and then
+    discarded by the trainer's token lookup, so the model reads fewer genes
+    than it was built for. With it, every selected gene has a token.
+    """
+    result = apply_recipe(cellxgene_store, RECIPES["scgpt"], None, LOG)
+    assert result["complete"], result
+
+    root = zarr.open_group(str(cellxgene_store), mode="r")
+    selected = np.asarray(root["var"][SCGPT_KEYS.hvg_selected][:]).astype(bool)
+    symbols = np.asarray(root["var"]["feature_name"]["categories"][:]).astype(str)
+    codes = np.asarray(root["var"]["feature_name"]["codes"][:]).astype(np.int64)
+    chosen = set(symbols[codes[selected]])
+
+    from chiron.datasets.__main__ import _load_scgpt_vocabulary
+
+    vocabulary = _load_scgpt_vocabulary(LOG)
+    assert chosen, "nothing was selected, so this proves nothing"
+    assert not (chosen - vocabulary), (
+        f"{len(chosen - vocabulary)} selected genes are outside scGPT's "
+        f"vocabulary, so the restriction did not apply"
+    )
+
+
+#: The gene filter these two tests run at, instead of the published 250.
+#:
+#: Not a convenience. At 250 the 400-cell fixture keeps 8 genes of 31,997, so
+#: both families select everything that survived and the two panels are equal
+#: by arithmetic rather than by agreeing about anything. A test of "restricting
+#: the candidates fills the panel" has to run where there are more candidates
+#: than slots, which here means a threshold scaled to 400 cells. At 20 the
+#: fixture leaves both families a full 1,200.
+RELAXED = {"min_cells_per_gene": 20}
+
+
+def test_the_restriction_is_what_filled_the_panel(cellxgene_store):
+    """The restriction has to be load-bearing, not decorative.
+
+    Measured as a comparison rather than asserted as a fraction: the number of
+    out-of-vocabulary genes in an unrestricted panel depends on the store's
+    annotation vintage, so a hardcoded "about 4%" would be a fact about one
+    download. What must hold on any store is the direction.
+    """
+    apply_recipe(cellxgene_store, RECIPES["tabula"], RELAXED, LOG)
+    apply_recipe(cellxgene_store, RECIPES["scgpt"], RELAXED, LOG)
+
+    root = zarr.open_group(str(cellxgene_store), mode="r")
+    categories = np.asarray(root["var"]["feature_name"]["categories"][:]).astype(str)
+    codes = np.asarray(root["var"]["feature_name"]["codes"][:]).astype(np.int64)
+    symbols = categories[codes]
+
+    from chiron.datasets.__main__ import _load_scgpt_vocabulary
+
+    vocabulary = _load_scgpt_vocabulary(LOG)
+    in_vocab = np.array([sym in vocabulary for sym in symbols])
+
+    shared = np.asarray(root["var"][TABULA_KEYS.hvg_selected][:]).astype(bool)
+    own = np.asarray(root["var"][SCGPT_KEYS.hvg_selected][:]).astype(bool)
+
+    usable_shared = int((shared & in_vocab).sum())
+    usable_own = int((own & in_vocab).sum())
+
+    # The premise, asserted rather than assumed. If the shared panel happened
+    # to be entirely in-vocabulary there would be nothing for the restriction
+    # to buy, and the comparison below would hold vacuously.
+    assert usable_shared < int(shared.sum()), (
+        "every gene the shared panel selected is already in scGPT's "
+        "vocabulary on this store, so this test measures nothing"
+    )
+    assert usable_own == int(own.sum()), "the scGPT panel kept an unusable gene"
+    assert usable_own > usable_shared, (
+        f"the scGPT panel gives the model {usable_own} usable genes and the "
+        f"shared one gives {usable_shared}, so the restriction bought nothing "
+        f"on this store"
+    )
+
+
+def test_scgpt_cuts_its_binned_layer_to_its_own_panel(cellxgene_store):
+    """The layer and the mask have to agree on a width, because the mask is the
+    only thing that says what the layer's columns are. A trainer pairing one
+    family's layer with another's mask gets the right column count and the
+    wrong genes."""
+    apply_recipe(cellxgene_store, RECIPES["scgpt"], None, LOG)
+
+    root = zarr.open_group(str(cellxgene_store), mode="r")
+    selected = np.asarray(root["var"][SCGPT_KEYS.hvg_selected][:]).astype(bool)
+    binned = root["layers"][SCGPT_KEYS.binned_layer]
+
+    assert binned.shape[1] == int(selected.sum())
+    assert int(binned[:].max()) <= 50
+
+
+def test_scgpt_refuses_a_store_it_cannot_identify_the_genes_of(synthetic_store):
+    """GENE00000 is not an HGNC symbol and this store has no feature_name
+    column at all, so there is nothing to join against the vocabulary.
+
+    The refusal is the feature. A panel selected from the handful of names that
+    happened to match would be a confident wrong answer, and because the
+    trainer falls back to the family-neutral panel, refusing costs the
+    restriction and not the run.
+    """
+    result = apply_recipe(synthetic_store, RECIPES["scgpt"], None, LOG)
+
+    assert not result["complete"]
+    stages = result["stages"]
+    assert stages["quality_control"]["satisfied"] is True
+    assert stages["hvg_ranking"]["refused"] is True
+    assert "feature_name" in stages["hvg_ranking"]["reason"]
+    # Blocked, not refused. The chain rule is what stops a stage computing
+    # from an input that is not there, and the distinction is what tells an
+    # operator which step to look at.
+    assert stages["binning"]["blocked"] is True
+
+    root = zarr.open_group(str(synthetic_store), mode="r")
+    assert root.attrs.get(SCGPT_UNSUITABLE_KEY) is True
+    # And nothing downstream pretended to succeed on a panel that is not there.
+    assert SCGPT_KEYS.binned_layer not in (
+        root["layers"] if "layers" in root else {}
+    )
+
+
+def test_a_refused_scgpt_panel_leaves_tabula_s_intact(synthetic_store):
+    """The fallback the trainer relies on. A store scGPT cannot have a panel
+    selected for still has to carry the family-neutral one."""
+    apply_recipe(synthetic_store, RECIPES["tabula"], None, LOG)
+    before = tabula_keys(snapshot(synthetic_store))
+
+    apply_recipe(synthetic_store, RECIPES["scgpt"], None, LOG)
+
+    assert tabula_keys(snapshot(synthetic_store)) == before
+    assert before, "tabula wrote nothing, so this proves nothing"
+
+
+def test_scgpt_and_tabula_select_different_panels(cellxgene_store):
+    """Two masks of the same width over the same store, differing in
+    membership. If they were identical the separate namespace would be dead
+    weight, and if they were the same object a change to one would move the
+    other."""
+    apply_recipe(cellxgene_store, RECIPES["tabula"], RELAXED, LOG)
+    apply_recipe(cellxgene_store, RECIPES["scgpt"], RELAXED, LOG)
+
+    root = zarr.open_group(str(cellxgene_store), mode="r")
+    shared = np.asarray(root["var"][TABULA_KEYS.hvg_selected][:]).astype(bool)
+    own = np.asarray(root["var"][SCGPT_KEYS.hvg_selected][:]).astype(bool)
+
+    assert shared.sum() == own.sum() == MODEL_IN_FEATURE
+    assert not np.array_equal(shared, own)
+
+
+def test_changing_scgpt_s_filter_does_not_touch_tabula(cellxgene_store):
+    """The reason the namespaces are separate at all: the rescan re-applies
+    every recorded family with that family's own thresholds, so one family's
+    threshold must not move another family's masks."""
+    apply_recipe(cellxgene_store, RECIPES["tabula"], None, LOG)
+    apply_recipe(cellxgene_store, RECIPES["scgpt"], {"min_cells_per_gene": 20}, LOG)
+    before = tabula_keys(snapshot(cellxgene_store))
+    before_state = state(cellxgene_store, "tabula")
+
+    apply_recipe(cellxgene_store, RECIPES["scgpt"], {"min_cells_per_gene": 90}, LOG)
+
+    assert tabula_keys(snapshot(cellxgene_store)) == before
+    assert state(cellxgene_store, "tabula") == before_state
+
+
+def test_scgpt_is_idempotent(cellxgene_store):
+    apply_recipe(cellxgene_store, RECIPES["scgpt"], None, LOG)
+    before, before_attrs = snapshot(cellxgene_store), attrs(cellxgene_store)
+
+    result = apply_recipe(cellxgene_store, RECIPES["scgpt"], None, LOG)
+
+    assert result["changed"] is False
+    assert snapshot(cellxgene_store) == before
+    assert attrs(cellxgene_store) == before_attrs
+
+
+def test_repinning_the_vocabulary_would_recompute_the_panel(cellxgene_store):
+    """What `identity` is for. The vocabulary is not a parameter and not part of
+    the stage's code, so neither the parameter comparison nor the version check
+    can see it move. Without it being in the fingerprint, repinning would leave
+    every prepared store advertising a panel selected against the vocabulary
+    before it, and nothing would recompute."""
+    apply_recipe(cellxgene_store, RECIPES["scgpt"], None, LOG)
+    recorded = state(cellxgene_store, "scgpt")["stages"]["hvg_ranking"]
+
+    stage = {s.name: s for s in RECIPES["scgpt"].stages}["hvg_ranking"]
+    resolved = {"n_hvg": MODEL_IN_FEATURE}
+    assert stage.fingerprint(resolved) == recorded["fingerprint"]
+
+    repinned = dataclasses.replace(stage, identity=("scgpt_vocab:deadbeef",))
+    assert repinned.fingerprint(resolved) != recorded["fingerprint"]
+
+    # And the planner acts on it, rather than the digest merely differing.
+    from chiron.datasets.recipes import plan
+
+    actions = {
+        a.stage.name: a.action
+        for a in plan(
+            dataclasses.replace(
+                RECIPES["scgpt"],
+                stages=tuple(
+                    repinned if st.name == "hvg_ranking" else st
+                    for st in RECIPES["scgpt"].stages
+                ),
+            ),
+            resolve_params(RECIPES["scgpt"], None),
+            state(cellxgene_store, "scgpt")["stages"],
+        )
+    }
+    assert actions["hvg_ranking"] == "run"
+    assert actions["binning"] == "run"

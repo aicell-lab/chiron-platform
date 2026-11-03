@@ -10,6 +10,8 @@ stage's result is only valid if the stages it was computed from are. Everything
 else in this file exists to make that property hard to break by accident.
 """
 
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from chiron.datasets.recipes import (  # noqa: E402
     Stage,
     StageResult,
     check_recipe,
+    check_recipes_coexist,
     plan,
     resolve_params,
 )
@@ -32,7 +35,7 @@ def _noop(zarr_path, params, logger):
     return StageResult(True)
 
 
-def _stage(name, requires=(), params=(), version=1):
+def _stage(name, requires=(), params=(), version=1, outputs=(), identity=()):
     return Stage(
         name=name,
         version=version,
@@ -41,6 +44,8 @@ def _stage(name, requires=(), params=(), version=1):
         run=_noop,
         requires=tuple(requires),
         params=tuple(params),
+        outputs=tuple(outputs),
+        identity=tuple(identity),
     )
 
 
@@ -350,7 +355,7 @@ def test_the_shipped_recipes_are_well_formed():
     in the file that needs the data server's dependencies."""
     from chiron.datasets.__main__ import RECIPES
 
-    assert set(RECIPES) == {"tabula", "geneformer"}
+    assert set(RECIPES) == {"tabula", "scgpt", "geneformer"}
     for recipe in RECIPES.values():
         check_recipe(recipe)
 
@@ -378,6 +383,156 @@ def test_tabula_hvg_runs_behind_quality_control():
     from chiron.datasets.__main__ import RECIPES
 
     stages = {s.name: s for s in RECIPES["tabula"].stages}
+    assert "quality_control" in stages["hvg_ranking"].requires
+    assert "hvg_ranking" in stages["binning"].requires
+    assert "quality_control" in stages["umap"].requires
+
+
+# ---------------------------------------------------------------------------
+# A pinned external asset in the fingerprint
+# ---------------------------------------------------------------------------
+#
+# ``identity`` exists for the one kind of input that is neither a parameter nor
+# the stage's own code: an external file the stage is pinned to. scGPT's gene
+# vocabulary is the case. It decides which genes the panel may contain, so
+# repinning it has to recompute every prepared store, exactly as bumping the
+# stage version would, and it must do that without appearing in the organiser's
+# form as a 64-character digest.
+
+
+def test_a_declared_identity_changes_the_fingerprint():
+    """Otherwise repinning the asset leaves every store advertising a panel
+    selected against the one before it, and nothing recomputes."""
+    before = _stage("selection", identity=("vocab:aaa",))
+    after = _stage("selection", identity=("vocab:bbb",))
+
+    assert before.fingerprint({}) != after.fingerprint({})
+
+
+def test_an_empty_identity_leaves_the_fingerprint_where_it_was():
+    """The field's introduction must not restamp a single prepared store, so a
+    stage that declares nothing has to digest exactly as it did before the
+    field existed.
+
+    The expected value is computed from a reimplementation of the pre-identity
+    payload rather than read back from the code under test. Calling
+    ``fingerprint`` twice would agree with itself however the format changed,
+    which is the one thing this test exists to notice.
+    """
+    expected = hashlib.sha256(
+        json.dumps(
+            {"stage": "quality_control", "version": 1,
+             "params": {"min_cells_per_gene": 250}},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()[:16]
+
+    assert _stage("quality_control", params=(FILTER,)).fingerprint(
+        {"min_cells_per_gene": 250}
+    ) == expected
+
+
+def test_identity_is_order_sensitive_but_not_params():
+    """Two assets are not interchangeable, so the tuple is not a set. Parameter
+    ORDER is a different question and is already normalised by sort_keys."""
+    assert _stage("s", identity=("a", "b")).fingerprint({}) != _stage(
+        "s", identity=("b", "a")
+    ).fingerprint({})
+
+
+# ---------------------------------------------------------------------------
+# Two recipes on one store
+# ---------------------------------------------------------------------------
+
+
+def _one_stage_recipe(family, outputs):
+    return Recipe(
+        model_family=family,
+        version=1,
+        label=family,
+        description=family,
+        stages=(_stage("only", outputs=outputs),),
+    )
+
+
+def test_two_recipes_writing_the_same_key_is_rejected():
+    """The one error a single recipe cannot contain, because it is a property
+    of the set. The rescan re-applies every family a store records with that
+    family's own parameters, so a shared output is an endless overwrite with
+    nothing reporting a fault."""
+    with pytest.raises(ValueError, match="both write"):
+        check_recipes_coexist([
+            _one_stage_recipe("a", ("var/shared",)),
+            _one_stage_recipe("b", ("var/shared", "var/own")),
+        ])
+
+
+def test_recipes_writing_different_keys_coexist():
+    check_recipes_coexist([
+        _one_stage_recipe("a", ("var/a",)),
+        _one_stage_recipe("b", ("var/b",)),
+    ])
+
+
+def test_one_recipe_alone_coexists_with_itself():
+    """A single recipe's stages may not be checked against each other here: a
+    stage that overwrites its own earlier output on a recompute is normal."""
+    check_recipes_coexist([_one_stage_recipe("a", ("var/a",))])
+
+
+def test_the_shipped_recipes_coexist():
+    """The real three, which is the assertion that actually protects a store."""
+    from chiron.datasets.__main__ import RECIPES
+
+    check_recipes_coexist(list(RECIPES.values()))
+
+
+def test_scgpt_declares_its_vocabulary_pin():
+    """The pin has to be IN the fingerprint, not merely next to it. Asserted
+    through the recipe rather than against the constant, because a pin the
+    stage does not declare is a pin that recomputes nothing."""
+    from chiron.datasets.__main__ import RECIPES, SCGPT_VOCAB_SHA256
+
+    stage = {s.name: s for s in RECIPES["scgpt"].stages}["hvg_ranking"]
+    assert any(SCGPT_VOCAB_SHA256 in token for token in stage.identity)
+
+
+def test_scgpt_and_tabula_fingerprint_their_hvg_stage_differently():
+    """Same stage name, same version, same parameters, different panel. Without
+    the declared identity these two would digest identically, and a store
+    prepared for one would look prepared for the other."""
+    from chiron.datasets.__main__ import RECIPES
+
+    stages = {
+        family: {s.name: s for s in RECIPES[family].stages}["hvg_ranking"]
+        for family in ("tabula", "scgpt")
+    }
+    resolved = {"n_hvg": 1200}
+    assert stages["tabula"].fingerprint(resolved) != stages["scgpt"].fingerprint(
+        resolved
+    )
+
+
+def test_scgpt_exposes_the_same_two_thresholds_as_tabula():
+    """The gene filter is the site's call for scGPT too. The vocabulary is not,
+    and must not appear as a parameter at all: it is a property of the
+    pretrained checkpoint, and the form is not where a 64-character digest
+    belongs."""
+    from chiron.datasets.__main__ import RECIPES
+
+    params = {p.name: p for p in RECIPES["scgpt"].params}
+    assert params["min_genes_per_cell"].adjustable
+    assert params["min_cells_per_gene"].adjustable
+    assert not params["n_hvg"].adjustable
+    assert not params["n_bins"].adjustable
+    assert not any("vocab" in name for name in params)
+
+
+def test_scgpt_hvg_runs_behind_quality_control_too():
+    from chiron.datasets.__main__ import RECIPES
+
+    stages = {s.name: s for s in RECIPES["scgpt"].stages}
     assert "quality_control" in stages["hvg_ranking"].requires
     assert "hvg_ranking" in stages["binning"].requires
     assert "quality_control" in stages["umap"].requires
