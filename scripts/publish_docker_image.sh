@@ -227,7 +227,12 @@ else
   build_model "$SELECTED"
 fi
 
-if [ "$SKIP_LATEST" = false ]; then
+# --build-only must not move the local :latest tag either. The tag is only ever
+# needed to be pushed, and moving it locally on a build that pushes nothing
+# leaves this machine with :latest naming an unpublished, unvalidated image.
+# Anything here that runs a container from an untagged chiron image, which
+# Docker resolves to :latest, then silently gets the new build.
+if [ "$SKIP_LATEST" = false ] && [ "$BUILD_ONLY" = false ]; then
   for repo in "${BUILT[@]}"; do
     docker tag "$repo:$VERSION" "$repo:latest"
   done
