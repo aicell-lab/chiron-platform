@@ -9,12 +9,13 @@
 ## Where to look first
 
 - **Agent or end-user workflows on the platform** (browse the model hub, set up a worker, prepare datasets, launch and monitor federated training, contribute a trainer for another model) → `public/skills/chiron-platform/SKILL.md`. This is the public skill served at https://chiron.aicell.io/skills/chiron-platform/SKILL.md.
-- **Repo maintainer operations** (Tabula backend env, BioEngine app upload and deploy, federated session walkthrough, image and resource baselines) → `.claude/skills/chiron-maintainer/SKILL.md`.
-- **Manuscript and figure work** (paper draft, Figure 2 working directory, design references, hard constraints) → `.claude/skills/chiron-figures/SKILL.md`.
+- **Repo maintainer operations** (Tabula backend env, BioEngine app upload and deploy, federated session walkthrough, image and resource baselines) → `.claude/skills/chiron-maintainer/SKILL.md`. This is the only skill in `.claude/skills/`.
 
 ## The manuscript and the figures are not in git
 
 `/resources` and `/outputs` are gitignored (`.gitignore` lines 4 and 5). The paper draft and the figure sources live under `resources/`, so they are edited in place and never committed, and `git status` will not show them. Code goes in `src/` and `worker/`.
+
+Manuscript and figure work has no skill. The guide for it is `resources/MANUSCRIPT-FIGURES-GUIDE.md`, which is gitignored like the rest of `resources/` and so is absent from a fresh clone.
 
 ## Companion repositories
 
@@ -51,9 +52,11 @@ The orchestration half of the platform lives in the `tabula` repo, so these are 
 
 | Area | File |
 |------|------|
-| FL client implementation | `../tabula/tabula/distributed/federated_client.py` |
+| FL client implementation | `../tabula/apps/_chiron_trainer_base/client.py` |
 | Federated server (FedAvg) | `../tabula/apps/chiron_orchestrator/` |
-| Local trainer app | `../tabula/apps/tabula_trainer/` |
+| Per-model trainer apps | `../tabula/apps/{tabula,scgpt,geneformer,scfoundation}_trainer/` |
 | Control plane | `../tabula/apps/chiron_manager/` |
+
+The FL client is not under `tabula/tabula/` any more — `tabula/distributed/` was removed in tabula `c9cd560` and the client was inlined into the app scripts. An empty `tabula/distributed/` directory survives on machines with a stale `__pycache__`, so its presence does not mean the source is there.
 
 In this repo, `src/store/hyphaStore.ts` holds the Hypha connection, auth and artifact state that most pages read from, and `src/components/BioEngine/` holds the worker dashboard and deployment UI.
