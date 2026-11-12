@@ -4,23 +4,18 @@
 
 **Chiron Platform** is the web frontend and federated orchestration layer for **Tabula**, a single-cell foundation model that combines tabular learning over genes with federated learning across institutions. Raw single-cell data never leaves the institution that owns it. Only shared transformer weights cross the network. See the bioRxiv preprint: https://www.biorxiv.org/content/10.1101/2025.01.06.631427v1.
 
-`chiron.aicell.io` coordinates BioEngine Workers across institutions so they can train collaboratively. Tabula and scGPT are supported today, with Geneformer and scFoundation being brought online one at a time. Keep platform code model-agnostic where possible so further foundation models can plug in.
+`chiron.aicell.io` coordinates BioEngine Workers across institutions so they can train collaboratively. Tabula and scGPT are supported today, with Geneformer and scFoundation being brought online one at a time.
 
 ## Where to look first
 
 - **Agent or end-user workflows on the platform** (browse the model hub, set up a worker, prepare datasets, launch and monitor federated training, contribute a trainer for another model) → `public/skills/chiron-platform/SKILL.md`. This is the public skill served at https://chiron.aicell.io/skills/chiron-platform/SKILL.md.
-- **Repo maintainer operations** (Tabula backend env, BioEngine app upload and deploy, federated session walkthrough, image and resource baselines) → `.claude/skills/chiron-maintainer/SKILL.md`.
-- **Manuscript and figure work** (paper draft, Figure 2 working directory, design references, hard constraints) → `.claude/skills/chiron-figures/SKILL.md`.
+- **Repo maintainer operations** (Tabula backend env, BioEngine app upload and deploy, federated session walkthrough, image and resource baselines) → `.claude/skills/chiron-maintainer/SKILL.md`. This is the only skill in `.claude/skills/`.
 
-## Work tracks in this repo
+## The manuscript and the figures are not in git
 
-Three connected tracks. Don't conflate them in a single commit.
+`/resources` and `/outputs` are gitignored (`.gitignore` lines 4 and 5). The paper draft and the figure sources live under `resources/`, so they are edited in place and never committed, and `git status` will not show them. Code goes in `src/` and `worker/`.
 
-1. **Platform code** — React frontend in `src/` and BioEngine worker assets in `worker/`. Edits land here.
-2. **Manuscript** — local draft under `resources/` (gitignored). Edits in the markdown file, never committed.
-3. **Figures** — main and supplementary figures under `resources/figure-2/` and `resources/Figure-{1,3,4}.png`. Vector SVG edits in the panel directories, also gitignored.
-
-Code edits go in `src/` and `worker/`. Manuscript edits go in `resources/`. Figure edits go in `resources/figure-2/` (or a sibling figure dir once one exists).
+Manuscript and figure work has no skill. The guide for it is `resources/MANUSCRIPT-FIGURES-GUIDE.md`, which is gitignored like the rest of `resources/` and so is absent from a fresh clone.
 
 ## Companion repositories
 
@@ -32,6 +27,8 @@ Code edits go in `src/` and `worker/`. Manuscript edits go in `resources/`. Figu
 
 ## Common commands
 
+This project uses **pnpm**, not npm.
+
 ```bash
 pnpm install        # install dependencies
 pnpm start          # dev server at http://localhost:3000
@@ -41,54 +38,25 @@ pnpm test           # run tests
 
 For Tabula backend setup, BioEngine app upload and deploy, and federated training session steps, see `.claude/skills/chiron-maintainer/SKILL.md`.
 
-## Coding standards
-
-### TypeScript / React
-
-- Functional components and hooks only.
-- Shared cross-page state lives in Zustand stores.
-- Explicit TypeScript types for all RPC responses and structured data.
-- Wrap every async call in `try/catch` and surface errors in the UI. Do not swallow them.
-- Follow the styling language already in the file being edited. Do not introduce a new design system.
-- Preserve existing component boundaries. No speculative abstractions.
-
-### Python
-
-- PEP 8, type hints on all public functions.
-- Docstrings on significant classes and functions.
-- Wrap I/O, network, and filesystem operations in `try/except` with meaningful messages.
-
-### Naming
-
-| Context | Convention |
-|---------|------------|
-| Python variables and functions | `snake_case` |
-| Python classes | `PascalCase` |
-| TS/JS variables and functions | `camelCase` |
-| TS/JS classes | `PascalCase` |
-| Files and folders | `snake_case` or `kebab-case`, consistent within each area |
-
 ## Architecture rules
+
+Three constraints that no test in this repo enforces and that the code does not state.
 
 - **Data privacy is non-negotiable.** Raw single-cell data never leaves the worker. Only transformer weights and scalar metrics cross the network.
 - **Hypha RPC is the integration layer.** All cross-service calls go through Hypha. Do not add alternative transports.
-- **Separation of concerns.** Orchestration logic stays out of React components. Worker, dataset, and UI code must not bleed into each other.
 - **Platform vs. model.** Chiron platform code should stay model-agnostic where possible, anticipating future single-cell foundation models beyond Tabula.
-- When a change touches deployment, service registration, or dataset access, read the relevant worker-side code before editing the UI.
-- Prefer the smallest change that addresses the request. No speculative features or design-for-future additions beyond what the task requires.
 
-## Key files to read before editing
+## Key files that a search of this repo will not find
+
+The orchestration half of the platform lives in the `tabula` repo, so these are not reachable from here by grep.
 
 | Area | File |
 |------|------|
-| Agent workspace + Hypha Core setup | `src/pages/AgentLab.tsx` |
-| Hypha connection, auth, artifact state | `src/store/hyphaStore.ts` |
-| Worker dashboard and deployment UI | `src/components/BioEngine/` |
-| Setup wizard (Human / AI Agent toggle, manifest builder) | `src/components/BioEngine/BioEngineGuide.tsx` |
-| Dataset and worker services | `worker/` |
-| Frontend logging buffer and redaction | `src/utils/logger.ts` |
-| Report Issue submit path | `src/utils/issueReport.ts` |
-| FL client implementation | `../tabula/tabula/distributed/federated_client.py` |
+| FL client implementation | `../tabula/apps/_chiron_trainer_base/client.py` |
 | Federated server (FedAvg) | `../tabula/apps/chiron_orchestrator/` |
-| Local trainer app | `../tabula/apps/tabula_trainer/` |
+| Per-model trainer apps | `../tabula/apps/{tabula,scgpt,geneformer,scfoundation}_trainer/` |
 | Control plane | `../tabula/apps/chiron_manager/` |
+
+The FL client is not under `tabula/tabula/` any more — `tabula/distributed/` was removed in tabula `c9cd560` and the client was inlined into the app scripts. An empty `tabula/distributed/` directory survives on machines with a stale `__pycache__`, so its presence does not mean the source is there.
+
+In this repo, `src/store/hyphaStore.ts` holds the Hypha connection, auth and artifact state that most pages read from, and `src/components/BioEngine/` holds the worker dashboard and deployment UI.
