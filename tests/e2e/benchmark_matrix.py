@@ -1174,16 +1174,42 @@ async def verify_weights(record_path: Path) -> int:
         init_sd = torch.load(init_path, map_location="cpu", weights_only=False)
         if isinstance(init_sd, dict) and "state_dict" in init_sd:
             init_sd = init_sd["state_dict"]
-        shared = [k for k in final_sd if k in init_sd]
+        # The two sides name the same tensors differently. A federated
+        # checkpoint carries only the shared scope and names it from the
+        # transformer's own root (`blocks.0.attention...`), while a published
+        # foundation artifact carries the whole model and names that same
+        # tensor from the model's root (`transformer.blocks.0.attention...`).
+        # Measured on chiron-platform/tabula-foundation against the checkpoint
+        # of the tabula-continued cell, 2026-11-13: 2,447 tensors against 24,
+        # exact intersection 0, and all 24 matching by dotted suffix with equal
+        # shapes. Matching on equality alone therefore compared nothing and
+        # printed "0 of 0 keys moved", which reads as a finding about the
+        # training and is really a finding about the naming.
+        pairs: List[Tuple[str, str]] = []
+        unpaired_final: List[str] = []
+        for k in final_sd:
+            if k in init_sd:
+                pairs.append((k, k))
+                continue
+            hits = [g for g in init_sd if g.endswith("." + k)]
+            if len(hits) == 1:
+                pairs.append((k, hits[0]))
+            else:
+                # Zero hits is a genuine absence; more than one is ambiguous
+                # and resolving it by picking would invent a comparison.
+                unpaired_final.append(k)
         per_key: Dict[str, float] = {}
-        for k in shared:
-            a, b = init_sd[k], final_sd[k]
+        for fk, ik in pairs:
+            a, b = init_sd[ik], final_sd[fk]
             if not (hasattr(a, "shape") and hasattr(b, "shape")) or a.shape != b.shape:
                 continue
-            per_key[k] = float((b.float() - a.float()).abs().max())
+            per_key[fk] = float((b.float() - a.float()).abs().max())
         delta["comparison"] = "initial vs final"
         delta["initial_artifact"] = initial
-        delta["keys_in_both"] = len(shared)
+        delta["keys_in_both"] = len(pairs)
+        delta["keys_matched_by_suffix"] = sum(1 for fk, ik in pairs if fk != ik)
+        delta["keys_unpairable"] = len(unpaired_final)
+        delta["unpairable_key_sample"] = unpaired_final[:10]
         delta["whole_checkpoint"] = summarise(per_key)
 
         # The issue asks how many parameters were SHARED and that those moved.
