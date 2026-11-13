@@ -249,6 +249,37 @@ def slugify(name: str) -> str:
     return "-".join(p for p in "".join(out).split("-") if p) or "unnamed"
 
 
+async def list_workspace_services(timeout_s: float = 30) -> List[Dict[str, Any]]:
+    """List the workspace's services over HTTP rather than over RPC.
+
+    `server.list_services({"workspace": "chiron-platform"})` hangs once the
+    workspace carries enough services. Measured 2026-11-13 on europa, same
+    script and token throughout: the call returned in 0.0s with 26 and 28
+    services registered and did not return at all within 25-45s with 32 and
+    38, across six alternations of bringing one worker up and down. In every
+    one of those states `public` and the user's own workspace answered in
+    0.0s, each of the ten worker and app services answered individually in
+    under a second, and this HTTP endpoint answered in 0.13s with the same
+    entries. So the hang is in the workspace-filtered RPC listing itself and
+    not in any service it would have returned.
+
+    This is the only call the driver made that hung, and it is the only RPC
+    dependency the run loop had left, so routing it over HTTP also removes
+    the last reason for the websocket to matter mid-run.
+    """
+    url = f"{HYPHA_BASE}/{WORKSPACE}/services"
+    async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
+        resp = await client.get(url, headers={"Authorization": f"Bearer {TOKEN}"})
+        if resp.status_code != 200:
+            # An empty list is what a workspace with no workers looks like, so
+            # a non-200 must not return one: the caller would read it as "no
+            # workers online" and the preflight would blame the fleet.
+            raise HTTPCallError(
+                f"HTTP {resp.status_code} listing services of {WORKSPACE}: "
+                f"{resp.text[:200]}")
+        return resp.json() or []
+
+
 async def discover_workers(server) -> Dict[str, Dict[str, Any]]:
     """Return {slug: {name, manager, family}} for every live Chiron worker.
 
@@ -257,8 +288,12 @@ async def discover_workers(server) -> Dict[str, Dict[str, Any]]:
     stockholm, stanford) and so returns nothing against a fleet that has since
     been renamed, which looks like "no workers online" rather than like a stale
     pattern.
+
+    `server` is still taken, and still has to be a live connection, because
+    the callers hold one and the artifact-manager proxy needs it. The listing
+    itself no longer goes through it: see `list_workspace_services`.
     """
-    svcs = await server.list_services({"workspace": WORKSPACE})
+    svcs = await list_workspace_services()
     # A worker and its manager share the client-id prefix; the manager appends
     # a suffix, so match on the prefix rather than on equality.
     workers: Dict[str, Tuple[str, str]] = {}   # client_id -> (slug, name)
