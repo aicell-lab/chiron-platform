@@ -593,7 +593,7 @@ async def rpc_keepalive(server, every_s: float = 120) -> None:
             # Not fatal here: the next real call reports the real failure with
             # the context of what it was doing. Logged so a reader can see the
             # connection was already gone before that call.
-            log(f"   keepalive failed: {str(exc)[:120]}")
+            log(f"   keepalive failed: {type(exc).__name__}: {str(exc)[:120]}")
 
 
 async def watch_training(orch_svc: str, *, num_rounds: int,
@@ -605,6 +605,7 @@ async def watch_training(orch_svc: str, *, num_rounds: int,
     exception to swallow.
     """
     last_state: Any = None
+    started = False
     final: Dict[str, Any] = {}
     deadline = time.time() + budget_s
     while time.time() < deadline:
@@ -612,7 +613,12 @@ async def watch_training(orch_svc: str, *, num_rounds: int,
         try:
             st = await hypha_post(orch_svc, "get_training_status", {}, timeout_s=20)
         except Exception as exc:
-            log(f"   status error: {str(exc)[:140]}")
+            # The type, not just the message. A timeout exception stringifies
+            # to the empty string, so `status error: ` on its own was the
+            # single most common line in a stalled run and said nothing about
+            # what had gone wrong. Measured on the scgpt-pretrain retry,
+            # 2026-11-13.
+            log(f"   status error: {type(exc).__name__}: {str(exc)[:140]}")
             continue
         if not isinstance(st, dict):
             continue
@@ -623,7 +629,17 @@ async def watch_training(orch_svc: str, *, num_rounds: int,
                 f"round={st.get('current_training_round')} "
                 f"running={st.get('is_running')}")
             last_state = state
-        if st.get("is_running") is False and st.get("current_training_round"):
+        # The exit condition is the True to False transition, not the round
+        # number. Guarding on a truthy `current_training_round` was meant to
+        # avoid exiting during the moment before round 1 begins, but round 0 is
+        # falsy, so a run that died BEFORE completing a round never satisfied
+        # it. Measured on the scgpt-pretrain retry, 2026-11-13: the
+        # orchestrator reported `round=0 running=True` at 806s and
+        # `round=0 running=False` at 1469s, and the driver went on polling a
+        # dead run for the rest of its 9000s budget instead of reporting it.
+        if st.get("is_running") is True:
+            started = True
+        elif started and st.get("is_running") is False:
             break
     return final
 
