@@ -495,6 +495,58 @@ async def remove_app(server, slug: str, app_id: str, kind: str, user_id: str) ->
 # Monitoring
 # ---------------------------------------------------------------------------
 
+async def still_deployed(server, trainer_apps: Dict[str, str],
+                         orch_slug: str, orch_app: Optional[str]) -> List[str]:
+    """Ask the workers which of this cell's apps are still there.
+
+    `remove_app` swallows its own failure so that one bad teardown does not
+    skip the rest, which means the log can say "teardown" and leave three apps
+    running. That happened: a closed websocket failed all three removals and
+    the run still finished. An app left behind holds GPU on a worker other
+    sessions share, so the claim has to be checked rather than assumed.
+    """
+    left: List[str] = []
+    for slug, app_id in list(trainer_apps.items()) + (
+            [(orch_slug, orch_app)] if orch_app else []):
+        try:
+            mid = await manager_for(server, slug)
+            info = await hypha_post(mid, "get_worker_info", {}, timeout_s=60)
+            present = set((info.get("trainers_status") or {})) | set(
+                (info.get("orchestrators_status") or {}))
+            if app_id in present:
+                left.append(f"{slug}:{app_id}")
+        except Exception as exc:
+            # Unknown is not gone. Say so rather than reporting a clean sweep.
+            left.append(f"{slug}:{app_id} (could not check: {str(exc)[:80]})")
+    return left
+
+
+async def rpc_keepalive(server, every_s: float = 120) -> None:
+    """Touch the websocket so the server does not close it mid-run.
+
+    Every call this driver makes to an app goes over HTTP, so between the last
+    deploy and the first teardown nothing uses the RPC connection. Measured
+    2026-11-13 on a 30-minute run: the server closed it with
+    `Idle timeout (600s)` during round 1's evaluation, and teardown then failed
+    on all three apps with `Connection is closed`, leaving two trainers and an
+    orchestrator deployed and holding GPU on two shared workers. Step 8's
+    artifact read failed the same way, so a finished run reported a failure
+    about a file that was never looked at.
+
+    Cancelled by the caller, so the normal end of this coroutine is a
+    CancelledError and not a return.
+    """
+    while True:
+        await asyncio.sleep(every_s)
+        try:
+            await server.echo("ping")
+        except Exception as exc:
+            # Not fatal here: the next real call reports the real failure with
+            # the context of what it was doing. Logged so a reader can see the
+            # connection was already gone before that call.
+            log(f"   keepalive failed: {str(exc)[:120]}")
+
+
 async def watch_training(orch_svc: str, *, num_rounds: int,
                          budget_s: float) -> Dict[str, Any]:
     """Poll training status until it stops running, and return the last status.
@@ -534,10 +586,16 @@ async def watch_training(orch_svc: str, *, num_rounds: int,
 async def artifact_files(artifact_id: str) -> List[str]:
     ws, alias = artifact_id.split("/", 1)
     url = f"{HYPHA_BASE}/{ws}/artifacts/{alias}/files/"
-    async with httpx.AsyncClient(timeout=30) as client:
+    # follow_redirects, because this endpoint answers 307 on some paths and
+    # httpx does not follow by default, which would come back as "no files".
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {TOKEN}"})
         if resp.status_code != 200:
-            return []
+            # An empty list is what an artifact with no files looks like, so a
+            # non-200 must not return one. The caller cannot tell them apart.
+            raise HTTPCallError(
+                f"HTTP {resp.status_code} listing files of {artifact_id}: "
+                f"{resp.text[:200]}")
         body = resp.json() or []
         return [f.get("name") for f in body if isinstance(f, dict)]
 
@@ -562,14 +620,30 @@ async def artifact_resolves(am, artifact_id: str, *, budget_s: float = 90) -> Di
     except Exception as exc:
         out["error"] = str(exc)[:300]
         return out
-    deadline = time.time() + budget_s
+    t0 = time.time()
+    deadline = t0 + budget_s
     while time.time() < deadline:
-        files = await artifact_files(artifact_id)
-        out["files"] = files
-        if "model.pth" in files:
+        try:
+            out["files"] = await artifact_files(artifact_id)
+        except Exception as exc:
+            # Keep polling: a listing that fails once is not an artifact
+            # without weights. If it never succeeds the error is what the
+            # caller reports, instead of an empty file list it would read as
+            # a finding about the checkpoint.
+            out["files_error"] = str(exc)[:300]
+            await asyncio.sleep(3)
+            continue
+        out.pop("files_error", None)
+        if "model.pth" in out["files"]:
             break
         await asyncio.sleep(3)
+    # How long it actually polled, so no message can claim a wait that did not
+    # happen. The first long run printed "after 90s" about a check that ran
+    # for none of it.
+    out["polled_s"] = time.time() - t0
     out["has_weights"] = "model.pth" in out["files"]
+    if out.get("files_error"):
+        out["error"] = out["files_error"]
     return out
 
 
@@ -705,7 +779,8 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
                    per_round_timeout: int, user_id: str, user_email: str,
                    app_token: str, user_workspace: str,
                    keep_apps: bool,
-                   limit_train_batches: Optional[int] = None) -> Dict[str, Any]:
+                   limit_train_batches: Optional[int] = None,
+                   limit_val_batches: Optional[int] = None) -> Dict[str, Any]:
     """Run one matrix cell and return its record."""
     record: Dict[str, Any] = {
         "cell": cfg["cell"],
@@ -720,6 +795,13 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
         # is 31,250 steps. Set, a round is that many batches and an epoch spans
         # many rounds, so the figure has to travel with any loss curve.
         "limit_train_batches": limit_train_batches,
+        # Same reasoning for validation, and it is the one that decides a
+        # run's wall clock. Measured 2026-11-13 on a 250,000-cell site: a
+        # fit capped at 10 batches took 21s and the uncapped evaluate after
+        # it ran for over ten minutes, so a loss curve's cost is set by this
+        # field and the val loss is over a different number of cells without
+        # it.
+        "limit_val_batches": limit_val_batches,
         "orchestrator_app_artifact": cfg["orchestrator_artifact"],
         "trainer_app_artifact": cfg["trainer_artifact"],
         "orchestrator_site": orch_slug,
@@ -738,6 +820,9 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
         "orchestrator_service_id": None,
         "trainer_apps": {},
         "trainer_service_ids": {},
+        # null means teardown never ran to the point of checking, [] means it
+        # checked and found nothing left. --keep-apps leaves it null on purpose.
+        "leaked_apps": None,
         "run_id": None,
         "run_artifact_id": None,
         "rounds_completed": None,
@@ -754,6 +839,7 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
     trainer_apps: Dict[str, str] = {}
     trainer_svcs: Dict[str, str] = {}
 
+    keepalive = asyncio.create_task(rpc_keepalive(server))
     try:
         log_step(f"{cfg['cell']} step 1 - orchestrator on {orch_slug}")
         orch_app, orch_svc = await deploy_orchestrator(
@@ -808,10 +894,13 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
         fit_config: Dict[str, Any] = {"batch_size": batch_size}
         if limit_train_batches is not None:
             fit_config["limit_train_batches"] = limit_train_batches
+        eval_config: Dict[str, Any] = {"batch_size": batch_size}
+        if limit_val_batches is not None:
+            eval_config["limit_val_batches"] = limit_val_batches
         start_kwargs: Dict[str, Any] = {
             "num_rounds": rounds,
             "fit_config": fit_config,
-            "eval_config": {"batch_size": batch_size},
+            "eval_config": eval_config,
             "per_round_timeout": per_round_timeout,
         }
         if cfg["initial_weights_artifact"]:
@@ -875,10 +964,21 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
             # that this id resolves, so a driver that cleaned it up would
             # publish a row pointing at nothing.
             record["checkpoint"] = await artifact_resolves(am, ckpt_id)
-            check(record["checkpoint"].get("has_weights") is True,
-                  f"checkpoint {ckpt_id} resolves with model.pth attached",
-                  f"checkpoint {ckpt_id} has no model.pth after 90s: "
-                  f"{record['checkpoint'].get('files')}")
+            ck = record["checkpoint"]
+            # Two failures, two causes. A read that never happened is not a
+            # checkpoint without weights: on the first long run this printed
+            # "has no model.pth" about an artifact that had a 3.1 MB model.pth,
+            # because the connection had closed before anything was looked at.
+            if ck.get("error"):
+                check(False, "", f"checkpoint {ckpt_id} was NOT checked: the "
+                                 f"read failed, so whether it has weights is "
+                                 f"unknown. {ck['error']}")
+            else:
+                check(ck.get("has_weights") is True,
+                      f"checkpoint {ckpt_id} resolves with model.pth attached",
+                      f"checkpoint {ckpt_id} was read, and after "
+                      f"{ck.get('polled_s', 0):.0f}s of polling its file list "
+                      f"still has no model.pth: {ck.get('files')}")
         except Exception as exc:
             check(False, "", f"save_global_weights failed: {str(exc)[:300]}")
 
@@ -920,6 +1020,14 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
                 await remove_app(server, slug, app_id, "trainer", user_id)
             if orch_app:
                 await remove_app(server, orch_slug, orch_app, "orchestrator", user_id)
+            # After teardown, not before: removing an app is the last thing
+            # that needs the connection.
+            left = await still_deployed(server, trainer_apps, orch_slug, orch_app)
+            check(not left, "every app this cell deployed is gone",
+                  f"still deployed after teardown, holding GPU on a shared "
+                  f"worker: {left}. Remove them before the next run.")
+            record["leaked_apps"] = left
+        keepalive.cancel()
 
     record["finished_at_unix"] = int(time.time())
     record["failures"] = list(FAILURES)
@@ -1164,6 +1272,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "at batch 8 is 31,250 steps. The value is recorded on "
                         "the run, because a loss curve cannot be read without "
                         "knowing what one round covered.")
+    p.add_argument("--limit-val-batches", type=int, default=None,
+                   help="cap each round's evaluation at this many batches per "
+                        "site. Measured on a 250,000-cell site: a fit capped "
+                        "at 10 batches took 21s and the uncapped evaluate "
+                        "after it ran for over ten minutes, so leaving this "
+                        "unset makes validation, not training, decide what a "
+                        "benchmark run costs.")
     p.add_argument("--out", default="outputs/benchmark-matrix",
                    help="directory for the per-cell JSON records")
     p.add_argument("--dry-run", action="store_true",
@@ -1236,6 +1351,7 @@ async def amain(args: argparse.Namespace) -> int:
             orch_slug=orch_slug, rounds=args.rounds, batch_size=args.batch_size,
             per_round_timeout=args.per_round_timeout,
             limit_train_batches=args.limit_train_batches,
+            limit_val_batches=args.limit_val_batches,
             user_id=user_id, user_email=user_email, app_token=TOKEN,
             user_workspace=user_workspace, keep_apps=args.keep_apps)
 
