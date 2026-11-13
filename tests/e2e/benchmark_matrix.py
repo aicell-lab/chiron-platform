@@ -360,9 +360,42 @@ def _service_id_from_status(entry: Any) -> Optional[str]:
     return None
 
 
+# A read-only method per kind, used only to ask whether the service answers
+# yet. Both are already called elsewhere in this driver, so neither adds a
+# method the apps are not expected to have.
+_READY_PROBE = {"orchestrator": "get_training_status", "trainer": "get_shared_keys"}
+
+
+async def service_answers(svc: str, kind: str, *, budget_s: float = 120) -> float:
+    """Wait until a service actually answers a call, and return how long it took.
+
+    RUNNING is not callable. Measured 2026-11-13 on europa-2: a trainer that
+    the worker reported RUNNING went on returning HTTP 404 'Service not found'
+    for 21 seconds, and the wildcard `*:<svc>` form failed and then succeeded
+    at exactly the same moments as the pinned `<client_id>:<svc>` form, so this
+    is a registration delay and not the pinned-lookup defect. Returns -1 if the
+    budget runs out, which the caller must treat as a failure rather than as a
+    service that is merely slow.
+    """
+    method = _READY_PROBE[kind]
+    t0 = time.time()
+    while time.time() - t0 < budget_s:
+        try:
+            await hypha_post(svc, method, {}, timeout_s=20)
+            return time.time() - t0
+        except Exception:
+            await asyncio.sleep(3)
+    return -1.0
+
+
 async def wait_for_app(server, slug: str, app_id: str, kind: str,
                        timeout_s: float = 300) -> Optional[str]:
-    """Poll until an orchestrator or trainer app reaches RUNNING."""
+    """Poll until an orchestrator or trainer app reaches RUNNING and answers.
+
+    Returning on RUNNING alone hands back a service id that 404s for up to
+    half a minute, which the next step reads as a broken app. So the wait ends
+    only once the service has answered a read-only call.
+    """
     status_key = "orchestrators_status" if kind == "orchestrator" else "trainers_status"
     deadline = time.time() + timeout_s
     last = None
@@ -381,6 +414,13 @@ async def wait_for_app(server, slug: str, app_id: str, kind: str,
         if state == "RUNNING":
             svc = _service_id_from_status(entry)
             if svc:
+                waited = await service_answers(svc, kind)
+                if waited < 0:
+                    log(f"   {slug} {kind} {app_id} is RUNNING but its service "
+                        f"{svc} never answered {_READY_PROBE[kind]}")
+                    return None
+                log(f"   {slug} {kind} {app_id} service answered after "
+                    f"{waited:.1f}s of registration delay")
                 return svc
         if state in ("FAILED", "ERROR"):
             return None
@@ -400,7 +440,7 @@ async def deploy_orchestrator(server, slug: str, *, trainer_artifact: str,
     log(f"   orchestrator app_id = {app_id} (on {slug})")
     svc = await wait_for_app(server, slug, app_id, "orchestrator")
     if not svc:
-        raise RuntimeError(f"orchestrator {app_id} on {slug} did not reach RUNNING")
+        raise RuntimeError(f"orchestrator {app_id} on {slug} did not become callable: it either never reached RUNNING or its service never answered. The log above says which.")
     return app_id, svc
 
 
@@ -433,7 +473,7 @@ async def deploy_trainer(server, slug: str, dataset: str, *, trainer_artifact: s
     log(f"   trainer app_id = {app_id} (on {slug}, dataset={dataset})")
     svc = await wait_for_app(server, slug, app_id, "trainer")
     if not svc:
-        raise RuntimeError(f"trainer {app_id} on {slug} did not reach RUNNING")
+        raise RuntimeError(f"trainer {app_id} on {slug} did not become callable: it either never reached RUNNING or its service never answered. The log above says which.")
     return app_id, svc
 
 
@@ -664,7 +704,8 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
                    orch_slug: str, rounds: int, batch_size: int,
                    per_round_timeout: int, user_id: str, user_email: str,
                    app_token: str, user_workspace: str,
-                   keep_apps: bool) -> Dict[str, Any]:
+                   keep_apps: bool,
+                   limit_train_batches: Optional[int] = None) -> Dict[str, Any]:
     """Run one matrix cell and return its record."""
     record: Dict[str, Any] = {
         "cell": cfg["cell"],
@@ -674,6 +715,11 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
         "initial_weights_is_null_by_definition": cfg["mode"] == "pretrain",
         "requested_rounds": rounds,
         "batch_size": batch_size,
+        # Recorded because it decides what a round means. Unset, a round is a
+        # whole epoch over the site's data, which at 250,000 cells and batch 8
+        # is 31,250 steps. Set, a round is that many batches and an epoch spans
+        # many rounds, so the figure has to travel with any loss curve.
+        "limit_train_batches": limit_train_batches,
         "orchestrator_app_artifact": cfg["orchestrator_artifact"],
         "trainer_app_artifact": cfg["trainer_artifact"],
         "orchestrator_site": orch_slug,
@@ -684,6 +730,14 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
         "started_at_unix": int(time.time()),
         # Filled in below; absent values stay null so a reader can tell a
         # measurement that did not happen from one that came back empty.
+        # Written as soon as each app is up, not at the end, so a run that
+        # fails mid-way leaves a record naming what it deployed. Without them
+        # a failure at step 3 produced a record that said only "uncaught
+        # exception" and nothing about which app had not answered.
+        "orchestrator_app": None,
+        "orchestrator_service_id": None,
+        "trainer_apps": {},
+        "trainer_service_ids": {},
         "run_id": None,
         "run_artifact_id": None,
         "rounds_completed": None,
@@ -705,6 +759,8 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
         orch_app, orch_svc = await deploy_orchestrator(
             server, orch_slug, trainer_artifact=cfg["trainer_artifact"],
             app_token=app_token, user_id=user_id, user_email=user_email)
+        record["orchestrator_app"] = orch_app
+        record["orchestrator_service_id"] = orch_svc
 
         log_step(f"{cfg['cell']} step 2 - trainers on {', '.join(sites)}")
         for slug, dataset in sites.items():
@@ -716,6 +772,8 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
                 batch_size=batch_size)
             trainer_apps[slug] = app_id
             trainer_svcs[slug] = svc
+            record["trainer_apps"][slug] = app_id
+            record["trainer_service_ids"][slug] = svc
 
         log_step(f"{cfg['cell']} step 3 - shared weight scope")
         scope: Dict[str, Any] = {"per_site": {}}
@@ -747,9 +805,12 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
 
         log_step(f"{cfg['cell']} step 5 - start_training "
                  f"(rounds={rounds}, initial_weights={cfg['initial_weights_artifact']})")
+        fit_config: Dict[str, Any] = {"batch_size": batch_size}
+        if limit_train_batches is not None:
+            fit_config["limit_train_batches"] = limit_train_batches
         start_kwargs: Dict[str, Any] = {
             "num_rounds": rounds,
-            "fit_config": {"batch_size": batch_size},
+            "fit_config": fit_config,
             "eval_config": {"batch_size": batch_size},
             "per_round_timeout": per_round_timeout,
         }
@@ -1097,6 +1158,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
     p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     p.add_argument("--per-round-timeout", type=int, default=DEFAULT_PER_ROUND_TIMEOUT)
+    p.add_argument("--limit-train-batches", type=int, default=None,
+                   help="cap a round at this many batches per site. Unset, a "
+                        "round is a whole epoch, which on a 250,000-cell site "
+                        "at batch 8 is 31,250 steps. The value is recorded on "
+                        "the run, because a loss curve cannot be read without "
+                        "knowing what one round covered.")
     p.add_argument("--out", default="outputs/benchmark-matrix",
                    help="directory for the per-cell JSON records")
     p.add_argument("--dry-run", action="store_true",
@@ -1168,6 +1235,7 @@ async def amain(args: argparse.Namespace) -> int:
             server, am, cfg, sites,
             orch_slug=orch_slug, rounds=args.rounds, batch_size=args.batch_size,
             per_round_timeout=args.per_round_timeout,
+            limit_train_batches=args.limit_train_batches,
             user_id=user_id, user_email=user_email, app_token=TOKEN,
             user_workspace=user_workspace, keep_apps=args.keep_apps)
 
