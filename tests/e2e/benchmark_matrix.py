@@ -84,7 +84,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 from hypha_rpc import connect_to_server
@@ -128,6 +128,16 @@ DEFAULT_BATCH_SIZE = 8
 # seconds, and a timeout shorter than a round turns a slow site into a failed
 # run.
 DEFAULT_PER_ROUND_TIMEOUT = 1800
+# How long an app may take to reach RUNNING and answer. Families differ by an
+# order of magnitude because a BioEngine `@bioengine.smoke_test` runs a real
+# one-step fit before the app is declared ready. Measured on the bench pair,
+# 2026-11-13, from `create_trainer` to RUNNING: tabula 33s, scgpt 330s. At the
+# old 300s budget the scgpt trainer was abandoned 28s before it came up. A
+# generous budget costs nothing when the deploy is healthy, because the wait
+# returns immediately on FAILED or ERROR rather than sitting out the clock.
+# Geneformer is not measured yet, so this leaves room above the worst case
+# rather than fitting it.
+DEFAULT_DEPLOY_TIMEOUT = 900
 
 def repo_root() -> Path:
     """The repository root, when this file is sitting in it.
@@ -424,7 +434,7 @@ async def service_answers(svc: str, kind: str, *, budget_s: float = 120) -> floa
 
 
 async def wait_for_app(server, slug: str, app_id: str, kind: str,
-                       timeout_s: float = 300) -> Optional[str]:
+                       timeout_s: float = DEFAULT_DEPLOY_TIMEOUT) -> Optional[str]:
     """Poll until an orchestrator or trainer app reaches RUNNING and answers.
 
     Returning on RUNNING alone hands back a service id that 404s for up to
@@ -464,7 +474,8 @@ async def wait_for_app(server, slug: str, app_id: str, kind: str,
 
 async def deploy_orchestrator(server, slug: str, *, trainer_artifact: str,
                               app_token: str, user_id: str,
-                              user_email: str) -> Tuple[str, str]:
+                              user_email: str,
+                              on_submitted: Callable[[str], None]) -> Tuple[str, str]:
     mid = await manager_for(server, slug)
     app_id = await hypha_post(mid, "create_orchestrator", {
         "token": app_token,
@@ -473,6 +484,7 @@ async def deploy_orchestrator(server, slug: str, *, trainer_artifact: str,
         "owner_email": user_email,
     })
     log(f"   orchestrator app_id = {app_id} (on {slug})")
+    on_submitted(app_id)
     svc = await wait_for_app(server, slug, app_id, "orchestrator")
     if not svc:
         raise RuntimeError(f"orchestrator {app_id} on {slug} did not become callable: it either never reached RUNNING or its service never answered. The log above says which.")
@@ -482,7 +494,8 @@ async def deploy_orchestrator(server, slug: str, *, trainer_artifact: str,
 async def deploy_trainer(server, slug: str, dataset: str, *, trainer_artifact: str,
                          initial_artifact: Optional[str], app_token: str,
                          user_id: str, user_email: str,
-                         batch_size: int) -> Tuple[str, str]:
+                         batch_size: int,
+                         on_submitted: Callable[[str], None]) -> Tuple[str, str]:
     mid = await manager_for(server, slug)
     kwargs: Dict[str, Any] = {
         "token": app_token,
@@ -506,6 +519,7 @@ async def deploy_trainer(server, slug: str, dataset: str, *, trainer_artifact: s
         }
     app_id = await hypha_post(mid, "create_trainer", kwargs)
     log(f"   trainer app_id = {app_id} (on {slug}, dataset={dataset})")
+    on_submitted(app_id)
     svc = await wait_for_app(server, slug, app_id, "trainer")
     if not svc:
         raise RuntimeError(f"trainer {app_id} on {slug} did not become callable: it either never reached RUNNING or its service never answered. The log above says which.")
@@ -877,9 +891,24 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
     keepalive = asyncio.create_task(rpc_keepalive(server))
     try:
         log_step(f"{cfg['cell']} step 1 - orchestrator on {orch_slug}")
+
+        # Teardown has to own an app from the moment it EXISTS, not from the
+        # moment it works. Measured on the scgpt-pretrain cell, 2026-11-13: the
+        # trainer was submitted, the driver gave up waiting 28s before it came
+        # up, and because the app id was only recorded on success, teardown
+        # removed the orchestrator, checked the two apps it knew about, and
+        # printed "every app this cell deployed is gone" while
+        # `small-leaf-7604` was still holding a GPU on the worker. The check
+        # was green about a set that excluded the leak.
+        def _claim_orch(app_id: str) -> None:
+            nonlocal orch_app
+            orch_app = app_id
+            record["orchestrator_app"] = app_id
+
         orch_app, orch_svc = await deploy_orchestrator(
             server, orch_slug, trainer_artifact=cfg["trainer_artifact"],
-            app_token=app_token, user_id=user_id, user_email=user_email)
+            app_token=app_token, user_id=user_id, user_email=user_email,
+            on_submitted=_claim_orch)
         record["orchestrator_app"] = orch_app
         record["orchestrator_service_id"] = orch_svc
 
@@ -890,7 +919,8 @@ async def run_cell(server, am, cfg: Dict[str, Any], sites: Dict[str, str], *,
                 trainer_artifact=cfg["trainer_artifact"],
                 initial_artifact=None,
                 app_token=app_token, user_id=user_id, user_email=user_email,
-                batch_size=batch_size)
+                batch_size=batch_size,
+                on_submitted=lambda aid, s=slug: trainer_apps.__setitem__(s, aid))
             trainer_apps[slug] = app_id
             trainer_svcs[slug] = svc
             record["trainer_apps"][slug] = app_id
